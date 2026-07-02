@@ -1,6 +1,6 @@
-# Generic Dependency Checker (`check_deps.py`)
+# Kevlar CheckDeps (`kevlar.py`)
 
-A powerful, fast, and self-contained command-line utility written in Python to scan project dependencies. It identifies **outdated versions**, **deprecation notices** (yanked packages), and **security vulnerabilities** by querying package registries (npm/PyPI/NuGet/Packagist/Maven Central) and the Google OSV (Open Source Vulnerabilities) database.
+A powerful, fast, and self-contained command-line utility written in Python to scan project dependencies. It identifies **outdated versions**, **deprecation notices** (yanked packages), and **security vulnerabilities** by querying package registries (npm/PyPI/NuGet/Packagist/Maven Central/Go Proxy) and the Google OSV (Open Source Vulnerabilities) database.
 
 Designed with a modular and extensible architecture, it supports checking direct and transitive dependencies and requires **zero external python package installations**.
 
@@ -36,7 +36,7 @@ Designed with a modular and extensible architecture, it supports checking direct
 
 To start, simply download/clone the workspace and run the script:
 ```powershell
-python check_deps.py --help
+python kevlar.py --help
 ```
 
 ---
@@ -47,48 +47,48 @@ python check_deps.py --help
 Specify the target ecosystem via `--tech` (or `-t`) and the directory via `--path` (or `-p`):
 - **For Node.js (npm)**:
   ```powershell
-  python check_deps.py --tech npm --path ./nodejs_project
+  python kevlar.py --tech npm --path ./nodejs_project
   ```
 - **For Python (pip)**:
   ```powershell
-  python check_deps.py --tech pip --path ./python_project
+  python kevlar.py --tech pip --path ./python_project
   ```
 - **For .NET (nuget)**:
   ```powershell
-  python check_deps.py --tech nuget --path ./dotnet_project
+  python kevlar.py --tech nuget --path ./dotnet_project
   ```
 - **For PHP (php)**:
   ```powershell
-  python check_deps.py --tech php --path ./php_project
+  python kevlar.py --tech php --path ./php_project
   ```
 - **For Java (maven)**:
   ```powershell
-  python check_deps.py --tech maven --path ./java_project
+  python kevlar.py --tech maven --path ./java_project
   ```
 - **For Go (go)**:
   ```powershell
-  python check_deps.py --tech go --path ./go_project
+  python kevlar.py --tech go --path ./go_project
   ```
 
 ### 2. Scan Security Vulnerabilities
 Add the `--vuls` (or `-v`) flag to audit packages against Google's OSV database:
 ```powershell
-python check_deps.py --tech nuget --path ./dotnet_project --vuls
+python kevlar.py --tech nuget --path ./dotnet_project --vuls
 ```
 
 ### 3. Scan All Dependencies (Direct + Transitive)
 Add the `--all` (or `-a`) flag to scan the entire tree resolved in lockfiles/assets:
 - **For Node.js (npm)**:
   ```powershell
-  python check_deps.py --tech npm --path ./nodejs_project --all --vuls
+  python kevlar.py --tech npm --path ./nodejs_project --all --vuls
   ```
 - **For .NET (nuget)**:
   ```powershell
-  python check_deps.py --tech nuget --path ./dotnet_project --all --vuls
+  python kevlar.py --tech nuget --path ./dotnet_project --all --vuls
   ```
 - **For PHP (php)**:
   ```powershell
-  python check_deps.py --tech php --path ./php_project --all --vuls
+  python kevlar.py --tech php --path ./php_project --all --vuls
   ```
 *(For pip, if your `requirements.txt` contains transitive comments from `pip-compile`, the script will automatically parse and display parent tracing details).*
 *(For Java / Maven, if you point the path to a parent POM, the script will automatically discover and aggregate all sub-modules recursively).*
@@ -96,13 +96,13 @@ Add the `--all` (or `-a`) flag to scan the entire tree resolved in lockfiles/ass
 ### 4. Export Report Files
 Output findings into structured Markdown (`.md`) or raw JSON (`.json`) files using `--output` (or `-o`):
 ```powershell
-python check_deps.py --tech nuget --path ./dotnet_project --vuls --output dependency_report.md
+python kevlar.py --tech nuget --path ./dotnet_project --vuls --output dependency_report.md
 ```
 
 ### 5. Show Up-to-Date Packages
 By default, the tool only shows packages that have issues (outdated, deprecated, vulnerable, or errored). Use `--show-all` to list all packages:
 ```powershell
-python check_deps.py --tech nuget --path ./dotnet_project --show-all
+python kevlar.py --tech nuget --path ./dotnet_project --show-all
 ```
 
 ---
@@ -111,8 +111,8 @@ python check_deps.py --tech nuget --path ./dotnet_project --show-all
 
 | Argument | Short | Default | Description |
 | --- | --- | --- | --- |
-| `--tech` | `-t` | *Required* | The package manager / technology to check. Choices: `npm`, `pip`, `nuget`, `php`, `maven`. |
-| `--path` | `-p` | `.` | Directory containing the package files (e.g. `.csproj`, `composer.json`, `package.json`, `pom.xml`, or `requirements.txt`). |
+| `--tech` | `-t` | *Required* | The package manager / technology to check. Choices: `npm`, `pip`, `nuget`, `php`, `maven`, `go`. |
+| `--path` | `-p` | `.` | Directory containing the package files (e.g. `.csproj`, `composer.json`, `package.json`, `pom.xml`, `go.mod`, or `requirements.txt`). |
 | `--vuls` | `-v` | `False` | Enable security vulnerability queries via Google OSV API. |
 | `--all` | `-a` | `False` | Scan all dependencies resolved in lockfile, rather than direct ones. |
 | `--concurrent` | `-c` | `10` | Number of concurrent network request threads to run. |
@@ -131,18 +131,18 @@ For security auditing, you can use the `--fail-on-vulns` flag to automatically e
 1. **Fail on Any Vulnerability**:
    Passing the argument without values defaults to failing if there is at least one vulnerability:
    ```powershell
-   python check_deps.py --tech pip --path ./project --vuls --fail-on-vulns
+   python kevlar.py --tech pip --path ./project --vuls --fail-on-vulns
    ```
 
 2. **Custom Severity Thresholds (OR Logic)**:
    Specify the exact severity limits as a comma-separated list of `severity:limit`. The build breaks if **any** limit is breached:
    - Break if there are **at least 2 critical** vulnerabilities:
      ```powershell
-     python check_deps.py --tech pip --path ./project --vuls --fail-on-vulns "critical:2"
+     python kevlar.py --tech pip --path ./project --vuls --fail-on-vulns "critical:2"
      ```
    - Break if there are **at least 2 critical OR 4 high** vulnerabilities:
      ```powershell
-     python check_deps.py --tech pip --path ./project --vuls --fail-on-vulns "critical:2,high:4"
+     python kevlar.py --tech pip --path ./project --vuls --fail-on-vulns "critical:2,high:4"
      ```
 
 Valid severity identifiers: `critical`, `high`, `medium`, `low`, `unknown`. (CVSS vector strings are parsed dynamically to extract their scores and map to these levels: Critical $\ge 9.0$, High $\ge 7.0$, Medium $\ge 4.0$, Low $\ge 0.1$).
@@ -174,7 +174,7 @@ jobs:
 
       - name: Run Dependency Checker
         run: |
-          python check_deps.py --tech npm --path ./ --vuls --fail-on-vulns "critical:1,high:3" --output report.json
+          python kevlar.py --tech npm --path ./ --vuls --fail-on-vulns "critical:1,high:3" --output report.json
 
       - name: Upload Scan Report
         uses: actions/upload-artifact@v4
@@ -195,7 +195,7 @@ dependency_scan:
   image: python:3.10-slim
   script:
     # Run audit, failing if there is at least 1 critical or 3 high vulnerabilities
-    - python check_deps.py --tech nuget --path ./ --all --vuls --fail-on-vulns "critical:1,high:3" --output report.json
+    - python kevlar.py --tech nuget --path ./ --all --vuls --fail-on-vulns "critical:1,high:3" --output report.json
   artifacts:
     name: "dependency-audit-report"
     expose_as: "Dependency Audit Report"
@@ -208,6 +208,14 @@ dependency_scan:
 
 ## Design Considerations & Behavior
 
-1. **Lockfile Fallback**: If a lockfile or exact version constraints (`==`) are missing, the script extracts the version range declared and compares the minimum possible version against registries. For precise scans, it is highly recommended to have lockfiles/exact versions pinned.
-2. **Network Connection**: An active internet connection is required to fetch package definitions from registry hosts (npm/PyPI/NuGet) and vulnerabilities from `https://api.osv.dev`.
-3. **Graceful Error Handling**: If a package is not found in the registry (e.g., private package) or a network request fails, the script registers a status `Error` and continues scanning the rest of the list without stopping.
+### 1. Performance Optimizations
+- **Concurrency**: Registry queries for package metadata are executed concurrently using Python's `concurrent.futures.ThreadPoolExecutor`. By default, it runs with `10` threads, which can be tuned using `--concurrent`.
+- **Abbreviated npm Metadata**: Queries to the npm registry request abbreviated package metadata format (`application/vnd.npm.install-v1+json`), reducing HTTP response payload size by over 95%.
+- **Vulnerability Query Batching**: Queries to the Google OSV API are executed in single large POST batches (`/v1/querybatch`) up to 1000 packages per request, preventing multiple slow individual API roundtrips.
+
+### 2. Version Comparison Logic
+To correctly flag outdated packages, the tool runs a custom Semantic Versioning parser that supports:
+- Up to 4 version segment digits (e.g. `1.2.3.4`).
+- Classification of updates into `Major` (breaking changes), `Minor` (new backward-compatible features), and `Patch` (bug fixes).
+- Auto-ignoring pre-release version metadata during update classifications.
+- Exact mapping of C# and VB.NET central package dependencies when CPM version tags are inherited.

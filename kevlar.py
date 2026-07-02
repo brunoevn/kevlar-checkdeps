@@ -2603,11 +2603,11 @@ def check_pipeline_failure(results, fail_config):
 
 def print_banner():
     banner = f"""{COLOR_BOLD}{COLOR_CYAN}
-  ____   ____    _    
- / ___| / ___|  / \\   
- \\___ \\| |     / _ \\  
-  ___) | |___ / ___ \\ 
- |____/ \\____/_/   \\_\\  {COLOR_GRAY}By Bruno Nielsen{COLOR_RESET}
+ _  __ _____ __     __ _        _    ____  
+| |/ /| ____|\\ \\   / /| |      / \\  |  _ \\ 
+| ' / |  _|   \\ \\ / / | |     / _ \\ | |_) |
+| . \\ | |___   \\ V /  | |___ / ___ \\|  _ < 
+|_|\\_\\|_____|   \\_/   |_____/_/   \\_\\_| \\_\\  {COLOR_GRAY}By Bruno Nielsen{COLOR_RESET}
 """
     print(banner)
 
@@ -2616,13 +2616,13 @@ def main():
     print_banner()
     
     parser = argparse.ArgumentParser(
-        description="Generic Dependency Checker Utility",
+        description="Kevlar CheckDeps: Generic Dependency Checker & SCA Tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python check_deps.py --tech npm --path ./Backend
-  python check_deps.py --tech npm --path ./Frontend --all --show-all
-  python check_deps.py --tech npm --output report.json
+  python kevlar.py --tech npm --path ./Backend
+  python kevlar.py --tech npm --path ./Frontend --all --show-all
+  python kevlar.py --tech npm --output report.json
         """
     )
     
