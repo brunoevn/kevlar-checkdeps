@@ -131,7 +131,7 @@ Valid severity identifiers: `critical`, `high`, `medium`, `low`, `unknown`. (CVS
 ### Pipeline Examples
 
 #### 1. GitHub Actions (`.github/workflows/dependency-scan.yml`)
-You can run the script and publish a formatted summary table directly to the run page:
+You can run the script and publish a JSON report as a build artifact:
 ```yaml
 name: Dependency Vulnerability Audit
 
@@ -155,18 +155,18 @@ jobs:
 
       - name: Run Dependency Checker
         run: |
-          python check_deps.py --tech npm --path ./ --vuls --fail-on-vulns "critical:1,high:3" --output report.md
+          python check_deps.py --tech npm --path ./ --vuls --fail-on-vulns "critical:1,high:3" --output report.json
 
-      - name: Publish Action Run Summary
+      - name: Upload Scan Report
+        uses: actions/upload-artifact@v4
         if: always()
-        run: |
-          if [ -f report.md ]; then
-            cat report.md >> $GITHUB_STEP_SUMMARY
-          fi
+        with:
+          name: dependency-audit-report
+          path: report.json
 ```
 
 #### 2. GitLab CI (`.gitlab-ci.yml`)
-Run the scanner in a Python environment, export the Markdown/JSON files, and upload them as job artifacts:
+Run the scanner in a Python environment, export the JSON report, and upload it as a job artifact:
 ```yaml
 stages:
   - test
@@ -176,13 +176,13 @@ dependency_scan:
   image: python:3.10-slim
   script:
     # Run audit, failing if there is at least 1 critical or 3 high vulnerabilities
-    - python check_deps.py --tech nuget --path ./ --all --vuls --fail-on-vulns "critical:1,high:3" --output report.md
+    - python check_deps.py --tech nuget --path ./ --all --vuls --fail-on-vulns "critical:1,high:3" --output report.json
   artifacts:
     name: "dependency-audit-report"
     expose_as: "Dependency Audit Report"
     when: always
     paths:
-      - report.md
+      - report.json
 ```
 
 ---
