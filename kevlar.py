@@ -20,6 +20,8 @@ import time
 from datetime import datetime
 import xml.etree.ElementTree as ET
 
+VERSION = "1.0"
+
 # ANSI escape codes for styling (HSL/Curated Theme)
 COLOR_RESET = "\033[0m"
 COLOR_BOLD = "\033[1m"
@@ -2607,12 +2609,18 @@ def print_banner():
 | |/ /| ____|\\ \\   / /| |      / \\  |  _ \\ 
 | ' / |  _|   \\ \\ / / | |     / _ \\ | |_) |
 | . \\ | |___   \\ V /  | |___ / ___ \\|  _ < 
-|_|\\_\\|_____|   \\_/   |_____/_/   \\_\\_| \\_\\  {COLOR_GRAY}By Bruno Nielsen{COLOR_RESET}
+|_|\\_\\|_____|   \\_/   |_____/_/   \\_\\_| \\_\\  v{VERSION}  {COLOR_GRAY}By Bruno Nielsen{COLOR_RESET}
 """
     print(banner)
 
 def main():
     init_colors_and_encoding()
+    
+    # Check for version flags first to avoid printing banner
+    if "--version" in sys.argv or "-V" in sys.argv:
+        print(f"kevlar CheckDeps v{VERSION}")
+        sys.exit(0)
+        
     print_banner()
     
     parser = argparse.ArgumentParser(
@@ -2626,6 +2634,12 @@ Examples:
         """
     )
     
+    parser.add_argument(
+        "--version", "-V",
+        action="version",
+        version=f"kevlar CheckDeps v{VERSION}",
+        help="Show program's version number and exit."
+    )
     parser.add_argument(
         "--tech", "-t",
         required=True,
