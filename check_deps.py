@@ -842,34 +842,105 @@ def run_pip_checker(args):
 # NuGet Checker Logic
 # ==============================================================================
 
+def find_and_parse_cpm_versions(start_path):
+    """Walks up from start_path looking for Directory.Packages.props and parses central versions."""
+    current = os.path.abspath(start_path)
+    if os.path.isfile(current):
+        current = os.path.dirname(current)
+        
+    while True:
+        cpm_file = os.path.join(current, "Directory.Packages.props")
+        if os.path.exists(cpm_file):
+            try:
+                tree = ET.parse(cpm_file)
+                root = tree.getroot()
+                cpm_versions = {}
+                for elem in root.iter():
+                    tag_local = elem.tag.split("}")[-1]
+                    if tag_local == "PackageVersion":
+                        pkg_include = elem.get("Include") or elem.get("Update")
+                        version = elem.get("Version")
+                        if not version:
+                            ver_elem = elem.find("Version")
+                            if ver_elem is not None:
+                                version = ver_elem.text
+                        if pkg_include and version:
+                            cpm_versions[pkg_include] = version
+                return cpm_versions
+            except Exception as e:
+                print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Directory.Packages.props: {e}{COLOR_RESET}")
+                
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+        
+    return {}
+
+def parse_sln_file(sln_path):
+    """Parses a .sln file to retrieve relative paths to all project files."""
+    project_paths = []
+    try:
+        with open(sln_path, "r", encoding="utf-8-sig") as f:
+            content = f.read()
+            
+        proj_re = re.compile(r'Project\([^)]+\)\s*=\s*"[^"]+"\s*,\s*"([^"]+)"')
+        matches = proj_re.findall(content)
+        sln_dir = os.path.dirname(os.path.abspath(sln_path))
+        
+        for m in matches:
+            norm_path = m.replace("\\", "/")
+            if norm_path.endswith((".csproj", ".vbproj", ".fsproj")):
+                full_path = os.path.join(sln_dir, norm_path)
+                if os.path.exists(full_path):
+                    project_paths.append(full_path)
+    except Exception as e:
+        print(f"{COLOR_YELLOW}{ICON_WARN} Warning reading .sln file: {e}{COLOR_RESET}")
+        
+    return project_paths
+
 def find_nuget_files(path):
-    """Finds MSBuild project files (.csproj, .vbproj, .fsproj, packages.config) and project.assets.json."""
-    manifest = None
-    assets_file = None
+    """Finds Solution file (.sln), MSBuild project files, and assets files."""
+    sln_file = None
+    manifests = []
+    assets_files = []
     
-    if os.path.exists(path):
-        if os.path.isdir(path):
-            files = os.listdir(path)
+    abs_path = os.path.abspath(path)
+    if os.path.isfile(abs_path):
+        if abs_path.endswith(".sln"):
+            sln_file = abs_path
+        elif abs_path.endswith((".csproj", ".vbproj", ".fsproj")) or abs_path.endswith("packages.config"):
+            manifests = [abs_path]
+    elif os.path.isdir(abs_path):
+        sln_candidates = [os.path.join(abs_path, f) for f in os.listdir(abs_path) if f.endswith(".sln")]
+        if sln_candidates:
+            sln_file = sln_candidates[0]
+        else:
+            files = os.listdir(abs_path)
             for f in files:
                 if f.endswith((".csproj", ".vbproj", ".fsproj")) or f == "packages.config":
-                    manifest = os.path.join(path, f)
+                    manifests = [os.path.join(abs_path, f)]
                     break
-        elif os.path.isfile(path) and (path.endswith((".csproj", ".vbproj", ".fsproj")) or path.endswith(".config")):
-            manifest = path
-            
-    # Search for project.assets.json under obj/
-    proj_dir = path if os.path.isdir(path) else os.path.dirname(path)
-    obj_dir = os.path.join(proj_dir, "obj")
-    potential_assets = os.path.join(obj_dir, "project.assets.json")
-    if os.path.exists(potential_assets):
-        assets_file = potential_assets
+                    
+    if sln_file:
+        print(f"{COLOR_GRAY}{ICON_INFO} Solution file detected: {os.path.basename(sln_file)}{COLOR_RESET}")
+        manifests = parse_sln_file(sln_file)
         
-    return manifest, assets_file
+    for manifest in manifests:
+        proj_dir = os.path.dirname(manifest)
+        obj_dir = os.path.join(proj_dir, "obj")
+        assets = os.path.join(obj_dir, "project.assets.json")
+        if os.path.exists(assets):
+            assets_files.append(assets)
+            
+    return manifests, assets_files
 
-def parse_csproj_or_config(path):
+def parse_csproj_or_config(path, cpm_versions=None):
     """Finds and parses MSBuild project files (.csproj, .vbproj, .fsproj) or packages.config files in a directory."""
     dependencies = {}
-    
+    if cpm_versions is None:
+        cpm_versions = find_and_parse_cpm_versions(path)
+        
     config_file = os.path.join(path, "packages.config")
     if os.path.exists(config_file):
         try:
@@ -903,7 +974,8 @@ def parse_csproj_or_config(path):
                             version = ver_elem.text
                             
                     if pkg_include:
-                        dependencies[pkg_include] = version or "*"
+                        ver = version or cpm_versions.get(pkg_include) or "*"
+                        dependencies[pkg_include] = ver
                         
             return dependencies
     except Exception as e:
@@ -1076,23 +1148,33 @@ def check_all_nuget_targets(targets, max_workers):
 
 def run_nuget_checker(args):
     """Main orchestrator for NuGet checker."""
-    manifest, assets_file = find_nuget_files(args.path)
+    manifests, assets_files = find_nuget_files(args.path)
     
-    if not manifest and not assets_file:
-        print(f"{COLOR_RED}{ICON_ERROR} No C# project file (.csproj, packages.config) or project.assets.json found in: {args.path}{COLOR_RESET}")
+    if not manifests and not assets_files:
+        print(f"{COLOR_RED}{ICON_ERROR} No C# / VB.NET project files or project.assets.json found in: {args.path}{COLOR_RESET}")
         return None, None, 0
         
     pkg_data = {}
-    if manifest:
-        print(f"{COLOR_GRAY}{ICON_INFO} Reading C# project references...{COLOR_RESET}")
-        pkg_dir = args.path if os.path.isdir(args.path) else os.path.dirname(args.path)
-        pkg_data = parse_csproj_or_config(pkg_dir)
+    print(f"{COLOR_GRAY}{ICON_INFO} Reading C# / VB.NET project references...{COLOR_RESET}")
+    for manifest in manifests:
+        proj_dir = os.path.dirname(manifest)
+        cpm_versions = find_and_parse_cpm_versions(proj_dir)
+        proj_deps = parse_csproj_or_config(proj_dir, cpm_versions)
+        pkg_data.update(proj_deps)
         
     lock_data = {}
     parents_data = {}
-    if assets_file:
-        print(f"{COLOR_GRAY}{ICON_INFO} Reading project.assets.json...{COLOR_RESET}")
-        lock_data, parents_data = parse_project_assets(assets_file)
+    if assets_files:
+        print(f"{COLOR_GRAY}{ICON_INFO} Reading project.assets.json files...{COLOR_RESET}")
+        for assets_file in assets_files:
+            proj_lock, proj_parents = parse_project_assets(assets_file)
+            for k, v_list in proj_lock.items():
+                lock_data.setdefault(k, set()).update(v_list)
+            for k, p_list in proj_parents.items():
+                parents_data.setdefault(k, set()).update(p_list)
+                
+        lock_data = {k: list(v) for k, v in lock_data.items()}
+        parents_data = {k: list(v) for k, v in parents_data.items()}
         
     targets = build_check_targets(
         {"all_direct": pkg_data} if pkg_data else None,

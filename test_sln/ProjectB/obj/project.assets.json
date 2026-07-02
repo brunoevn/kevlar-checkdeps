@@ -1,0 +1,30 @@
+{
+  "version": 3,
+  "targets": {
+    "net8.0": {
+      "Microsoft.CSharp/4.3.0": {
+        "type": "package"
+      }
+    }
+  },
+  "libraries": {
+    "Microsoft.CSharp/4.3.0": {
+      "type": "package",
+      "path": "microsoft.csharp/4.3.0",
+      "files": []
+    }
+  },
+  "project": {
+    "version": "1.0.0",
+    "restore": {},
+    "frameworks": {
+      "net8.0": {
+        "dependencies": {
+          "Microsoft.CSharp": {
+            "target": "Package"
+          }
+        }
+      }
+    }
+  }
+}
