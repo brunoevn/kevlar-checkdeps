@@ -989,7 +989,7 @@ def print_results_table(results, pkg_data, show_all, vuls_enabled=False):
             if vuls_count > 0:
                 styled_vuls = f"{COLOR_RED}{COLOR_BOLD}{vuls_count}{COLOR_RESET}"
             else:
-                styled_vuls = f"{COLOR_GREEN}0{COLOR_RESET}"
+                styled_vuls = f"{COLOR_GREEN}{ICON_OK}{COLOR_RESET}" if ICON_OK == "✔" else f"{COLOR_GREEN}0{COLOR_RESET}"
             vuls_cell = pad_string(styled_vuls, w_vuls, align="center")
             
             print(f"{t['vertical']}{name_cell}{t['vertical']}{type_cell}{t['vertical']}{dec_cell}{t['vertical']}{inst_cell}{t['vertical']}{latest_cell}{t['vertical']}{status_cell}{t['vertical']}{vuls_cell}{t['vertical']}")
@@ -1149,7 +1149,7 @@ def export_markdown_report(results, pkg_data, filepath, vuls_enabled=False):
                     
                 if vuls_enabled:
                     vuls_count = len(r.get("vulnerabilities", []))
-                    vuls_str = f"⚠️ **{vuls_count}**" if vuls_count > 0 else "0"
+                    vuls_str = f"⚠️ **{vuls_count}**" if vuls_count > 0 else "✅"
                     f.write(f"| `{r['name']}` | {dep_type} | `{r['declared'] or 'N/A'}` | `{r['installed'] or 'N/A'}` | `{r['latest'] or 'N/A'}` | {status_display} | {vuls_str} | {note} |\n")
                 else:
                     f.write(f"| `{r['name']}` | {dep_type} | `{r['declared'] or 'N/A'}` | `{r['installed'] or 'N/A'}` | `{r['latest'] or 'N/A'}` | {status_display} | {note} |\n")
