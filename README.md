@@ -10,7 +10,7 @@ Designed with a modular and extensible architecture, it supports checking direct
 
 ## Key Features
 
-- **Multi-Ecosystem Support**: Audits Node.js (`npm`), Python (`pip`), .NET (`nuget`, including C# `.csproj`, VB.NET `.vbproj`, F# `.fsproj`, and Solution files), PHP (`php`, including `composer.json` / `composer.lock`), Java (`maven`, supporting properties, centralized `<dependencyManagement>`, and multi-module `<modules>` configurations), Go (`go`, supporting `go.mod`), Rust (`rust`, supporting `Cargo.toml`/`Cargo.lock`), Ruby (`ruby`, supporting `Gemfile`/`Gemfile.lock`), and Java/Kotlin Gradle (`gradle`, supporting `build.gradle`/`build.gradle.kts`/`gradle.lockfile`).
+- **Multi-Ecosystem Support**: Audits Node.js (`npm`), Python (`pip`), .NET (`nuget`, including C# `.csproj`, VB.NET `.vbproj`, F# `.fsproj`, and Solution files), PHP (`php`, including `composer.json` / `composer.lock`), Java (`maven`, supporting properties, centralized `<dependencyManagement>`, and multi-module `<modules>` configurations), Go (`go`, supporting `go.mod`), Rust (`rust`, supporting `Cargo.toml`/`Cargo.lock`), Ruby (`ruby`, supporting `Gemfile`/`Gemfile.lock`), Java/Kotlin Gradle (`gradle`, supporting `build.gradle`/`build.gradle.kts`/`gradle.lockfile`), and Android (`android`, prioritizing Google's Maven Registry for Android libraries).
 - **Outdated Package Detection**: Compares installed versions against the latest versions in registries, classifying updates into `Major`, `Minor`, and `Patch` increments.
 - **Deprecation Warnings**: 
   - For `npm`: Extracts maintainer deprecation notices for exact installed versions.
@@ -86,6 +86,10 @@ Specify the target ecosystem via `--tech` (or `-t`) and the directory via `--pat
   ```powershell
   python kevlar.py --tech gradle --path ./gradle_project
   ```
+- **For Android (android)**:
+  ```powershell
+  python kevlar.py --tech android --path ./android_project
+  ```
 
 ### 2. Scan Security Vulnerabilities
 Add the `--vuls` (or `-v`) flag to audit packages against Google's OSV database:
@@ -141,7 +145,7 @@ python kevlar.py --tech nuget --path ./dotnet_project --show-all
 
 | Argument | Short | Default | Description |
 | --- | --- | --- | --- |
-| `--tech` | `-t` | *Required* | The package manager / technology to check. Choices: `npm`, `pip`, `nuget`, `php`, `maven`, `go`, `rust`, `ruby`, `gradle`. |
+| `--tech` | `-t` | *Required* | The package manager / technology to check. Choices: `npm`, `pip`, `nuget`, `php`, `maven`, `go`, `rust`, `ruby`, `gradle`, `android`. |
 | `--path` | `-p` | `.` | Directory containing the package files (e.g. `.csproj`, `composer.json`, `package.json`, `pom.xml`, `go.mod`, `requirements.txt`, `Cargo.toml`, `Gemfile`, `build.gradle`, etc.). |
 | `--vuls` | `-v` | `False` | Enable security vulnerability queries via Google OSV API. |
 | `--all` | `-a` | `False` | Scan all dependencies resolved in lockfile, rather than direct ones. |

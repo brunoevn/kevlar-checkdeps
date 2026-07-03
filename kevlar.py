@@ -30,6 +30,7 @@ URL_PYPI_REGISTRY = "https://pypi.org/pypi/"
 URL_NUGET_REGISTRY = "https://api.nuget.org/v3-flatcontainer/"
 URL_PACKAGIST_REGISTRY = "https://repo.packagist.org/p2/"
 URL_MAVEN_REGISTRY = "https://repo1.maven.org/maven2/"
+URL_GOOGLE_MAVEN = "https://dl.google.com/dl/android/maven2/"
 URL_GO_PROXY = "https://proxy.golang.org/"
 URL_RUST_REGISTRY = "https://crates.io/api/v1/crates/"
 URL_RUBY_REGISTRY = "https://rubygems.org/api/v1/gems/"
@@ -1762,11 +1763,30 @@ def check_maven_package(target):
             
         group_id, artifact_id = name.split(":", 1)
         group_path = group_id.replace(".", "/")
-        url = f"{URL_MAVEN_REGISTRY}{group_path}/{artifact_id}/maven-metadata.xml"
+        # Determine registry search order (prioritize Google Maven for Android/Google groups)
+        use_google_maven = (
+            group_id.startswith(("androidx.", "com.google.android.", "com.android.", "android.arch."))
+            or "android" in group_id
+        )
         
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=10) as response:
-            xml_data = response.read()
+        xml_data = None
+        registries = [URL_GOOGLE_MAVEN, URL_MAVEN_REGISTRY] if use_google_maven else [URL_MAVEN_REGISTRY, URL_GOOGLE_MAVEN]
+        
+        last_error = None
+        for registry_url in registries:
+            url = f"{registry_url}{group_path}/{artifact_id}/maven-metadata.xml"
+            try:
+                req = urllib.request.Request(url)
+                req.add_header("User-Agent", f"Kevlar-CheckDeps/{VERSION}")
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    xml_data = response.read()
+                break
+            except Exception as e:
+                last_error = e
+                continue
+                
+        if xml_data is None:
+            raise ValueError(f"Failed to fetch metadata from Maven or Google registries: {last_error or 'Not found'}")
             
         root = ET.fromstring(xml_data)
         
@@ -4228,6 +4248,11 @@ TECHNOLOGIES = {
         "files": ["build.gradle", "build.gradle.kts", "gradle.lockfile"],
         "osv_ecosystem": "Maven",
         "runner": run_gradle_checker
+    },
+    "android": {
+        "files": ["build.gradle", "build.gradle.kts", "gradle.lockfile"],
+        "osv_ecosystem": "Maven",
+        "runner": run_gradle_checker
     }
 }
 
@@ -4393,7 +4418,7 @@ Examples:
     parser.add_argument(
         "--tech", "-t",
         required=True,
-        choices=["npm", "pip", "nuget", "php", "maven", "go", "rust", "ruby", "gradle"],
+        choices=["npm", "pip", "nuget", "php", "maven", "go", "rust", "ruby", "gradle", "android"],
         help="The package manager / technology to check."
     )
     parser.add_argument(
