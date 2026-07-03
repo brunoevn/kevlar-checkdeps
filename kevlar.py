@@ -20,7 +20,19 @@ import time
 from datetime import datetime
 import xml.etree.ElementTree as ET
 
-VERSION = "1.0"
+VERSION = "1.1.0"
+
+# External APIs Configuration
+URL_NPM_REGISTRY = "https://registry.npmjs.org/"
+URL_OSV_QUERYBATCH = "https://api.osv.dev/v1/querybatch"
+URL_OSV_VULNS = "https://api.osv.dev/v1/vulns/"
+URL_PYPI_REGISTRY = "https://pypi.org/pypi/"
+URL_NUGET_REGISTRY = "https://api.nuget.org/v3-flatcontainer/"
+URL_PACKAGIST_REGISTRY = "https://repo.packagist.org/p2/"
+URL_MAVEN_REGISTRY = "https://repo1.maven.org/maven2/"
+URL_GO_PROXY = "https://proxy.golang.org/"
+URL_RUST_REGISTRY = "https://crates.io/api/v1/crates/"
+URL_RUBY_REGISTRY = "https://rubygems.org/api/v1/gems/"
 
 # ANSI escape codes for styling (HSL/Curated Theme)
 COLOR_RESET = "\033[0m"
@@ -315,7 +327,7 @@ def check_npm_package(target):
         else:
             encoded_name = urllib.parse.quote(name)
             
-        url = f"https://registry.npmjs.org/{encoded_name}"
+        url = f"{URL_NPM_REGISTRY}{encoded_name}"
         req = urllib.request.Request(url)
         # Use abbreviated metadata format header
         req.add_header("Accept", "application/vnd.npm.install-v1+json")
@@ -448,7 +460,7 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
         return {}
         
     try:
-        url = "https://api.osv.dev/v1/querybatch"
+        url = URL_OSV_QUERYBATCH
         req = urllib.request.Request(
             url, 
             data=json.dumps({"queries": queries}).encode("utf-8"),
@@ -490,7 +502,7 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
     
     def fetch_vuln_detail(vuln_id):
         try:
-            url = f"https://api.osv.dev/v1/vulns/{vuln_id}"
+            url = f"{URL_OSV_VULNS}{vuln_id}"
             req = urllib.request.Request(url)
             with urllib.request.urlopen(req, timeout=10) as response:
                 return vuln_id, json.loads(response.read().decode("utf-8"))
@@ -521,7 +533,13 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
             if "severity" in vuln_data and isinstance(vuln_data["severity"], list):
                 for sev in vuln_data["severity"]:
                     if sev.get("type") in ("CVSS_V3", "CVSS_V2"):
-                        severity = f"CVSS {sev.get('score')}"
+                        score = sev.get('score')
+                        if score:
+                            score_str = str(score)
+                            if score_str.startswith("CVSS"):
+                                severity = score_str
+                            else:
+                                severity = f"CVSS {score_str}"
                         break
             if severity == "UNKNOWN":
                 db_spec = vuln_data.get("database_specific")
@@ -537,6 +555,94 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
         package_to_vulns[(name, ver_str)] = vuln_list
         
     return package_to_vulns
+
+def apply_vulnerability_suppressions(results, suppress_path):
+    """Applies vulnerability suppressions from a JSON file.
+    Suppressed vulnerabilities are moved from 'vulnerabilities' to 'suppressed_vulnerabilities'.
+    """
+    # Initialize suppressed_vulnerabilities key for all results regardless of suppression file existence
+    for r in results:
+        r["suppressed_vulnerabilities"] = []
+        
+    file_to_load = None
+    if suppress_path:
+        file_to_load = suppress_path
+        if not os.path.exists(file_to_load):
+            print(f"{COLOR_RED}{ICON_ERROR} Suppress file not found: {suppress_path}{COLOR_RESET}")
+            sys.exit(1)
+    else:
+        default_path = "kevlar-suppressions.json"
+        if os.path.exists(default_path):
+            file_to_load = default_path
+            
+    if not file_to_load:
+        return
+        
+    print(f"{COLOR_BOLD}{COLOR_CYAN}Loading suppressions from {file_to_load}...{COLOR_RESET}")
+    try:
+        with open(file_to_load, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"{COLOR_RED}{ICON_ERROR} Failed to parse suppressions file: {e}{COLOR_RESET}")
+        sys.exit(1)
+        
+    suppressions = data.get("suppressions", [])
+    if not isinstance(suppressions, list):
+        print(f"{COLOR_RED}{ICON_ERROR} 'suppressions' field in JSON must be a list{COLOR_RESET}")
+        sys.exit(1)
+        
+    rules = []
+    for s in suppressions:
+        rule_id = s.get("id")
+        rule_pkg = s.get("package")
+        reason = s.get("reason", "No reason provided")
+        
+        if not rule_id and not rule_pkg:
+            continue
+            
+        rules.append({
+            "id": rule_id.strip().upper() if rule_id else None,
+            "package": rule_pkg.strip().lower() if rule_pkg else None,
+            "reason": reason
+        })
+        
+    suppressed_count = 0
+    for r in results:
+        pkg_name = r["name"].lower()
+        active_vulns = []
+        suppressed_vulns = []
+        
+        for vuln in r.get("vulnerabilities", []):
+            vuln_id = vuln["id"].upper()
+            
+            matched_rule = None
+            for rule in rules:
+                if rule["id"] and rule["package"]:
+                    if rule["id"] == vuln_id and rule["package"] == pkg_name:
+                        matched_rule = rule
+                        break
+                elif rule["id"]:
+                    if rule["id"] == vuln_id:
+                        matched_rule = rule
+                        break
+                elif rule["package"]:
+                    if rule["package"] == pkg_name:
+                        matched_rule = rule
+                        break
+                        
+            if matched_rule:
+                vuln["suppressed_reason"] = matched_rule["reason"]
+                suppressed_vulns.append(vuln)
+                suppressed_count += 1
+                print(f"{COLOR_GRAY}[SUPPRESSED] Ignored {vuln['id']} for package '{r['name']}' (Reason: {matched_rule['reason']}){COLOR_RESET}")
+            else:
+                active_vulns.append(vuln)
+                
+        r["vulnerabilities"] = active_vulns
+        r["suppressed_vulnerabilities"] = suppressed_vulns
+        
+    if suppressed_count > 0:
+        print(f"\n{COLOR_GREEN}{ICON_OK} Successfully suppressed {suppressed_count} vulnerability alerts.{COLOR_RESET}\n")
 
 def find_direct_parents(name, parents_map, direct_packages):
     """Finds which direct dependencies transitively required the given package."""
@@ -689,7 +795,7 @@ def check_pypi_package(target):
     
     try:
         encoded_name = urllib.parse.quote(name)
-        url = f"https://pypi.org/pypi/{encoded_name}/json"
+        url = f"{URL_PYPI_REGISTRY}{encoded_name}/json"
         
         req = urllib.request.Request(url)
         with urllib.request.urlopen(req, timeout=10) as response:
@@ -832,13 +938,22 @@ def run_pip_checker(args):
             r["vulnerabilities"] = []
             
     # Resolve transitive dependency parents
+    all_direct = {}
     for r in results:
         parents_list = parents_data.get(r["name"], [])
         r["required_by"] = sorted(parents_list)
         
+        is_direct = True
+        for p in parents_list:
+            if not p.startswith("-r") and "requirements" not in p:
+                is_direct = False
+                break
+        if is_direct:
+            all_direct[r["name"]] = dependencies.get(r["name"], "0.0.0")
+        
     elapsed = time.time() - start_time
     
-    return results, {"dependencies": dependencies, "devDependencies": {}, "all_direct": dependencies}, elapsed
+    return results, {"dependencies": dependencies, "devDependencies": {}, "all_direct": all_direct}, elapsed
 
 # ==============================================================================
 # NuGet Checker Logic
@@ -1039,7 +1154,7 @@ def check_nuget_package(target):
     
     try:
         encoded_name = urllib.parse.quote(name.lower())
-        url = f"https://api.nuget.org/v3-flatcontainer/{encoded_name}/index.json"
+        url = f"{URL_NUGET_REGISTRY}{encoded_name}/index.json"
         
         req = urllib.request.Request(url)
         with urllib.request.urlopen(req, timeout=10) as response:
@@ -1317,7 +1432,7 @@ def check_composer_package(target):
     
     try:
         name_lower = name.lower()
-        url = f"https://repo.packagist.org/p2/{name_lower}.json"
+        url = f"{URL_PACKAGIST_REGISTRY}{name_lower}.json"
         
         req = urllib.request.Request(url)
         with urllib.request.urlopen(req, timeout=10) as response:
@@ -1647,7 +1762,7 @@ def check_maven_package(target):
             
         group_id, artifact_id = name.split(":", 1)
         group_path = group_id.replace(".", "/")
-        url = f"https://repo1.maven.org/maven2/{group_path}/{artifact_id}/maven-metadata.xml"
+        url = f"{URL_MAVEN_REGISTRY}{group_path}/{artifact_id}/maven-metadata.xml"
         
         req = urllib.request.Request(url)
         with urllib.request.urlopen(req, timeout=10) as response:
@@ -1931,7 +2046,7 @@ def check_go_package(target):
     
     try:
         escaped_name = escape_go_module(name)
-        url = f"https://proxy.golang.org/{escaped_name}/@v/list"
+        url = f"{URL_GO_PROXY}{escaped_name}/@v/list"
         
         req = urllib.request.Request(url)
         with urllib.request.urlopen(req, timeout=10) as response:
@@ -2100,6 +2215,703 @@ def run_go_checker(args):
     elapsed = time.time() - start_time
     
     return results, {"dependencies": dependencies, "devDependencies": devDependencies, "all_direct": all_direct}, elapsed
+
+# ==============================================================================
+# Rust (Cargo) Scanning Logic
+# ==============================================================================
+
+def find_rust_files(path):
+    """Finds Cargo.toml and Cargo.lock files."""
+    toml_path = None
+    lock_path = None
+    
+    if os.path.exists(path):
+        if os.path.isdir(path):
+            t = os.path.join(path, "Cargo.toml")
+            l = os.path.join(path, "Cargo.lock")
+            if os.path.exists(t):
+                toml_path = t
+            if os.path.exists(l):
+                lock_path = l
+        elif os.path.isfile(path):
+            if path.endswith("Cargo.toml"):
+                toml_path = path
+                l = os.path.join(os.path.dirname(path), "Cargo.lock")
+                if os.path.exists(l):
+                    lock_path = l
+            elif path.endswith("Cargo.lock"):
+                lock_path = path
+                t = os.path.join(os.path.dirname(path), "Cargo.toml")
+                if os.path.exists(t):
+                    toml_path = t
+                    
+    return toml_path, lock_path
+
+def parse_cargo_toml(filepath):
+    """Parses Cargo.toml to extract direct dependency names."""
+    dependencies = set()
+    if not filepath or not os.path.exists(filepath):
+        return dependencies
+        
+    current_section = None
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                    
+                # Detect sections, e.g. [dependencies] or [dependencies.tokio]
+                m_sec = re.match(r'^\[([^\]]+)\]', line)
+                if m_sec:
+                    current_section = m_sec.group(1).strip()
+                    continue
+                    
+                # Check dependency sections
+                is_dep_section = (
+                    current_section in ("dependencies", "dev-dependencies", "build-dependencies")
+                    or (current_section and (
+                        current_section.startswith("dependencies.")
+                        or current_section.startswith("dev-dependencies.")
+                        or current_section.startswith("build-dependencies.")
+                    ))
+                )
+                
+                if is_dep_section:
+                    # Match name = "version" or name = { ... }
+                    m_dep = re.match(r'^([a-zA-Z0-9_-]+)\s*=', line)
+                    if m_dep:
+                        dependencies.add(m_dep.group(1).strip())
+    except Exception as e:
+        print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Cargo.toml: {e}{COLOR_RESET}")
+        
+    return dependencies
+
+def parse_cargo_lock(filepath):
+    """Parses Cargo.lock to extract all resolved package names, versions, and build parent tree."""
+    resolved = {}
+    parents = {}
+    if not filepath or not os.path.exists(filepath):
+        return resolved, parents
+        
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+            
+        current_pkg = None
+        current_version = None
+        in_deps = False
+        pkg_deps = []
+        pkg_definitions = []
+        
+        for line in lines:
+            line = line.strip()
+            if line == "[[package]]":
+                if current_pkg:
+                    pkg_definitions.append({
+                        "name": current_pkg,
+                        "version": current_version,
+                        "deps": pkg_deps
+                    })
+                current_pkg = None
+                current_version = None
+                pkg_deps = []
+                in_deps = False
+                continue
+                
+            if line.startswith("name ="):
+                current_pkg = line.split("=")[1].replace('"', '').strip()
+            elif line.startswith("version ="):
+                current_version = line.split("=")[1].replace('"', '').strip()
+            elif line.startswith("dependencies ="):
+                if "[" in line and "]" in line:
+                    dep_str = line.split("=")[1].strip(" []\"")
+                    if dep_str:
+                        pkg_deps = [d.strip().split()[0].replace('"', '') for d in dep_str.split(",")]
+                elif "[" in line:
+                    in_deps = True
+            elif in_deps:
+                if line == "]":
+                    in_deps = False
+                else:
+                    dep_name = line.strip(",\" ")
+                    if dep_name:
+                        pkg_deps.append(dep_name.split()[0].replace('"', ''))
+                        
+        if current_pkg:
+            pkg_definitions.append({
+                "name": current_pkg,
+                "version": current_version,
+                "deps": pkg_deps
+            })
+            
+        for pkg in pkg_definitions:
+            name = pkg["name"]
+            version = pkg["version"]
+            resolved[name] = version
+            
+            for dep in pkg["deps"]:
+                if dep not in parents:
+                    parents[dep] = set()
+                parents[dep].add(name)
+                
+    except Exception as e:
+        print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Cargo.lock: {e}{COLOR_RESET}")
+        
+    parents_clean = {k: list(v) for k, v in parents.items()}
+    return resolved, parents_clean
+
+def check_rust_package(target):
+    """Queries crates.io API for crate metadata and checks target version."""
+    name = target["name"]
+    declared = target["declared"]
+    installed_versions = target["installed"]
+    
+    versions_to_check = installed_versions if installed_versions else [declared]
+    results = []
+    
+    try:
+        url = f"{URL_RUST_REGISTRY}{urllib.parse.quote(name)}"
+        req = urllib.request.Request(url)
+        # crates.io requires a User-Agent
+        req.add_header("User-Agent", f"Kevlar-CheckDeps/{VERSION}")
+        
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode("utf-8"))
+            
+        crate_info = data.get("crate", {})
+        latest_version = crate_info.get("max_stable_version") or crate_info.get("max_version")
+        
+        versions_meta = data.get("versions", [])
+        yanked_versions = set()
+        for v_meta in versions_meta:
+            if v_meta.get("yanked"):
+                yanked_versions.add(v_meta.get("num"))
+                
+        for ver_str in versions_to_check:
+            clean_ver = re.sub(r'^[^\d]*', '', ver_str) if ver_str else "0.0.0"
+            if not clean_ver:
+                clean_ver = "0.0.0"
+                
+            status = "up-to-date"
+            if latest_version and clean_ver != "0.0.0":
+                status = classify_update(clean_ver, latest_version)
+                
+            is_deprecated = clean_ver in yanked_versions
+            
+            results.append({
+                "name": name,
+                "declared": ver_str,
+                "installed": clean_ver,
+                "latest": latest_version or "unknown",
+                "status": status,
+                "deprecated": is_deprecated,
+                "error": None
+            })
+    except Exception as e:
+        for ver_str in versions_to_check:
+            results.append({
+                "name": name,
+                "declared": ver_str,
+                "installed": ver_str,
+                "latest": "unknown",
+                "status": "error",
+                "deprecated": False,
+                "error": str(e)
+            })
+            
+    return results
+
+def check_all_rust_targets(targets, max_workers):
+    """Checks all Rust target crates in parallel."""
+    results = []
+    completed = 0
+    total = len(targets)
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(check_rust_package, t): t for t in targets}
+        for future in as_completed(futures):
+            completed += 1
+            sys.stdout.write(f"\r[Rust] Checking registry: {completed}/{total}... ")
+            sys.stdout.flush()
+            results.extend(future.result())
+            
+    sys.stdout.write("\r\033[K")
+    sys.stdout.flush()
+    return results
+
+def run_rust_checker(args):
+    """Main orchestrator for Rust Cargo checker."""
+    toml_path, lock_path = find_rust_files(args.path)
+    if not toml_path and not lock_path:
+        print(f"{COLOR_RED}{ICON_ERROR} No Cargo.toml or Cargo.lock found in: {args.path}{COLOR_RESET}")
+        return None, None, 0
+        
+    print(f"{COLOR_GRAY}{ICON_INFO} Reading Cargo files...{COLOR_RESET}")
+    direct = parse_cargo_toml(toml_path)
+    resolved, parents = parse_cargo_lock(lock_path)
+    
+    if not resolved and direct:
+        resolved = {name: "0.0.0" for name in direct}
+        
+    pkg_data = {
+        "all_direct": {name: name for name in direct},
+        "dependencies": resolved
+    }
+    
+    targets = []
+    for name, version in resolved.items():
+        if not args.all and name not in direct:
+            continue
+        targets.append({
+            "name": name,
+            "declared": version,
+            "installed": [version] if version != "0.0.0" else []
+        })
+        
+    if not targets:
+        print(f"{COLOR_YELLOW}{ICON_WARN} No Rust packages identified to check.{COLOR_RESET}")
+        return None, None, 0
+        
+    start_time = time.time()
+    results = check_all_rust_targets(targets, args.concurrent)
+    
+    # Check vulnerabilities via OSV if requested
+    if getattr(args, "vuls", False):
+        tech_info = TECHNOLOGIES["rust"]
+        osv_vulns = check_osv_vulnerabilities(targets, tech_info["osv_ecosystem"], args.concurrent)
+        
+        for r in results:
+            key = (r["name"], r["installed"])
+            r["vulnerabilities"] = osv_vulns.get(key, [])
+    else:
+        for r in results:
+            r["vulnerabilities"] = []
+            
+    # Resolve transitive dependency parents
+    for r in results:
+        if r["name"] not in direct:
+            direct_parents = find_direct_parents(r["name"], parents, direct)
+            r["required_by"] = sorted(list(direct_parents))
+        else:
+            r["required_by"] = []
+            
+    elapsed = time.time() - start_time
+    
+    return results, pkg_data, elapsed
+
+# ==============================================================================
+# Ruby (Bundler) Scanning Logic
+# ==============================================================================
+
+def find_ruby_files(path):
+    """Finds Gemfile and Gemfile.lock files."""
+    gemfile_path = None
+    lock_path = None
+    
+    if os.path.exists(path):
+        if os.path.isdir(path):
+            g = os.path.join(path, "Gemfile")
+            l = os.path.join(path, "Gemfile.lock")
+            if os.path.exists(g):
+                gemfile_path = g
+            if os.path.exists(l):
+                lock_path = l
+        elif os.path.isfile(path):
+            if path.endswith("Gemfile"):
+                gemfile_path = path
+                l = os.path.join(os.path.dirname(path), "Gemfile.lock")
+                if os.path.exists(l):
+                    lock_path = l
+            elif path.endswith("Gemfile.lock"):
+                lock_path = path
+                g = os.path.join(os.path.dirname(path), "Gemfile")
+                if os.path.exists(g):
+                    gemfile_path = g
+                    
+    return gemfile_path, lock_path
+
+def parse_gemfile(filepath):
+    """Parses Gemfile to extract direct dependency names."""
+    dependencies = set()
+    if not filepath or not os.path.exists(filepath):
+        return dependencies
+        
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                    
+                # gem 'rails', '~> 6.0' or gem "nokogiri"
+                m = re.match(r'^gem\s+[\'"]([^\'"]+)[\'"]', line)
+                if m:
+                    dependencies.add(m.group(1).strip())
+    except Exception as e:
+        print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Gemfile: {e}{COLOR_RESET}")
+        
+    return dependencies
+
+def parse_gemfile_lock(filepath):
+    """Parses Gemfile.lock to extract all resolved package names, versions, and build parent tree."""
+    resolved = {}
+    parents = {}
+    if not filepath or not os.path.exists(filepath):
+        return resolved, parents
+        
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+            
+        in_specs = False
+        current_parent = None
+        spec_indent = None
+        
+        for line in lines:
+            if not line.strip():
+                continue
+                
+            # Check for root sections (no indentation)
+            if line and not line.startswith(" ") and not line.startswith("\t"):
+                in_specs = False
+                continue
+                
+            line_stripped = line.strip()
+            if line_stripped == "specs:":
+                in_specs = True
+                spec_indent = None
+                current_parent = None
+                continue
+                
+            if in_specs:
+                # Count leading spaces
+                leading_spaces = len(line) - len(line.lstrip(' '))
+                
+                # Try to match gem version pattern: "    name (version)"
+                m_spec = re.match(r'^\s*([a-zA-Z0-9_-]+)\s*\(([^)]+)\)', line)
+                if m_spec:
+                    name = m_spec.group(1)
+                    version = m_spec.group(2)
+                    
+                    if spec_indent is None:
+                        spec_indent = leading_spaces
+                        
+                    if leading_spaces == spec_indent:
+                        current_parent = name
+                        resolved[current_parent] = version
+                        continue
+                        
+                # If it has more indentation than spec_indent and matches child dep, it's a child dependency
+                if spec_indent is not None and leading_spaces > spec_indent and current_parent:
+                    m_dep = re.match(r'^\s*([a-zA-Z0-9_-]+)(?:\s*\(([^)]+)\))?', line)
+                    if m_dep:
+                        child = m_dep.group(1)
+                        if child not in parents:
+                            parents[child] = set()
+                        parents[child].add(current_parent)
+                        
+    except Exception as e:
+        print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Gemfile.lock: {e}{COLOR_RESET}")
+        
+    parents_clean = {k: list(v) for k, v in parents.items()}
+    return resolved, parents_clean
+
+def check_ruby_package(target):
+    """Queries rubygems.org API for package metadata and checks target version."""
+    name = target["name"]
+    declared = target["declared"]
+    installed_versions = target["installed"]
+    
+    versions_to_check = installed_versions if installed_versions else [declared]
+    results = []
+    
+    try:
+        url = f"{URL_RUBY_REGISTRY}{urllib.parse.quote(name)}.json"
+        req = urllib.request.Request(url)
+        
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode("utf-8"))
+            
+        latest_version = data.get("version")
+        
+        for ver_str in versions_to_check:
+            clean_ver = re.sub(r'^[^\d]*', '', ver_str) if ver_str else "0.0.0"
+            if not clean_ver:
+                clean_ver = "0.0.0"
+                
+            status = "up-to-date"
+            if latest_version and clean_ver != "0.0.0":
+                status = classify_update(clean_ver, latest_version)
+                
+            results.append({
+                "name": name,
+                "declared": ver_str,
+                "installed": clean_ver,
+                "latest": latest_version or "unknown",
+                "status": status,
+                "deprecated": False,
+                "error": None
+            })
+    except Exception as e:
+        for ver_str in versions_to_check:
+            results.append({
+                "name": name,
+                "declared": ver_str,
+                "installed": ver_str,
+                "latest": "unknown",
+                "status": "error",
+                "deprecated": False,
+                "error": str(e)
+            })
+            
+    return results
+
+def check_all_ruby_targets(targets, max_workers):
+    """Checks all Ruby target gems in parallel."""
+    results = []
+    completed = 0
+    total = len(targets)
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(check_ruby_package, t): t for t in targets}
+        for future in as_completed(futures):
+            completed += 1
+            sys.stdout.write(f"\r[Ruby] Checking registry: {completed}/{total}... ")
+            sys.stdout.flush()
+            results.extend(future.result())
+            
+    sys.stdout.write("\r\033[K")
+    sys.stdout.flush()
+    return results
+
+def run_ruby_checker(args):
+    """Main orchestrator for Ruby Bundler checker."""
+    gemfile_path, lock_path = find_ruby_files(args.path)
+    if not gemfile_path and not lock_path:
+        print(f"{COLOR_RED}{ICON_ERROR} No Gemfile or Gemfile.lock found in: {args.path}{COLOR_RESET}")
+        return None, None, 0
+        
+    print(f"{COLOR_GRAY}{ICON_INFO} Reading Gemfile files...{COLOR_RESET}")
+    direct = parse_gemfile(gemfile_path)
+    resolved, parents = parse_gemfile_lock(lock_path)
+    
+    if not resolved and direct:
+        resolved = {name: "0.0.0" for name in direct}
+        
+    pkg_data = {
+        "all_direct": {name: name for name in direct},
+        "dependencies": resolved
+    }
+    
+    targets = []
+    for name, version in resolved.items():
+        if not args.all and name not in direct:
+            continue
+        targets.append({
+            "name": name,
+            "declared": version,
+            "installed": [version] if version != "0.0.0" else []
+        })
+        
+    if not targets:
+        print(f"{COLOR_YELLOW}{ICON_WARN} No Ruby packages identified to check.{COLOR_RESET}")
+        return None, None, 0
+        
+    start_time = time.time()
+    results = check_all_ruby_targets(targets, args.concurrent)
+    
+    # Check vulnerabilities via OSV if requested
+    if getattr(args, "vuls", False):
+        tech_info = TECHNOLOGIES["ruby"]
+        osv_vulns = check_osv_vulnerabilities(targets, tech_info["osv_ecosystem"], args.concurrent)
+        
+        for r in results:
+            key = (r["name"], r["installed"])
+            r["vulnerabilities"] = osv_vulns.get(key, [])
+    else:
+        for r in results:
+            r["vulnerabilities"] = []
+            
+    # Resolve transitive dependency parents
+    for r in results:
+        if r["name"] not in direct:
+            direct_parents = find_direct_parents(r["name"], parents, direct)
+            r["required_by"] = sorted(list(direct_parents))
+        else:
+            r["required_by"] = []
+            
+    elapsed = time.time() - start_time
+    
+    return results, pkg_data, elapsed
+
+# ==============================================================================
+# Gradle Scanning Logic
+# ==============================================================================
+
+def find_gradle_files(path):
+    """Finds build.gradle, build.gradle.kts and lockfiles."""
+    gradle_files = []
+    lock_files = []
+    
+    if os.path.exists(path):
+        if os.path.isdir(path):
+            for name in ("build.gradle", "build.gradle.kts"):
+                p = os.path.join(path, name)
+                if os.path.exists(p):
+                    gradle_files.append(p)
+            lock_dir = os.path.join(path, "gradle", "dependency-locks")
+            if os.path.exists(lock_dir) and os.path.isdir(lock_dir):
+                try:
+                    for f in os.listdir(lock_dir):
+                        if f.endswith(".lockfile"):
+                            lock_files.append(os.path.join(lock_dir, f))
+                except Exception:
+                    pass
+            gl = os.path.join(path, "gradle.lockfile")
+            if os.path.exists(gl):
+                lock_files.append(gl)
+        elif os.path.isfile(path):
+            if path.endswith(".gradle") or path.endswith(".gradle.kts"):
+                gradle_files.append(path)
+            elif path.endswith(".lockfile"):
+                lock_files.append(path)
+                
+    return gradle_files, lock_files
+
+def parse_gradle_build(filepath):
+    """Parses build.gradle / build.gradle.kts to extract direct dependencies."""
+    dependencies = {}
+    if not filepath or not os.path.exists(filepath):
+        return dependencies
+        
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            content = f.read()
+            
+        # Pattern 1: group:artifact:version in configuration calls
+        p1 = re.compile(
+            r'(?:implementation|api|compile|runtimeOnly|testImplementation|testCompile|compileOnly)\s*\(?\s*[\'"]([^\'":]+):([^\'":]+):([^\'":]+)[\'"]'
+        )
+        for m in p1.finditer(content):
+            group = m.group(1).strip()
+            artifact = m.group(2).strip()
+            version = m.group(3).strip()
+            dependencies[f"{group}:{artifact}"] = version
+            
+        # Pattern 2: group: "...", name: "...", version: "..."
+        p2 = re.compile(
+            r'group\s*:\s*[\'"]([^\'"]+)[\'"]\s*,\s*name\s*:\s*[\'"]([^\'"]+)[\'"]\s*,\s*version\s*:\s*[\'"]([^\'"]+)[\'"]'
+        )
+        for m in p2.finditer(content):
+            group = m.group(1).strip()
+            artifact = m.group(2).strip()
+            version = m.group(3).strip()
+            dependencies[f"{group}:{artifact}"] = version
+            
+        # Pattern 3: group = "...", name = "...", version = "..."
+        p3 = re.compile(
+            r'group\s*=\s*[\'"]([^\'"]+)[\'"]\s*,\s*name\s*=\s*[\'"]([^\'"]+)[\'"]\s*,\s*version\s*=\s*[\'"]([^\'"]+)[\'"]'
+        )
+        for m in p3.finditer(content):
+            group = m.group(1).strip()
+            artifact = m.group(2).strip()
+            version = m.group(3).strip()
+            dependencies[f"{group}:{artifact}"] = version
+            
+    except Exception as e:
+        print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Gradle build file: {e}{COLOR_RESET}")
+        
+    return dependencies
+
+def parse_gradle_lockfile(filepath):
+    """Parses gradle .lockfile to extract resolved dependencies."""
+    resolved = {}
+    if not filepath or not os.path.exists(filepath):
+        return resolved
+        
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                m = re.match(r'^([^:]+):([^:]+):([^=]+)=', line)
+                if m:
+                    group = m.group(1).strip()
+                    artifact = m.group(2).strip()
+                    version = m.group(3).strip()
+                    resolved[f"{group}:{artifact}"] = version
+    except Exception as e:
+        print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Gradle lockfile: {e}{COLOR_RESET}")
+        
+    return resolved
+
+def run_gradle_checker(args):
+    """Main orchestrator for Gradle dependency checker."""
+    build_files, lock_files = find_gradle_files(args.path)
+    if not build_files and not lock_files:
+        print(f"{COLOR_RED}{ICON_ERROR} No build.gradle, build.gradle.kts or lockfiles found in: {args.path}{COLOR_RESET}")
+        return None, None, 0
+        
+    print(f"{COLOR_GRAY}{ICON_INFO} Reading Gradle files...{COLOR_RESET}")
+    
+    direct = {}
+    for f in build_files:
+        direct.update(parse_gradle_build(f))
+        
+    resolved = {}
+    for lf in lock_files:
+        resolved.update(parse_gradle_lockfile(lf))
+        
+    if not resolved:
+        resolved = direct
+        
+    pkg_data = {
+        "all_direct": {name: name for name in direct},
+        "dependencies": resolved
+    }
+    
+    targets = []
+    for name, version in resolved.items():
+        if not args.all and name not in direct:
+            continue
+        targets.append({
+            "name": name,
+            "declared": version,
+            "installed": [version] if version != "0.0.0" else []
+        })
+        
+    if not targets:
+        print(f"{COLOR_YELLOW}{ICON_WARN} No Gradle packages identified to check.{COLOR_RESET}")
+        return None, None, 0
+        
+    start_time = time.time()
+    # Reuses Maven Central checking logic
+    results = check_all_maven_targets(targets, args.concurrent)
+    
+    # Check vulnerabilities via OSV if requested
+    if getattr(args, "vuls", False):
+        tech_info = TECHNOLOGIES["gradle"]
+        osv_vulns = check_osv_vulnerabilities(targets, tech_info["osv_ecosystem"], args.concurrent)
+        
+        for r in results:
+            key = (r["name"], r["installed"])
+            r["vulnerabilities"] = osv_vulns.get(key, [])
+    else:
+        for r in results:
+            r["vulnerabilities"] = []
+            
+    # Resolve transitive dependency parents
+    for r in results:
+        if r["name"] not in direct:
+            r["required_by"] = ["transitive"]
+        else:
+            r["required_by"] = []
+            
+    elapsed = time.time() - start_time
+    
+    return results, pkg_data, elapsed
 
 # ==============================================================================
 # Output Formatting and Reporting
@@ -2279,10 +3091,14 @@ def print_results_table(results, pkg_data, show_all, vuls_enabled=False):
     # Print security vulnerabilities details section
     if vuls_enabled:
         vuls_to_print = []
+        suppressed_to_print = []
         for r in filtered_results:
             vuls_list = r.get("vulnerabilities", [])
             if vuls_list:
-                vuls_to_print.append((r["name"], r["installed"], vuls_list, r.get("required_by", [])))
+                vuls_to_print.append((r["name"], r["installed"] if r["installed"] else r["declared"], vuls_list, r.get("required_by", [])))
+            suppressed_list = r.get("suppressed_vulnerabilities", [])
+            if suppressed_list:
+                suppressed_to_print.append((r["name"], r["installed"] if r["installed"] else r["declared"], suppressed_list, r.get("required_by", [])))
                 
         if vuls_to_print:
             print(f"\n{COLOR_BOLD}{COLOR_RED}{ICON_SHIELD} Security Vulnerabilities Details:{COLOR_RESET}")
@@ -2305,6 +3121,17 @@ def print_results_table(results, pkg_data, show_all, vuls_enabled=False):
                         sev_color = COLOR_CYAN
                         
                     print(f"    - {COLOR_BOLD}{vid}{COLOR_RESET} [{sev_color}{severity}{COLOR_RESET}]: {summary}")
+                    
+        if suppressed_to_print:
+            print(f"\n{COLOR_BOLD}{COLOR_GRAY}{ICON_INFO} Suppressed Vulnerabilities (Ignored):{COLOR_RESET}")
+            for name, ver, s_list, required_by in suppressed_to_print:
+                parent_suffix = f" (via {', '.join(required_by)})" if required_by else ""
+                print(f"  {COLOR_BOLD}{COLOR_GRAY}{name}@{ver}{parent_suffix}{COLOR_RESET} ({len(s_list)} suppressed):")
+                for vuln in s_list:
+                    vid = vuln["id"]
+                    reason = vuln.get("suppressed_reason", "No reason provided")
+                    summary = vuln["summary"]
+                    print(f"    - {COLOR_BOLD}{COLOR_GRAY}{vid}{COLOR_RESET}: {summary} {COLOR_GRAY}(Reason: {reason}){COLOR_RESET}")
 
 def print_summary(results, elapsed_time, vuls_enabled=False):
     """Prints checks run count and categorization breakdown."""
@@ -2328,10 +3155,13 @@ def print_summary(results, elapsed_time, vuls_enabled=False):
     if vuls_enabled:
         total_vulns = sum(len(r.get("vulnerabilities", [])) for r in results)
         vuln_pkg_count = sum(1 for r in results if r.get("vulnerabilities"))
+        suppressed_vulns = sum(len(r.get("suppressed_vulnerabilities", [])) for r in results)
         if total_vulns > 0:
             print(f"  Sec Vulnerabilities: {COLOR_RED}{COLOR_BOLD}{total_vulns}{COLOR_RESET} (in {vuln_pkg_count} packages)")
         else:
             print(f"  Sec Vulnerabilities: {COLOR_GREEN}0{COLOR_RESET}")
+        if suppressed_vulns > 0:
+            print(f"  Suppressed Alerts:   {COLOR_GRAY}{suppressed_vulns}{COLOR_RESET}")
     print()
 
 def export_json_report(results, filepath):
@@ -2371,7 +3201,10 @@ def export_markdown_report(results, pkg_data, filepath, vuls_enabled=False):
             if vuls_enabled:
                 total_vulns = sum(len(r.get("vulnerabilities", [])) for r in results)
                 vuln_pkg_count = sum(1 for r in results if r.get("vulnerabilities"))
+                suppressed_vulns = sum(len(r.get("suppressed_vulnerabilities", [])) for r in results)
                 f.write(f"- **Security Vulnerabilities**: {total_vulns} found in {vuln_pkg_count} packages\n")
+                if suppressed_vulns > 0:
+                    f.write(f"- **Suppressed Alerts**: {suppressed_vulns}\n")
             f.write("\n")
             
             # Write table
@@ -2440,9 +3273,911 @@ def export_markdown_report(results, pkg_data, filepath, vuls_enabled=False):
                             else:
                                 f.write("\n")
                                 
+                # Write suppressed vulnerabilities if any exist
+                suppressed_list_total = []
+                for r in results:
+                    s_list = r.get("suppressed_vulnerabilities", [])
+                    if s_list:
+                        suppressed_list_total.append((r["name"], r["installed"] if r["installed"] else r["declared"], s_list, r.get("required_by", [])))
+                        
+                if suppressed_list_total:
+                    f.write("\n## Suppressed Vulnerabilities (Ignored)\n\n")
+                    for name, ver, s_list, required_by in suppressed_list_total:
+                        parent_suffix = f" (via {', '.join(required_by)})" if required_by else ""
+                        f.write(f"### `{name}@{ver}`{parent_suffix} ({len(s_list)} suppressed)\n\n")
+                        for vuln in s_list:
+                            f.write(f"- **{vuln['id']}**: {vuln['summary']}\n")
+                            f.write(f"  *Reason: {vuln.get('suppressed_reason', 'No reason provided')}*\n\n")
+                                
         print(f"{COLOR_GREEN}{ICON_OK} Markdown report successfully exported to {filepath}{COLOR_RESET}")
     except Exception as e:
         print(f"{COLOR_RED}{ICON_ERROR} Failed to export Markdown report: {e}{COLOR_RESET}")
+
+def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
+    """Exports results as a rich, interactive HTML dashboard report."""
+    try:
+        # Calculate summary statistics
+        total = len(results)
+        up_to_date = sum(1 for r in results if r["status"] == "up-to-date")
+        outdated = sum(1 for r in results if r["status"] in ("major", "minor", "patch"))
+        deprecated = sum(1 for r in results if r["deprecated"])
+        errors = sum(1 for r in results if r["status"] == "error")
+        
+        total_vulns = 0
+        vuln_pkg_count = 0
+        suppressed_vulns = 0
+        suppressed_pkg_count = 0
+        
+        if vuls_enabled:
+            total_vulns = sum(len(r.get("vulnerabilities", [])) for r in results)
+            vuln_pkg_count = sum(1 for r in results if r.get("vulnerabilities"))
+            suppressed_vulns = sum(len(r.get("suppressed_vulnerabilities", [])) for r in results)
+            suppressed_pkg_count = sum(1 for r in results if r.get("suppressed_vulnerabilities"))
+            
+        # Count severities for SVG Chart
+        critical = 0
+        high = 0
+        medium = 0
+        low = 0
+        unknown = 0
+        
+        for r in results:
+            for v in r.get("vulnerabilities", []):
+                level = get_severity_level(v)
+                if level == "critical":
+                    critical += 1
+                elif level == "high":
+                    high += 1
+                elif level == "medium":
+                    medium += 1
+                elif level == "low":
+                    low += 1
+                else:
+                    unknown += 1
+                    
+        max_count = max(critical, high, medium, low, unknown, 1)
+        max_h = 130
+        
+        crit_h = int((critical / max_count) * max_h)
+        high_h = int((high / max_count) * max_h)
+        med_h = int((medium / max_count) * max_h)
+        low_h = int((low / max_count) * max_h)
+        unkn_h = int((unknown / max_count) * max_h)
+        
+        base_y = 180
+        crit_y = base_y - crit_h
+        high_y = base_y - high_h
+        med_y = base_y - med_h
+        low_y = base_y - low_h
+        unkn_y = base_y - unkn_h
+        
+        crit_val_y = crit_y - 8 if critical > 0 else base_y - 8
+        high_val_y = high_y - 8 if high > 0 else base_y - 8
+        med_val_y = med_y - 8 if medium > 0 else base_y - 8
+        low_val_y = low_y - 8 if low > 0 else base_y - 8
+        unkn_val_y = unkn_y - 8 if unknown > 0 else base_y - 8
+        
+        # Build SVG Chart
+        svg_chart = f"""
+        <svg viewBox="0 0 500 220" width="100%" height="220" style="background: #111827; border-radius: 12px; border: 1px solid #374151; padding: 15px; box-sizing: border-box;">
+            <!-- Grid lines -->
+            <line x1="50" y1="50" x2="450" y2="50" stroke="#374151" stroke-dasharray="3" />
+            <line x1="50" y1="115" x2="450" y2="115" stroke="#374151" stroke-dasharray="3" />
+            <line x1="50" y1="180" x2="450" y2="180" stroke="#4b5563" />
+            
+            <!-- CRITICAL -->
+            <rect x="75" y="{crit_y}" width="40" height="{crit_h}" fill="url(#grad-crit)" rx="4" ry="4">
+                <animate attributeName="height" from="0" to="{crit_h}" dur="0.6s" fill="freeze" />
+                <animate attributeName="y" from="180" to="{crit_y}" dur="0.6s" fill="freeze" />
+            </rect>
+            <text x="95" y="{crit_val_y}" fill="#ef4444" font-size="11" text-anchor="middle" font-weight="bold" font-family="sans-serif">{critical}</text>
+            <text x="95" y="198" fill="#9ca3af" font-size="10" text-anchor="middle" font-family="sans-serif">CRITICAL</text>
+            
+            <!-- HIGH -->
+            <rect x="155" y="{high_y}" width="40" height="{high_h}" fill="url(#grad-high)" rx="4" ry="4">
+                <animate attributeName="height" from="0" to="{high_h}" dur="0.6s" fill="freeze" />
+                <animate attributeName="y" from="180" to="{high_y}" dur="0.6s" fill="freeze" />
+            </rect>
+            <text x="175" y="{high_val_y}" fill="#f97316" font-size="11" text-anchor="middle" font-weight="bold" font-family="sans-serif">{high}</text>
+            <text x="175" y="198" fill="#9ca3af" font-size="10" text-anchor="middle" font-family="sans-serif">HIGH</text>
+            
+            <!-- MEDIUM -->
+            <rect x="235" y="{med_y}" width="40" height="{med_h}" fill="url(#grad-med)" rx="4" ry="4">
+                <animate attributeName="height" from="0" to="{med_h}" dur="0.6s" fill="freeze" />
+                <animate attributeName="y" from="180" to="{med_y}" dur="0.6s" fill="freeze" />
+            </rect>
+            <text x="255" y="{med_val_y}" fill="#eab308" font-size="11" text-anchor="middle" font-weight="bold" font-family="sans-serif">{medium}</text>
+            <text x="255" y="198" fill="#9ca3af" font-size="10" text-anchor="middle" font-family="sans-serif">MEDIUM</text>
+            
+            <!-- LOW -->
+            <rect x="315" y="{low_y}" width="40" height="{low_h}" fill="url(#grad-low)" rx="4" ry="4">
+                <animate attributeName="height" from="0" to="{low_h}" dur="0.6s" fill="freeze" />
+                <animate attributeName="y" from="180" to="{low_y}" dur="0.6s" fill="freeze" />
+            </rect>
+            <text x="335" y="{low_val_y}" fill="#0ea5e9" font-size="11" text-anchor="middle" font-weight="bold" font-family="sans-serif">{low}</text>
+            <text x="335" y="198" fill="#9ca3af" font-size="10" text-anchor="middle" font-family="sans-serif">LOW</text>
+            
+            <!-- UNKNOWN -->
+            <rect x="395" y="{unkn_y}" width="40" height="{unkn_h}" fill="url(#grad-unkn)" rx="4" ry="4">
+                <animate attributeName="height" from="0" to="{unkn_h}" dur="0.6s" fill="freeze" />
+                <animate attributeName="y" from="180" to="{unkn_y}" dur="0.6s" fill="freeze" />
+            </rect>
+            <text x="415" y="{unkn_val_y}" fill="#9ca3af" font-size="11" text-anchor="middle" font-weight="bold" font-family="sans-serif">{unknown}</text>
+            <text x="415" y="198" fill="#9ca3af" font-size="10" text-anchor="middle" font-family="sans-serif">UNKNOWN</text>
+            
+            <!-- Gradients Definitions -->
+            <defs>
+                <linearGradient id="grad-crit" x1="0%" y1="0%" x2="0%" y2="100%">
+                    <stop offset="0%" stop-color="#f87171" />
+                    <stop offset="100%" stop-color="#991b1b" />
+                </linearGradient>
+                <linearGradient id="grad-high" x1="0%" y1="0%" x2="0%" y2="100%">
+                    <stop offset="0%" stop-color="#fb923c" />
+                    <stop offset="100%" stop-color="#9a3412" />
+                </linearGradient>
+                <linearGradient id="grad-med" x1="0%" y1="0%" x2="0%" y2="100%">
+                    <stop offset="0%" stop-color="#fde047" />
+                    <stop offset="100%" stop-color="#854d0e" />
+                </linearGradient>
+                <linearGradient id="grad-low" x1="0%" y1="0%" x2="0%" y2="100%">
+                    <stop offset="0%" stop-color="#38bdf8" />
+                    <stop offset="100%" stop-color="#075985" />
+                </linearGradient>
+                <linearGradient id="grad-unkn" x1="0%" y1="0%" x2="0%" y2="100%">
+                    <stop offset="0%" stop-color="#9ca3af" />
+                    <stop offset="100%" stop-color="#4b5563" />
+                </linearGradient>
+            </defs>
+        </svg>
+        """
+        
+        # Build Packages Cards List
+        package_cards_html = []
+        for i, r in enumerate(results):
+            name = r["name"]
+            declared = r["declared"]
+            installed = r["installed"]
+            latest = r["latest"]
+            status = r["status"]
+            is_deprecated = r["deprecated"]
+            error = r["error"]
+            
+            # Type detection
+            dep_type = "Transitive"
+            if pkg_data:
+                if name in pkg_data.get("all_direct", {}):
+                    dep_type = "Direct"
+                elif name in pkg_data.get("devDependencies", {}):
+                    dep_type = "Dev"
+                    
+            if r.get("required_by"):
+                dep_type = "Transitive"
+                    
+            badges = []
+            
+            # Status Badge
+            if error:
+                badges.append('<span class="badge badge-error">Error</span>')
+            elif status == "up-to-date":
+                badges.append('<span class="badge badge-success">Up-to-date</span>')
+            elif status == "major":
+                badges.append('<span class="badge badge-error">Major Update</span>')
+            elif status == "minor":
+                badges.append('<span class="badge badge-warning">Minor Update</span>')
+            elif status == "patch":
+                badges.append('<span class="badge badge-info">Patch Update</span>')
+                
+            if is_deprecated:
+                badges.append('<span class="badge badge-depr">Deprecated</span>')
+                
+            # Vulnerabilities count badge
+            pkg_vulns = r.get("vulnerabilities", [])
+            pkg_suppressed_vulns = r.get("suppressed_vulnerabilities", [])
+            
+            is_vulnerable = len(pkg_vulns) > 0
+            is_suppressed = len(pkg_suppressed_vulns) > 0
+            
+            if is_vulnerable:
+                badges.append(f'<span class="badge badge-danger">{len(pkg_vulns)} Vulns</span>')
+            if is_suppressed:
+                badges.append(f'<span class="badge badge-muted">{len(pkg_suppressed_vulns)} Suppressed</span>')
+                
+            # Vulnerability details html
+            vuln_details_html = []
+            if is_vulnerable:
+                vuln_details_html.append('<div class="section-title">Active Vulnerabilities</div>')
+                for v in pkg_vulns:
+                    vid = v["id"]
+                    severity = v["severity"]
+                    summary = v["summary"]
+                    details = v.get("details", "")
+                    
+                    sev_lower = get_severity_level(v)
+                    sev_badge_class = f"sev-{sev_lower}"
+                    
+                    cvss_html = ""
+                    if severity.startswith("CVSS"):
+                        cvss_val = severity[5:].strip() if severity.startswith(("CVSS:", "CVSS ")) else severity
+                        cvss_html = f'<div class="vuln-cvss" style="font-size: 11px; color: var(--text-muted); margin-bottom: 4px; font-family: monospace;"><strong>CVSS:</strong> {cvss_val}</div>'
+                        sev_badge_html = f'<span class="sev-badge {sev_badge_class}">{sev_lower.upper()}</span>'
+                    else:
+                        sev_badge_html = f'<span class="sev-badge {sev_badge_class}">{severity}</span>'
+                        
+                    details_esc = details.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    
+                    vuln_details_html.append(f"""
+                    <div class="vuln-item">
+                        <div class="vuln-header">
+                            <span class="vuln-id">{vid}</span>
+                        </div>
+                        {cvss_html}
+                        <div style="margin-top: 4px; margin-bottom: 8px;">
+                            {sev_badge_html}
+                        </div>
+                        <div class="vuln-summary">{summary}</div>
+                        {f'<pre class="vuln-details">{details_esc}</pre>' if details else ''}
+                    </div>
+                    """)
+                    
+            # Suppressed vulnerabilities html
+            suppressed_details_html = []
+            if is_suppressed:
+                suppressed_details_html.append('<div class="section-title">Suppressed Vulnerabilities (Ignored)</div>')
+                for sv in pkg_suppressed_vulns:
+                    vid = sv["id"]
+                    summary = sv["summary"]
+                    reason = sv.get("suppressed_reason", "No reason provided")
+                    
+                    suppressed_details_html.append(f"""
+                    <div class="suppressed-item">
+                        <div class="vuln-header">
+                            <span class="vuln-id">{vid}</span>
+                            <span class="suppressed-label">Ignored</span>
+                        </div>
+                        <div class="vuln-summary">{summary}</div>
+                        <div class="suppressed-reason"><strong>Reason:</strong> {reason}</div>
+                    </div>
+                    """)
+                    
+            # Required by details
+            required_by_html = ""
+            required_by = r.get("required_by", [])
+            if required_by:
+                required_by_html = f"""
+                <div class="required-by-section">
+                    <strong>Required by:</strong> {', '.join(required_by)}
+                </div>
+                """
+                
+            error_html = f'<div class="error-section"><strong>Error:</strong> {error}</div>' if error else ''
+            
+            package_cards_html.append(f"""
+            <div class="package-card" 
+                 data-name="{name}" 
+                 data-status="{status}" 
+                 data-vulnerable="{"true" if is_vulnerable else "false"}" 
+                 data-suppressed="{"true" if is_suppressed else "false"}"
+                 data-deprecated="{"true" if is_deprecated else "false"}"
+                 id="pkg-{i}">
+                <div class="card-header" onclick="toggleDetails({i})">
+                    <div class="header-left">
+                        <div class="pkg-title">
+                            <span class="pkg-name">{name}</span>
+                            <span class="pkg-type-badge">{dep_type}</span>
+                        </div>
+                        <div class="pkg-badges">
+                            {" ".join(badges)}
+                        </div>
+                    </div>
+                    <div class="header-right">
+                        <div class="pkg-versions">
+                            <span class="version-item"><span class="label">Installed:</span> {installed if installed else declared}</span>
+                            <span class="version-item"><span class="label">Latest:</span> {latest}</span>
+                        </div>
+                        <svg class="chevron" id="chevron-{i}" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="6 9 12 15 18 9"></polyline>
+                        </svg>
+                    </div>
+                </div>
+                <div class="card-details" id="detail-{i}">
+                    {required_by_html}
+                    {error_html}
+                    {"".join(vuln_details_html)}
+                    {"".join(suppressed_details_html)}
+                </div>
+            </div>
+            """)
+
+        # HTML Master Template
+        html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dependency Status & Security Report</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {{
+            --bg-color: #0b0f19;
+            --card-bg: #111827;
+            --card-hover: #1f2937;
+            --text-main: #f9fafb;
+            --text-muted: #9ca3af;
+            --border-color: #374151;
+            --primary: #38bdf8;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --error: #ef4444;
+            --info: #0ea5e9;
+            --depr: #a855f7;
+            --muted: #4b5563;
+        }}
+        
+        body {{
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            margin: 0;
+            padding: 40px 20px;
+            display: flex;
+            justify-content: center;
+        }}
+        
+        .container {{
+            max-width: 1000px;
+            width: 100%;
+        }}
+        
+        header {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 30px;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 20px;
+        }}
+        
+        h1 {{
+            margin: 0;
+            font-size: 28px;
+            font-weight: 800;
+            background: linear-gradient(135deg, #38bdf8 0%, #3b82f6 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }}
+        
+        .meta-info {{
+            font-size: 13px;
+            color: var(--text-muted);
+            text-align: right;
+        }}
+        
+        /* Grid Dashboard */
+        .dashboard-grid {{
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 30px;
+        }}
+        
+        @media (max-width: 768px) {{
+            .dashboard-grid {{
+                grid-template-columns: 1fr;
+            }}
+        }}
+        
+        .stats-grid {{
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 15px;
+        }}
+        
+        .stat-card {{
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 15px;
+            text-align: center;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }}
+        
+        .stat-val {{
+            font-size: 24px;
+            font-weight: 700;
+            margin-bottom: 5px;
+        }}
+        
+        .stat-lbl {{
+            font-size: 11px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }}
+        
+        .stat-card.primary .stat-val {{ color: var(--primary); }}
+        .stat-card.warning .stat-val {{ color: var(--warning); }}
+        .stat-card.error .stat-val {{ color: var(--error); }}
+        .stat-card.success .stat-val {{ color: var(--success); }}
+        .stat-card.muted .stat-val {{ color: var(--text-muted); }}
+        
+        /* Controls Toolbar */
+        .controls-toolbar {{
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 25px;
+            gap: 15px;
+            flex-wrap: wrap;
+        }}
+        
+        .search-box {{
+            flex-grow: 1;
+            position: relative;
+            max-width: 400px;
+            min-width: 200px;
+        }}
+        
+        .search-box input {{
+            width: 100%;
+            background-color: var(--bg-color);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            color: var(--text-main);
+            padding: 10px 35px 10px 12px;
+            font-size: 14px;
+            box-sizing: border-box;
+            font-family: inherit;
+        }}
+        
+        .search-box input:focus {{
+            outline: none;
+            border-color: var(--primary);
+        }}
+        
+        #clearSearch {{
+            position: absolute;
+            right: 10px;
+            top: 50%;
+            transform: translateY(-50%);
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            font-size: 18px;
+            cursor: pointer;
+            padding: 0;
+            line-height: 1;
+            display: none;
+            font-family: sans-serif;
+        }}
+        
+        #clearSearch:hover {{
+            color: var(--text-main);
+        }}
+        
+        .filter-buttons {{
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }}
+        
+        .filter-btn {{
+            background-color: var(--bg-color);
+            border: 1px solid var(--border-color);
+            color: var(--text-muted);
+            border-radius: 8px;
+            padding: 8px 14px;
+            font-size: 13px;
+            cursor: pointer;
+            font-family: inherit;
+            transition: all 0.2s ease;
+        }}
+        
+        .filter-btn:hover {{
+            background-color: var(--card-hover);
+            color: var(--text-main);
+        }}
+        
+        .filter-btn.active {{
+            background: linear-gradient(135deg, #38bdf8 0%, #3b82f6 100%);
+            border-color: var(--primary);
+            color: white;
+            font-weight: 600;
+        }}
+        
+        /* Packages list */
+        .packages-list {{
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }}
+        
+        .package-card {{
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            overflow: hidden;
+            transition: border-color 0.2s ease;
+        }}
+        
+        .package-card:hover {{
+            border-color: var(--muted);
+        }}
+        
+        .card-header {{
+            padding: 18px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer;
+            user-select: none;
+            gap: 20px;
+        }}
+        
+        .card-header:hover {{
+            background-color: #161e2e;
+        }}
+        
+        .header-left {{
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }}
+        
+        .pkg-title {{
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }}
+        
+        .pkg-name {{
+            font-weight: 700;
+            font-size: 16px;
+        }}
+        
+        .pkg-type-badge {{
+            font-size: 10px;
+            background-color: #1e293b;
+            color: var(--text-muted);
+            padding: 2px 6px;
+            border-radius: 4px;
+            text-transform: uppercase;
+        }}
+        
+        .pkg-badges {{
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+        }}
+        
+        .badge {{
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 6px;
+            font-weight: 600;
+        }}
+        
+        .badge-success {{ background-color: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }}
+        .badge-warning {{ background-color: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }}
+        .badge-error {{ background-color: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }}
+        .badge-info {{ background-color: rgba(14, 165, 233, 0.15); color: #38bdf8; border: 1px solid rgba(14, 165, 233, 0.3); }}
+        .badge-depr {{ background-color: rgba(168, 85, 247, 0.15); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.3); }}
+        .badge-danger {{ background-color: rgba(220, 38, 38, 0.25); color: #fca5a5; border: 1px solid rgba(220, 38, 38, 0.4); }}
+        .badge-muted {{ background-color: rgba(100, 116, 139, 0.15); color: #94a3b8; border: 1px solid rgba(100, 116, 139, 0.3); }}
+        
+        .header-right {{
+            display: flex;
+            align-items: center;
+            gap: 25px;
+        }}
+        
+        .pkg-versions {{
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            font-size: 13px;
+            text-align: right;
+        }}
+        
+        .pkg-versions .label {{
+            color: var(--text-muted);
+            font-size: 11px;
+        }}
+        
+        .chevron {{
+            color: var(--text-muted);
+            transition: transform 0.2s ease;
+        }}
+        
+        /* Details Expanded */
+        .card-details {{
+            display: none;
+            padding: 20px;
+            background-color: #0d131f;
+            border-top: 1px solid var(--border-color);
+        }}
+        
+        .required-by-section {{
+            font-size: 12px;
+            color: var(--text-muted);
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            padding: 8px 12px;
+            border-radius: 6px;
+            margin-bottom: 15px;
+            display: inline-block;
+        }}
+        
+        .error-section {{
+            color: #f87171;
+            font-size: 13px;
+            background-color: rgba(220, 38, 38, 0.1);
+            border: 1px solid rgba(220, 38, 38, 0.3);
+            padding: 10px 14px;
+            border-radius: 6px;
+            margin-bottom: 15px;
+        }}
+        
+        .section-title {{
+            font-size: 12px;
+            font-weight: 700;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin: 15px 0 10px 0;
+        }}
+        
+        /* Vulnerability item */
+        .vuln-item {{
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-left: 3px solid var(--error);
+            border-radius: 8px;
+            padding: 12px 15px;
+            margin-bottom: 12px;
+        }}
+        
+        .vuln-header {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 6px;
+        }}
+        
+        .vuln-id {{
+            font-weight: 700;
+            font-size: 14px;
+            color: #fca5a5;
+        }}
+        
+        .sev-badge {{
+            font-size: 10px;
+            font-weight: 700;
+            padding: 2px 6px;
+            border-radius: 4px;
+            text-transform: uppercase;
+            display: inline-block;
+        }}
+        
+        .sev-critical {{ background-color: #ef4444; color: white; }}
+        .sev-high {{ background-color: #f97316; color: white; }}
+        .sev-medium {{ background-color: #eab308; color: black; }}
+        .sev-low {{ background-color: #0ea5e9; color: white; }}
+        .sev-unknown {{ background-color: #374151; color: white; }}
+        
+        .vuln-summary {{
+            font-size: 13.5px;
+            color: var(--text-main);
+            margin-bottom: 8px;
+            line-height: 1.4;
+        }}
+        
+        .vuln-details {{
+            font-family: monospace;
+            font-size: 11px;
+            background-color: var(--bg-color);
+            padding: 10px;
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+            overflow-x: auto;
+            color: var(--text-muted);
+            margin: 0;
+            white-space: pre-wrap;
+        }}
+        
+        /* Suppressed item */
+        .suppressed-item {{
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-left: 3px solid var(--muted);
+            border-radius: 8px;
+            padding: 12px 15px;
+            margin-bottom: 12px;
+        }}
+        
+        .suppressed-item .vuln-id {{
+            color: var(--text-muted);
+        }}
+        
+        .suppressed-label {{
+            font-size: 10px;
+            font-weight: 700;
+            background-color: var(--muted);
+            color: var(--text-main);
+            padding: 2px 6px;
+            border-radius: 4px;
+            text-transform: uppercase;
+        }}
+        
+        .suppressed-reason {{
+            font-size: 12.5px;
+            background-color: var(--bg-color);
+            border: 1px solid var(--border-color);
+            padding: 8px 12px;
+            border-radius: 6px;
+            margin-top: 8px;
+            color: #94a3b8;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div>
+                <h1>Kevlar CheckDeps <span style="font-size: 13px; font-weight: normal; color: var(--text-muted); margin-left: 6px;">v{VERSION}</span></h1>
+                <div style="font-size: 14px; color: var(--text-muted); margin-top: 4px;">Dependency Status & Security Audit</div>
+            </div>
+            <div class="meta-info">
+                <div>Report Generated: <strong>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</strong></div>
+                <div>Ecosystem: <strong>{results[0]["name"].split(":")[0] if ":" in results[0]["name"] else "Project"}</strong></div>
+            </div>
+        </header>
+        
+        <div class="dashboard-grid">
+            <!-- Stats -->
+            <div class="stats-grid">
+                <div class="stat-card primary">
+                    <div class="stat-val">{total}</div>
+                    <div class="stat-lbl">Checked</div>
+                </div>
+                <div class="stat-card warning">
+                    <div class="stat-val">{outdated}</div>
+                    <div class="stat-lbl">Outdated</div>
+                </div>
+                <div class="stat-card error">
+                    <div class="stat-val">{total_vulns}</div>
+                    <div class="stat-lbl">Vulnerable</div>
+                </div>
+                <div class="stat-card muted">
+                    <div class="stat-val">{suppressed_vulns}</div>
+                    <div class="stat-lbl">Suppressed</div>
+                </div>
+                <div class="stat-card success">
+                    <div class="stat-val">{up_to_date}</div>
+                    <div class="stat-lbl">Up-to-date</div>
+                </div>
+                <div class="stat-card error" style="background-color: rgba(239, 68, 68, 0.05);">
+                    <div class="stat-val">{errors}</div>
+                    <div class="stat-lbl">Errors</div>
+                </div>
+            </div>
+            
+            <!-- SVG Bar Chart -->
+            <div>
+                {svg_chart if vuls_enabled else '<div style="background:#111827; border-radius:12px; border:1px solid #374151; height:220px; display:flex; align-items:center; justify-content:center; color:#9ca3af; font-size:14px;">Vulnerabilities scan disabled. Run with --vuls to enable charts.</div>'}
+            </div>
+        </div>
+        
+        <!-- Controls -->
+        <div class="controls-toolbar">
+            <div class="search-box">
+                <input type="text" id="searchInput" placeholder="Search packages..." oninput="onSearchInput()">
+                <button id="clearSearch" onclick="clearSearchInput()">&times;</button>
+            </div>
+            <div class="filter-buttons">
+                <button class="filter-btn active" onclick="setCategory('all')">All</button>
+                <button class="filter-btn" onclick="setCategory('vulnerable')">Vulnerable</button>
+                <button class="filter-btn" onclick="setCategory('outdated')">Outdated</button>
+                <button class="filter-btn" onclick="setCategory('suppressed')">Suppressed</button>
+                <button class="filter-btn" onclick="setCategory('clean')">Clean</button>
+            </div>
+        </div>
+        
+        <!-- Packages List -->
+        <div class="packages-list">
+            {"".join(package_cards_html)}
+        </div>
+    </div>
+    
+    <script>
+        let currentCategory = 'all';
+        
+        function setCategory(cat) {{
+            currentCategory = cat;
+            document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('active'));
+            event.target.classList.add('active');
+            filterPackages();
+        }}
+        
+        function onSearchInput() {{
+            const input = document.getElementById('searchInput');
+            const clearBtn = document.getElementById('clearSearch');
+            if (input.value) {{
+                clearBtn.style.display = 'block';
+            }} else {{
+                clearBtn.style.display = 'none';
+            }}
+            filterPackages();
+        }}
+        
+        function clearSearchInput() {{
+            const input = document.getElementById('searchInput');
+            input.value = '';
+            document.getElementById('clearSearch').style.display = 'none';
+            filterPackages();
+            input.focus();
+        }}
+        
+        function filterPackages() {{
+            const searchVal = document.getElementById('searchInput').value.toLowerCase();
+            const cards = document.querySelectorAll('.package-card');
+            
+            cards.forEach(card => {{
+                const name = card.getAttribute('data-name').toLowerCase();
+                const status = card.getAttribute('data-status');
+                const isVulnerable = card.getAttribute('data-vulnerable') === 'true';
+                const isSuppressed = card.getAttribute('data-suppressed') === 'true';
+                const isDeprecated = card.getAttribute('data-deprecated') === 'true';
+                
+                let matchesCategory = false;
+                if (currentCategory === 'all') {{
+                    matchesCategory = true;
+                }} else if (currentCategory === 'vulnerable') {{
+                    matchesCategory = isVulnerable;
+                }} else if (currentCategory === 'outdated') {{
+                    matchesCategory = ['major', 'minor', 'patch'].includes(status) || isDeprecated;
+                }} else if (currentCategory === 'suppressed') {{
+                    matchesCategory = isSuppressed;
+                }} else if (currentCategory === 'clean') {{
+                    matchesCategory = status === 'up-to-date' && !isVulnerable && !isDeprecated;
+                }}
+                
+                const matchesSearch = name.includes(searchVal);
+                
+                if (matchesCategory && matchesSearch) {{
+                    card.style.display = 'block';
+                }} else {{
+                    card.style.display = 'none';
+                }}
+            }});
+        }}
+        
+        function toggleDetails(idx) {{
+            const detailEl = document.getElementById('detail-' + idx);
+            const chevronEl = document.getElementById('chevron-' + idx);
+            if (detailEl.style.display === 'none' || !detailEl.style.display) {{
+                detailEl.style.display = 'block';
+                chevronEl.style.transform = 'rotate(180deg)';
+            }} else {{
+                detailEl.style.display = 'none';
+                chevronEl.style.transform = 'rotate(0deg)';
+            }}
+        }}
+    </script>
+</body>
+</html>
+"""
+        
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(html_content)
+        print(f"{COLOR_GREEN}{ICON_OK} HTML interactive dashboard successfully exported to {filepath}{COLOR_RESET}")
+    except Exception as e:
+        print(f"{COLOR_RED}{ICON_ERROR} Failed to export HTML report: {e}{COLOR_RESET}")
 
 # ==============================================================================
 # CLI Entrypoint
@@ -2478,6 +4213,21 @@ TECHNOLOGIES = {
         "files": ["go.mod"],
         "osv_ecosystem": "Go",
         "runner": run_go_checker
+    },
+    "rust": {
+        "files": ["Cargo.toml", "Cargo.lock"],
+        "osv_ecosystem": "crates.io",
+        "runner": run_rust_checker
+    },
+    "ruby": {
+        "files": ["Gemfile", "Gemfile.lock"],
+        "osv_ecosystem": "RubyGems",
+        "runner": run_ruby_checker
+    },
+    "gradle": {
+        "files": ["build.gradle", "build.gradle.kts", "gradle.lockfile"],
+        "osv_ecosystem": "Maven",
+        "runner": run_gradle_checker
     }
 }
 
@@ -2643,7 +4393,7 @@ Examples:
     parser.add_argument(
         "--tech", "-t",
         required=True,
-        choices=["npm", "pip", "nuget", "php", "maven", "go"],
+        choices=["npm", "pip", "nuget", "php", "maven", "go", "rust", "ruby", "gradle"],
         help="The package manager / technology to check."
     )
     parser.add_argument(
@@ -2664,7 +4414,7 @@ Examples:
     )
     parser.add_argument(
         "--output", "-o",
-        help="Path to export the report file (supports .json and .md formats)."
+        help="Path to export the report file (supports .json, .md, and .html formats)."
     )
     parser.add_argument(
         "--show-all",
@@ -2683,6 +4433,11 @@ Examples:
         default=None,
         help="Exit with code 1 if security vulnerabilities are found. Optionally specify thresholds, e.g., 'critical:2,high:4'."
     )
+    parser.add_argument(
+        "--suppress", "-s",
+        default=None,
+        help="Path to a JSON file containing vulnerability suppressions (default: look for 'kevlar-suppressions.json')."
+    )
     
     args = parser.parse_args()
     
@@ -2695,6 +4450,9 @@ Examples:
     
     if not results:
         sys.exit(0)
+        
+    # Apply vulnerability suppressions
+    apply_vulnerability_suppressions(results, args.suppress)
         
     # Sort packages alphabetically (A-Z)
     results = sorted(results, key=lambda x: x["name"].lower())
@@ -2709,8 +4467,10 @@ Examples:
             export_json_report(results, args.output)
         elif args.output.lower().endswith(".md"):
             export_markdown_report(results, pkg_data, args.output, args.vuls)
+        elif args.output.lower().endswith(".html"):
+            export_html_report(results, pkg_data, args.output, args.vuls)
         else:
-            print(f"{COLOR_YELLOW}{ICON_WARN} Unknown output format. Export supports .json or .md extension.{COLOR_RESET}")
+            print(f"{COLOR_YELLOW}{ICON_WARN} Unknown output format. Export supports .json, .md, or .html extension.{COLOR_RESET}")
             
     # Check if pipeline should fail
     if args.fail_on_vulns and check_pipeline_failure(results, args.fail_on_vulns):

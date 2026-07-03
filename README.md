@@ -1,18 +1,21 @@
 # Kevlar CheckDeps (`kevlar.py`)
 
-A powerful, fast, and self-contained command-line utility written in Python to scan project dependencies. It identifies **outdated versions**, **deprecation notices** (yanked packages), and **security vulnerabilities** by querying package registries (npm/PyPI/NuGet/Packagist/Maven Central/Go Proxy) and the Google OSV (Open Source Vulnerabilities) database.
+A powerful, fast, and self-contained command-line utility written in Python to scan project dependencies. It identifies **outdated versions**, **deprecation notices** (yanked packages), and **security vulnerabilities** by querying package registries (npm/PyPI/NuGet/Packagist/Maven Central/Go Proxy/crates.io/RubyGems) and the Google OSV (Open Source Vulnerabilities) database.
 
 Designed with a modular and extensible architecture, it supports checking direct and transitive dependencies and requires **zero external python package installations**.
+
+![Kevlar CheckDeps Dashboard](assets/dashboard.png)
 
 ---
 
 ## Key Features
 
-- **Multi-Ecosystem Support**: Audits Node.js (`npm`), Python (`pip`), .NET (`nuget`, including C# `.csproj`, VB.NET `.vbproj`, F# `.fsproj`, and Solution files), PHP (`php`, including `composer.json` / `composer.lock`), Java (`maven`, supporting properties, centralized `<dependencyManagement>`, and multi-module `<modules>` configurations), and Go (`go`, supporting `go.mod` and proxy.golang.org casing escaping).
+- **Multi-Ecosystem Support**: Audits Node.js (`npm`), Python (`pip`), .NET (`nuget`, including C# `.csproj`, VB.NET `.vbproj`, F# `.fsproj`, and Solution files), PHP (`php`, including `composer.json` / `composer.lock`), Java (`maven`, supporting properties, centralized `<dependencyManagement>`, and multi-module `<modules>` configurations), Go (`go`, supporting `go.mod`), Rust (`rust`, supporting `Cargo.toml`/`Cargo.lock`), Ruby (`ruby`, supporting `Gemfile`/`Gemfile.lock`), and Java/Kotlin Gradle (`gradle`, supporting `build.gradle`/`build.gradle.kts`/`gradle.lockfile`).
 - **Outdated Package Detection**: Compares installed versions against the latest versions in registries, classifying updates into `Major`, `Minor`, and `Patch` increments.
 - **Deprecation Warnings**: 
   - For `npm`: Extracts maintainer deprecation notices for exact installed versions.
   - For `pip`: Identifies and reports "yanked" (deprecated/withdrawn) releases on PyPI.
+  - For `rust`: Identifies and reports "yanked" crates on crates.io.
 - **Security Vulnerability Audits**: Queries the public Google OSV database to identify active vulnerabilities, including CVE/GHSA IDs, CVSS vectors, and advisory summaries.
 - **Transitive Parent Tracing**:
   - For `npm`: Recursively builds a dependency graph from `package-lock.json`.
@@ -20,6 +23,8 @@ Designed with a modular and extensible architecture, it supports checking direct
   - For `nuget`: Reconstructs the parent-child graph from `obj/project.assets.json`.
   - For `php`: Reconstructs the parent-child graph from `composer.lock`.
   - For `go`: Flags indirect packages inside `go.mod` as transitive dependencies.
+  - For `rust`: Reconstructs the parent-child graph from `Cargo.lock`.
+  - For `ruby`: Reconstructs the parent-child graph from `Gemfile.lock`.
   - Annotates transitive packages clearly in reports (e.g., `Transitive (via Newtonsoft.Json)`).
 - **Fast Execution**: Uses Python's `concurrent.futures.ThreadPoolExecutor` to perform network requests concurrently.
 - **High Performance Scanning**: Optimizes queries by requesting abbreviated metadata format headers from npm, and checks security advisories in a single `POST /v1/querybatch` request rather than one-by-one.
@@ -69,6 +74,18 @@ Specify the target ecosystem via `--tech` (or `-t`) and the directory via `--pat
   ```powershell
   python kevlar.py --tech go --path ./go_project
   ```
+- **For Rust (rust)**:
+  ```powershell
+  python kevlar.py --tech rust --path ./rust_project
+  ```
+- **For Ruby (ruby)**:
+  ```powershell
+  python kevlar.py --tech ruby --path ./ruby_project
+  ```
+- **For Java/Kotlin (gradle)**:
+  ```powershell
+  python kevlar.py --tech gradle --path ./gradle_project
+  ```
 
 ### 2. Scan Security Vulnerabilities
 Add the `--vuls` (or `-v`) flag to audit packages against Google's OSV database:
@@ -90,14 +107,27 @@ Add the `--all` (or `-a`) flag to scan the entire tree resolved in lockfiles/ass
   ```powershell
   python kevlar.py --tech php --path ./php_project --all --vuls
   ```
+- **For Rust (rust)**:
+  ```powershell
+  python kevlar.py --tech rust --path ./rust_project --all --vuls
+  ```
+- **For Ruby (ruby)**:
+  ```powershell
+  python kevlar.py --tech ruby --path ./ruby_project --all --vuls
+  ```
 *(For pip, if your `requirements.txt` contains transitive comments from `pip-compile`, the script will automatically parse and display parent tracing details).*
 *(For Java / Maven, if you point the path to a parent POM, the script will automatically discover and aggregate all sub-modules recursively).*
 
 ### 4. Export Report Files
-Output findings into structured Markdown (`.md`) or raw JSON (`.json`) files using `--output` (or `-o`):
-```powershell
-python kevlar.py --tech nuget --path ./dotnet_project --vuls --output dependency_report.md
-```
+Output findings into structured Markdown (`.md`), raw JSON (`.json`), or interactive HTML dashboard (`.html`) files using `--output` (or `-o`):
+- **For Markdown**:
+  ```powershell
+  python kevlar.py --tech nuget --path ./dotnet_project --vuls --output dependency_report.md
+  ```
+- **For Interactive HTML**:
+  ```powershell
+  python kevlar.py --tech nuget --path ./dotnet_project --vuls --output dependency_report.html
+  ```
 
 ### 5. Show Up-to-Date Packages
 By default, the tool only shows packages that have issues (outdated, deprecated, vulnerable, or errored). Use `--show-all` to list all packages:
@@ -111,15 +141,15 @@ python kevlar.py --tech nuget --path ./dotnet_project --show-all
 
 | Argument | Short | Default | Description |
 | --- | --- | --- | --- |
-| `--tech` | `-t` | *Required* | The package manager / technology to check. Choices: `npm`, `pip`, `nuget`, `php`, `maven`, `go`. |
-| `--path` | `-p` | `.` | Directory containing the package files (e.g. `.csproj`, `composer.json`, `package.json`, `pom.xml`, `go.mod`, or `requirements.txt`). |
+| `--tech` | `-t` | *Required* | The package manager / technology to check. Choices: `npm`, `pip`, `nuget`, `php`, `maven`, `go`, `rust`, `ruby`, `gradle`. |
+| `--path` | `-p` | `.` | Directory containing the package files (e.g. `.csproj`, `composer.json`, `package.json`, `pom.xml`, `go.mod`, `requirements.txt`, `Cargo.toml`, `Gemfile`, `build.gradle`, etc.). |
 | `--vuls` | `-v` | `False` | Enable security vulnerability queries via Google OSV API. |
 | `--all` | `-a` | `False` | Scan all dependencies resolved in lockfile, rather than direct ones. |
 | `--concurrent` | `-c` | `10` | Number of concurrent network request threads to run. |
-| `--output` | `-o` | `None` | Path to export report file (detects `.json` and `.md` formats). |
+| `--output` | `-o` | `None` | Path to export report file (detects `.json`, `.md`, and `.html` formats). |
 | `--show-all` | | `False` | Display all dependencies, even those up-to-date and secure. |
 | `--fail-on-vulns` | | `None` | Break the build (exit code 1) on security issues. Accepts threshold limits (e.g., `"critical:2,high:4"`). |
-
+| `--suppress` | `-s` | `None` | Path to a JSON file containing vulnerability suppressions (default: look for `kevlar-suppressions.json` in the active path). |
 ---
 
 ## CI/CD Pipeline Integration & Build Breaking
@@ -206,12 +236,44 @@ dependency_scan:
 
 ---
 
+## Vulnerability Suppression (Ignoring Alerts)
+
+You can suppress specific vulnerability alerts to prevent them from breaking your build pipelines. Create a JSON file (by default `kevlar-suppressions.json` in the project directory) containing your rules:
+
+```json
+{
+  "suppressions": [
+    {
+      "id": "GHSA-pq67-6m6q-mj2v",
+      "reason": "Redirecciones no deshabilitadas en PoolManager mitigadas en nuestro código."
+    },
+    {
+      "package": "certifi",
+      "reason": "Librería de certifi utilizada únicamente en entorno local/testeo."
+    },
+    {
+      "package": "django",
+      "id": "GHSA-2gwj-7jmv-h26r",
+      "reason": "Inyección SQL mitigada por nuestro uso del ORM nativo seguro."
+    }
+  ]
+}
+```
+
+Rules support:
+- Suppressing by Vulnerability ID (CVE or GHSA) globally across all packages.
+- Suppressing an entire package's vulnerabilities.
+- Suppressing a specific vulnerability ID on a specific package.
+
+---
+
 ## Design Considerations & Behavior
 
 ### 1. Performance Optimizations
 - **Concurrency**: Registry queries for package metadata are executed concurrently using Python's `concurrent.futures.ThreadPoolExecutor`. By default, it runs with `10` threads, which can be tuned using `--concurrent`.
 - **Abbreviated npm Metadata**: Queries to the npm registry request abbreviated package metadata format (`application/vnd.npm.install-v1+json`), reducing HTTP response payload size by over 95%.
 - **Vulnerability Query Batching**: Queries to the Google OSV API are executed in single large POST batches (`/v1/querybatch`) up to 1000 packages per request, preventing multiple slow individual API roundtrips.
+- **Configurable Endpoints**: All external registry and vulnerability API endpoints are defined as configuration variables at the top of [kevlar.py](kevlar.py) for easy customization.
 
 ### 2. Version Comparison Logic
 To correctly flag outdated packages, the tool runs a custom Semantic Versioning parser that supports:
