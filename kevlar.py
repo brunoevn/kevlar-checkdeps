@@ -174,6 +174,64 @@ def classify_update(installed_str, latest_str):
     else:
         return "patch"
 
+def find_latest_same_major(installed_ver, all_versions):
+    """Finds the latest version in all_versions that shares the same major version as installed_ver.
+    Returns:
+        (latest_same_major, latest_absolute)
+    """
+    if not installed_ver or not all_versions:
+        return (None, None)
+    
+    # Strip common non-numeric prefix from installed version
+    clean_inst = re.sub(r'^[^\d]*', '', installed_ver).split('+')[0]
+    inst_major, _, _, inst_prerelease = parse_semver(clean_inst)
+    installed_is_prerelease = bool(inst_prerelease)
+    
+    # Filter out prerelease versions if the installed version is stable
+    filtered_versions = []
+    for v in all_versions:
+        clean_v = re.sub(r'^[^\d]*', '', v).split('+')[0]
+        _, _, _, prerelease = parse_semver(clean_v)
+        if not installed_is_prerelease and prerelease:
+            continue
+        filtered_versions.append(v)
+        
+    # If filtering left us with nothing, fall back to all versions
+    if not filtered_versions:
+        filtered_versions = all_versions
+    
+    # helper for sorting
+    def semver_sort_key(v_str):
+        clean = re.sub(r'^[^\d]*', '', v_str).split('+')[0]
+        major, minor, patch, prerelease = parse_semver(clean)
+        is_stable = 1 if not prerelease else 0
+        return (major, minor, patch, is_stable, prerelease)
+        
+    sorted_all = sorted(filtered_versions, key=semver_sort_key)
+    if not sorted_all:
+        return (None, None)
+        
+    latest_absolute = sorted_all[-1]
+    
+    same_major_versions = []
+    for v in sorted_all:
+        clean_v = re.sub(r'^[^\d]*', '', v).split('+')[0]
+        v_major, _, _, _ = parse_semver(clean_v)
+        if v_major == inst_major:
+            same_major_versions.append(v)
+            
+    latest_same_major = same_major_versions[-1] if same_major_versions else None
+    
+    return (latest_same_major, latest_absolute)
+
+def format_latest_versions(latest_same_major, latest_absolute):
+    """Formats the latest version for display when they differ between same-major and absolute."""
+    if not latest_absolute:
+        return None
+    if not latest_same_major or latest_same_major == latest_absolute:
+        return latest_absolute
+    return f"{latest_same_major} (latest: {latest_absolute})"
+
 # ==============================================================================
 # NPM Checker Logic
 # ==============================================================================
@@ -338,6 +396,7 @@ def check_npm_package(target):
             
         latest_version = data.get("dist-tags", {}).get("latest")
         all_versions_meta = data.get("versions", {})
+        all_versions = list(all_versions_meta.keys())
         
         for ver_str in versions_to_check:
             # Strip ranges prefixes to get base version for check
@@ -348,15 +407,25 @@ def check_npm_package(target):
             ver_meta = all_versions_meta.get(clean_ver) or all_versions_meta.get(ver_str) or {}
             deprecation_msg = ver_meta.get("deprecated")
             
-            update_type = "up-to-date"
-            if latest_version and clean_ver != "0.0.0":
-                update_type = classify_update(clean_ver, latest_version)
+            # Find latest same major and absolute latest
+            latest_same_major, latest_absolute = find_latest_same_major(clean_ver, all_versions)
+            if latest_version:
+                latest_absolute = latest_version
+            if not latest_same_major:
+                latest_same_major = latest_absolute
                 
+            update_type = "up-to-date"
+            if latest_absolute and clean_ver != "0.0.0":
+                update_type = classify_update(clean_ver, latest_absolute)
+                
+            display_latest = format_latest_versions(latest_same_major, latest_absolute)
             results.append({
                 "name": name,
                 "declared": declared,
                 "installed": ver_str,
-                "latest": latest_version,
+                "latest": display_latest,
+                "latest_same_major": latest_same_major,
+                "latest_absolute": latest_absolute,
                 "status": update_type,
                 "deprecated": deprecation_msg,
                 "error": None
@@ -805,6 +874,7 @@ def check_pypi_package(target):
         info = data.get("info", {})
         latest_version = info.get("version")
         releases = data.get("releases", {})
+        all_versions = list(releases.keys())
         
         for ver_str in versions_to_check:
             # Clean version constraints prefixes
@@ -820,15 +890,25 @@ def check_pypi_package(target):
                     yanked_reason = file_info.get("yanked_reason") or "This release was yanked from PyPI."
                     break
                     
-            update_type = "up-to-date"
-            if latest_version and clean_ver != "0.0.0":
-                update_type = classify_update(clean_ver, latest_version)
+            # Find latest same major and absolute latest
+            latest_same_major, latest_absolute = find_latest_same_major(clean_ver, all_versions)
+            if latest_version:
+                latest_absolute = latest_version
+            if not latest_same_major:
+                latest_same_major = latest_absolute
                 
+            update_type = "up-to-date"
+            if latest_absolute and clean_ver != "0.0.0":
+                update_type = classify_update(clean_ver, latest_absolute)
+                
+            display_latest = format_latest_versions(latest_same_major, latest_absolute)
             results.append({
                 "name": name,
                 "declared": declared,
                 "installed": ver_str,
-                "latest": latest_version,
+                "latest": display_latest,
+                "latest_same_major": latest_same_major,
+                "latest_absolute": latest_absolute,
                 "status": update_type,
                 "deprecated": yanked_reason,
                 "error": None
@@ -1170,34 +1250,27 @@ def check_nuget_package(target):
                 
         valid_versions = stable_versions if stable_versions else versions_list
         
-        def parse_semver_key(v_str):
-            m = re.match(r'^(\d+)\.(\d+)(?:\.(\d+))?', v_str)
-            if m:
-                major = int(m.group(1))
-                minor = int(m.group(2))
-                patch = int(m.group(3)) if m.group(3) else 0
-                return (major, minor, patch)
-            return (0, 0, 0)
-            
-        latest_version = None
-        if valid_versions:
-            sorted_versions = sorted(valid_versions, key=parse_semver_key)
-            latest_version = sorted_versions[-1]
-            
         for ver_str in versions_to_check:
             clean_ver = re.sub(r'^[^\d]*', '', ver_str) if ver_str else "0.0.0"
             if not clean_ver:
                 clean_ver = "0.0.0"
                 
-            update_type = "up-to-date"
-            if latest_version and clean_ver != "0.0.0":
-                update_type = classify_update(clean_ver, latest_version)
+            latest_same_major, latest_absolute = find_latest_same_major(clean_ver, valid_versions)
+            if not latest_same_major:
+                latest_same_major = latest_absolute
                 
+            update_type = "up-to-date"
+            if latest_absolute and clean_ver != "0.0.0":
+                update_type = classify_update(clean_ver, latest_absolute)
+                
+            display_latest = format_latest_versions(latest_same_major, latest_absolute)
             results.append({
                 "name": name,
                 "declared": declared,
                 "installed": ver_str,
-                "latest": latest_version,
+                "latest": display_latest,
+                "latest_same_major": latest_same_major,
+                "latest_absolute": latest_absolute,
                 "status": update_type,
                 "deprecated": None,
                 "error": None
@@ -1457,35 +1530,27 @@ def check_composer_package(target):
                     
         valid_versions = stable_versions if stable_versions else versions_list
         
-        def parse_semver_key(v_str):
-            m = re.match(r'^(\d+)\.(\d+)(?:\.(\d+))?(?:\.(\d+))?', v_str)
-            if m:
-                major = int(m.group(1))
-                minor = int(m.group(2))
-                patch = int(m.group(3)) if m.group(3) else 0
-                build = int(m.group(4)) if m.group(4) else 0
-                return (major, minor, patch, build)
-            return (0, 0, 0, 0)
-            
-        latest_version = None
-        if valid_versions:
-            sorted_versions = sorted(valid_versions, key=parse_semver_key)
-            latest_version = sorted_versions[-1]
-            
         for ver_str in versions_to_check:
             clean_ver = ver_str.lstrip("v") if ver_str else "0.0.0"
             if not clean_ver or clean_ver == "0.0.0":
                 clean_ver = "0.0.0"
                 
-            update_type = "up-to-date"
-            if latest_version and clean_ver != "0.0.0":
-                update_type = classify_update(clean_ver, latest_version)
+            latest_same_major, latest_absolute = find_latest_same_major(clean_ver, valid_versions)
+            if not latest_same_major:
+                latest_same_major = latest_absolute
                 
+            update_type = "up-to-date"
+            if latest_absolute and clean_ver != "0.0.0":
+                update_type = classify_update(clean_ver, latest_absolute)
+                
+            display_latest = format_latest_versions(latest_same_major, latest_absolute)
             results.append({
                 "name": name,
                 "declared": declared,
                 "installed": ver_str,
-                "latest": latest_version,
+                "latest": display_latest,
+                "latest_same_major": latest_same_major,
+                "latest_absolute": latest_absolute,
                 "status": update_type,
                 "deprecated": None,
                 "error": None
@@ -1807,38 +1872,27 @@ def check_maven_package(target):
                 
         valid_versions = stable_versions if stable_versions else versions_list
         
-        def parse_semver_key(v_str):
-            m = re.match(r'^(\d+)\.(\d+)(?:\.(\d+))?(?:\.(\d+))?', v_str)
-            if m:
-                major = int(m.group(1))
-                minor = int(m.group(2))
-                patch = int(m.group(3)) if m.group(3) else 0
-                build = int(m.group(4)) if m.group(4) else 0
-                return (major, minor, patch, build)
-            m_digits = re.match(r'^(\d+)$', v_str)
-            if m_digits:
-                return (int(m_digits.group(1)), 0, 0, 0)
-            return (0, 0, 0, 0)
-            
-        latest_version = None
-        if valid_versions:
-            sorted_versions = sorted(valid_versions, key=parse_semver_key)
-            latest_version = sorted_versions[-1]
-            
         for ver_str in versions_to_check:
             clean_ver = re.sub(r'^[^\d]*', '', ver_str) if ver_str else "0.0.0"
             if not clean_ver:
                 clean_ver = "0.0.0"
                 
-            update_type = "up-to-date"
-            if latest_version and clean_ver != "0.0.0":
-                update_type = classify_update(clean_ver, latest_version)
+            latest_same_major, latest_absolute = find_latest_same_major(clean_ver, valid_versions)
+            if not latest_same_major:
+                latest_same_major = latest_absolute
                 
+            update_type = "up-to-date"
+            if latest_absolute and clean_ver != "0.0.0":
+                update_type = classify_update(clean_ver, latest_absolute)
+                
+            display_latest = format_latest_versions(latest_same_major, latest_absolute)
             results.append({
                 "name": name,
                 "declared": declared,
                 "installed": ver_str,
-                "latest": latest_version,
+                "latest": display_latest,
+                "latest_same_major": latest_same_major,
+                "latest_absolute": latest_absolute,
                 "status": update_type,
                 "deprecated": None,
                 "error": None
@@ -2083,35 +2137,28 @@ def check_go_package(target):
                 
         valid_versions = stable_versions if stable_versions else [(v, v.split("+")[0]) for v in versions_list]
         
-        def parse_semver_key(v_tuple):
-            v_str = v_tuple[1].lstrip("v")
-            m = re.match(r'^(\d+)\.(\d+)(?:\.(\d+))?(?:\.(\d+))?', v_str)
-            if m:
-                major = int(m.group(1))
-                minor = int(m.group(2))
-                patch = int(m.group(3)) if m.group(3) else 0
-                build = int(m.group(4)) if m.group(4) else 0
-                return (major, minor, patch, build)
-            return (0, 0, 0, 0)
-            
-        latest_version = None
-        if valid_versions:
-            sorted_versions = sorted(valid_versions, key=parse_semver_key)
-            latest_version = sorted_versions[-1][0]
-            
+        all_versions = [item[0] for item in valid_versions]
+        
         for ver_str in versions_to_check:
+            latest_same_major, latest_absolute = find_latest_same_major(ver_str, all_versions)
+            if not latest_same_major:
+                latest_same_major = latest_absolute
+                
             clean_ver = ver_str.lstrip("v").split("+")[0] if ver_str else "0.0.0"
-            clean_latest = latest_version.lstrip("v").split("+")[0] if latest_version else "0.0.0"
+            clean_latest_absolute = latest_absolute.lstrip("v").split("+")[0] if latest_absolute else "0.0.0"
             
             update_type = "up-to-date"
-            if latest_version and clean_ver != "0.0.0":
-                update_type = classify_update(clean_ver, clean_latest)
+            if latest_absolute and clean_ver != "0.0.0":
+                update_type = classify_update(clean_ver, clean_latest_absolute)
                 
+            display_latest = format_latest_versions(latest_same_major, latest_absolute)
             results.append({
                 "name": name,
                 "declared": declared,
                 "installed": ver_str,
-                "latest": latest_version,
+                "latest": display_latest,
+                "latest_same_major": latest_same_major,
+                "latest_absolute": latest_absolute,
                 "status": update_type,
                 "deprecated": None,
                 "error": None
@@ -2408,22 +2455,33 @@ def check_rust_package(target):
             if v_meta.get("yanked"):
                 yanked_versions.add(v_meta.get("num"))
                 
+        all_versions = [v.get("num") for v in versions_meta if v.get("num")]
+        
         for ver_str in versions_to_check:
             clean_ver = re.sub(r'^[^\d]*', '', ver_str) if ver_str else "0.0.0"
             if not clean_ver:
                 clean_ver = "0.0.0"
                 
+            latest_same_major, latest_absolute = find_latest_same_major(clean_ver, all_versions)
+            if latest_version:
+                latest_absolute = latest_version
+            if not latest_same_major:
+                latest_same_major = latest_absolute
+                
             status = "up-to-date"
-            if latest_version and clean_ver != "0.0.0":
-                status = classify_update(clean_ver, latest_version)
+            if latest_absolute and clean_ver != "0.0.0":
+                status = classify_update(clean_ver, latest_absolute)
                 
             is_deprecated = clean_ver in yanked_versions
             
+            display_latest = format_latest_versions(latest_same_major, latest_absolute)
             results.append({
                 "name": name,
                 "declared": ver_str,
                 "installed": clean_ver,
-                "latest": latest_version or "unknown",
+                "latest": display_latest or "unknown",
+                "latest_same_major": latest_same_major,
+                "latest_absolute": latest_absolute,
                 "status": status,
                 "deprecated": is_deprecated,
                 "error": None
@@ -2647,28 +2705,51 @@ def check_ruby_package(target):
     results = []
     
     try:
-        url = f"{URL_RUBY_REGISTRY}{urllib.parse.quote(name)}.json"
-        req = urllib.request.Request(url)
-        
-        with urllib.request.urlopen(req, timeout=10) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        try:
+            url_versions = f"https://rubygems.org/api/v1/versions/{urllib.parse.quote(name)}.json"
+            req_v = urllib.request.Request(url_versions)
+            with urllib.request.urlopen(req_v, timeout=10) as response:
+                versions_data = json.loads(response.read().decode("utf-8"))
             
-        latest_version = data.get("version")
-        
+            stable_versions = []
+            all_versions = []
+            for item in versions_data:
+                v_num = item.get("number")
+                if v_num:
+                    all_versions.append(v_num)
+                    if not item.get("prerelease"):
+                        stable_versions.append(v_num)
+            valid_versions = stable_versions if stable_versions else all_versions
+        except Exception:
+            # Fallback to single latest version endpoint
+            url_fallback = f"{URL_RUBY_REGISTRY}{urllib.parse.quote(name)}.json"
+            req_fb = urllib.request.Request(url_fallback)
+            with urllib.request.urlopen(req_fb, timeout=10) as response:
+                data_fb = json.loads(response.read().decode("utf-8"))
+            latest_version = data_fb.get("version")
+            valid_versions = [latest_version] if latest_version else []
+            
         for ver_str in versions_to_check:
             clean_ver = re.sub(r'^[^\d]*', '', ver_str) if ver_str else "0.0.0"
             if not clean_ver:
                 clean_ver = "0.0.0"
                 
-            status = "up-to-date"
-            if latest_version and clean_ver != "0.0.0":
-                status = classify_update(clean_ver, latest_version)
+            latest_same_major, latest_absolute = find_latest_same_major(clean_ver, valid_versions)
+            if not latest_same_major:
+                latest_same_major = latest_absolute
                 
+            status = "up-to-date"
+            if latest_absolute and clean_ver != "0.0.0":
+                status = classify_update(clean_ver, latest_absolute)
+                
+            display_latest = format_latest_versions(latest_same_major, latest_absolute)
             results.append({
                 "name": name,
                 "declared": ver_str,
                 "installed": clean_ver,
-                "latest": latest_version or "unknown",
+                "latest": display_latest or "unknown",
+                "latest_same_major": latest_same_major,
+                "latest_absolute": latest_absolute,
                 "status": status,
                 "deprecated": False,
                 "error": None
