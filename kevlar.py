@@ -20,7 +20,7 @@ import time
 from datetime import datetime
 import xml.etree.ElementTree as ET
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 
 # External APIs Configuration
 URL_NPM_REGISTRY = "https://registry.npmjs.org/"
@@ -3923,7 +3923,27 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                 </div>
                 """
                 
-            error_html = f'<div class="error-section"><strong>Error:</strong> {error}</div>' if error else ''
+            notes_warnings_html = ""
+            notes_warnings_list = []
+            if is_deprecated:
+                msg = is_deprecated if isinstance(is_deprecated, str) else "This package has been deprecated."
+                notes_warnings_list.append(f'<div class="note-warning-item"><span class="note-warning-icon">🚫</span> <div><strong>Deprecation Warning:</strong> {msg}</div></div>')
+            if error:
+                notes_warnings_list.append(f'<div class="note-warning-item"><span class="note-warning-icon">❌</span> <div><strong>Error:</strong> {error}</div></div>')
+            
+            if notes_warnings_list:
+                notes_warnings_items = "\n".join(notes_warnings_list)
+                notes_warnings_html = f"""
+                <div class="notes-warnings-section">
+                    <div class="section-title-inline">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+                        Notes & Warnings
+                    </div>
+                    <div class="notes-warnings-body">
+                        {notes_warnings_items}
+                    </div>
+                </div>
+                """
             
             changelog_html = ""
             if status == "major":
@@ -3973,7 +3993,7 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                 </div>
                 <div class="card-details" id="detail-{i}">
                     {required_by_html}
-                    {error_html}
+                    {notes_warnings_html}
                     {changelog_html}
                     {"".join(vuln_details_html)}
                     {"".join(suppressed_details_html)}
@@ -4415,6 +4435,53 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             border-radius: 6px;
             margin-top: 8px;
             color: #94a3b8;
+        }}
+        
+        /* Notes & Warnings inline section */
+        .notes-warnings-section {{
+            background-color: rgba(245, 158, 11, 0.05);
+            border: 1px solid rgba(245, 158, 11, 0.25);
+            border-left: 4px solid var(--warning);
+            border-radius: 8px;
+            padding: 12px 15px;
+            margin-bottom: 15px;
+        }}
+        
+        .section-title-inline {{
+            font-size: 11px;
+            font-weight: 700;
+            color: var(--warning);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }}
+        
+        .section-title-inline svg {{
+            stroke: var(--warning);
+            fill: none;
+        }}
+        
+        .notes-warnings-body {{
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }}
+        
+        .note-warning-item {{
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            font-size: 13px;
+            line-height: 1.45;
+            color: var(--text-main);
+        }}
+        
+        .note-warning-icon {{
+            flex-shrink: 0;
+            font-size: 14px;
         }}
         
         /* Changelog & Migration buttons */
