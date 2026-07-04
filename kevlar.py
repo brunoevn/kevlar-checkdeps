@@ -5469,17 +5469,10 @@ def check_for_updates():
             if latest_version != VERSION:
                 status = "Update Available"
                 
-    try:
-        with open("version.md", "w", encoding="utf-8") as f:
-            f.write(f'VERSION="{VERSION}"\n')
-        print(f"{COLOR_GREEN}{ICON_OK} Current version written to local version.md{COLOR_RESET}")
-        
-        if status == "Update Available":
-            print(f"{COLOR_YELLOW}{ICON_WARN} A new version v{latest_version} is available! (Current: v{VERSION}). Run 'git pull' to update.{COLOR_RESET}")
-        elif latest_version not in ("Unknown", "Error"):
-            print(f"{COLOR_GREEN}{ICON_OK} Kevlar is up-to-date (v{VERSION}).{COLOR_RESET}")
-    except Exception as e:
-        print(f"{COLOR_RED}{ICON_ERROR} Error writing local version.md: {e}{COLOR_RESET}")
+    if status == "Update Available":
+        print(f"{COLOR_YELLOW}{ICON_WARN} A new version v{latest_version} is available! (Current: v{VERSION}). Run 'git pull' to update.{COLOR_RESET}")
+    elif latest_version not in ("Unknown", "Error"):
+        print(f"{COLOR_GREEN}{ICON_OK} Kevlar is up-to-date (v{VERSION}).{COLOR_RESET}")
 
 def print_banner():
     banner = f"""{COLOR_BOLD}{COLOR_CYAN}

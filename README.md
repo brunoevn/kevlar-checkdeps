@@ -150,7 +150,7 @@ python kevlar.py --tech nuget --path ./dotnet_project --show-all
 ```
 
 ### 6. Check for Updates
-Check if a newer version of Kevlar is available on GitHub and generate a local `version.md` containing the current version:
+Check if a newer version of Kevlar is available on GitHub:
 ```powershell
 python kevlar.py --update
 ```
@@ -170,7 +170,7 @@ python kevlar.py --update
 | `--show-all` | | `False` | Display all dependencies, even those up-to-date and secure. |
 | `--fail-on-vulns` | | `None` | Break the build (exit code 1) on security issues. Accepts threshold limits (e.g., `"critical:2,high:4"`). |
 | `--suppress` | `-s` | `None` | Path to a JSON file containing vulnerability suppressions (default: look for `kevlar-suppressions.json` in the active path). |
-| `--update` | | `False` | Check for updates from GitHub and generate a local `version.md` file. |
+| `--update` | | `False` | Check for updates from GitHub. |
 ---
 
 ## CI/CD Pipeline Integration & Build Breaking
