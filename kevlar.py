@@ -4525,8 +4525,17 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
         
         .stats-grid {{
             display: grid;
-            grid-template-columns: repeat(3, 1fr);
+            grid-template-columns: repeat(4, 1fr);
             gap: 15px;
+        }}
+        
+        @media (max-width: 768px) {{
+            .stats-grid {{
+                grid-template-columns: repeat(2, 1fr);
+            }}
+            .stat-card.primary-large {{
+                grid-column: span 2 !important;
+            }}
         }}
         
         .stat-card {{
@@ -4538,6 +4547,10 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             display: flex;
             flex-direction: column;
             justify-content: center;
+        }}
+        
+        .stat-card.primary-large {{
+            grid-column: span 2;
         }}
         
         .stat-val {{
@@ -4553,11 +4566,12 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             letter-spacing: 0.5px;
         }}
         
-        .stat-card.primary .stat-val {{ color: var(--primary); }}
+        .stat-card.primary .stat-val, .stat-card.primary-large .stat-val {{ color: var(--primary); }}
         .stat-card.warning .stat-val {{ color: var(--warning); }}
         .stat-card.error .stat-val {{ color: var(--error); }}
         .stat-card.success .stat-val {{ color: var(--success); }}
         .stat-card.muted .stat-val {{ color: var(--text-muted); }}
+        .stat-card.depr .stat-val {{ color: var(--depr); }}
         
         /* Controls Toolbar */
         .controls-toolbar {{
@@ -4967,7 +4981,7 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
         <div class="dashboard-grid">
             <!-- Stats -->
             <div class="stats-grid">
-                <div class="stat-card primary">
+                <div class="stat-card primary-large">
                     <div class="stat-val">{total}</div>
                     <div class="stat-lbl">Checked</div>
                 </div>
@@ -4978,6 +4992,10 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                 <div class="stat-card error">
                     <div class="stat-val">{total_vulns}</div>
                     <div class="stat-lbl">Vulnerable</div>
+                </div>
+                <div class="stat-card depr">
+                    <div class="stat-val">{deprecated}</div>
+                    <div class="stat-lbl">Deprecated</div>
                 </div>
                 <div class="stat-card muted">
                     <div class="stat-val">{suppressed_vulns}</div>
@@ -5006,11 +5024,12 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                 <button id="clearSearch" onclick="clearSearchInput()">&times;</button>
             </div>
             <div class="filter-buttons">
-                <button class="filter-btn active" onclick="setCategory('all')">All</button>
-                <button class="filter-btn" onclick="setCategory('vulnerable')">Vulnerable</button>
-                <button class="filter-btn" onclick="setCategory('outdated')">Outdated</button>
-                <button class="filter-btn" onclick="setCategory('suppressed')">Suppressed</button>
-                <button class="filter-btn" onclick="setCategory('clean')">Clean</button>
+                <button class="filter-btn active" onclick="setCategory('all')">All ({total})</button>
+                <button class="filter-btn" onclick="setCategory('vulnerable')">Vulnerable ({total_vulns})</button>
+                <button class="filter-btn" onclick="setCategory('outdated')">Outdated ({outdated})</button>
+                <button class="filter-btn" onclick="setCategory('deprecated')">Deprecated ({deprecated})</button>
+                <button class="filter-btn" onclick="setCategory('suppressed')">Suppressed ({suppressed_vulns})</button>
+                <button class="filter-btn" onclick="setCategory('clean')">Clean ({up_to_date})</button>
             </div>
         </div>
         
@@ -5067,6 +5086,8 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                     matchesCategory = isVulnerable;
                 }} else if (currentCategory === 'outdated') {{
                     matchesCategory = ['major', 'minor', 'patch'].includes(status) || isDeprecated;
+                }} else if (currentCategory === 'deprecated') {{
+                    matchesCategory = isDeprecated;
                 }} else if (currentCategory === 'suppressed') {{
                     matchesCategory = isSuppressed;
                 }} else if (currentCategory === 'clean') {{
