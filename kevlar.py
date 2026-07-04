@@ -20,7 +20,7 @@ import time
 from datetime import datetime
 import xml.etree.ElementTree as ET
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 
 # External APIs Configuration
 URL_NPM_REGISTRY = "https://registry.npmjs.org/"
@@ -101,6 +101,33 @@ def init_colors_and_encoding():
             "bot_left": "+", "bot_join": "+", "bot_right": "+",
             "vertical": "|"
         }
+
+def safe_urlopen(req, timeout=10, max_retries=3, backoff=0.5):
+    """Safely opens a URL with retries, exponential backoff, and default headers."""
+    if isinstance(req, str):
+        req = urllib.request.Request(req)
+    if not req.has_header("User-Agent"):
+        req.add_header("User-Agent", f"Kevlar-CheckDeps/{VERSION}")
+        
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            return urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as e:
+            # Do not retry on client errors (4xx) except possibly rate limits (429)
+            if e.code == 404:
+                raise e
+            if e.code < 500 and e.code != 429:
+                raise e
+            last_err = e
+        except (urllib.error.URLError, ConnectionResetError, TimeoutError, OSError) as e:
+            last_err = e
+            
+        if attempt < max_retries - 1:
+            time.sleep(backoff * (2 ** attempt))
+            
+    if last_err:
+        raise last_err
 
 def parse_semver(version_str):
     """Parses a version string into (major, minor, patch, prerelease)."""
@@ -273,7 +300,7 @@ def resolve_npm_repo(name):
     try:
         url = f"{URL_NPM_REGISTRY}{urllib.parse.quote(name)}/latest"
         req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=5) as response:
+        with safe_urlopen(req, timeout=5) as response:
             data = json.loads(response.read().decode("utf-8"))
         repo = data.get("repository")
         return clean_repo_url(repo)
@@ -287,7 +314,7 @@ def resolve_nuget_repo(name, version):
         name_lower = name.lower()
         url = f"{URL_NUGET_REGISTRY}{name_lower}/{version}/{name_lower}.nuspec"
         req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=5) as response:
+        with safe_urlopen(req, timeout=5) as response:
             xml_data = response.read()
         root = ET.fromstring(xml_data)
         repo_url = None
@@ -315,7 +342,7 @@ def resolve_maven_repo(registry_url, group_path, artifact_id, version):
         url = f"{registry_url}{group_path}/{artifact_id}/{version}/{artifact_id}-{version}.pom"
         req = urllib.request.Request(url)
         req.add_header("User-Agent", f"Kevlar-CheckDeps/{VERSION}")
-        with urllib.request.urlopen(req, timeout=5) as response:
+        with safe_urlopen(req, timeout=5) as response:
             xml_data = response.read()
         root = ET.fromstring(xml_data)
         scm_url = None
@@ -690,7 +717,7 @@ def check_npm_package(target):
         # Use abbreviated metadata format header
         req.add_header("Accept", "application/vnd.npm.install-v1+json")
         
-        with urllib.request.urlopen(req, timeout=10) as response:
+        with safe_urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode("utf-8"))
             
         latest_version = data.get("dist-tags", {}).get("latest")
@@ -848,7 +875,7 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
             headers={"Content-Type": "application/json"}
         )
         
-        with urllib.request.urlopen(req, timeout=15) as response:
+        with safe_urlopen(req, timeout=15) as response:
             res_data = json.loads(response.read().decode("utf-8"))
             
         results_list = res_data.get("results", [])
@@ -885,7 +912,7 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
         try:
             url = f"{URL_OSV_VULNS}{vuln_id}"
             req = urllib.request.Request(url)
-            with urllib.request.urlopen(req, timeout=10) as response:
+            with safe_urlopen(req, timeout=10) as response:
                 return vuln_id, json.loads(response.read().decode("utf-8"))
         except Exception as e:
             return vuln_id, {"id": vuln_id, "summary": f"Failed to fetch details: {e}", "severity": "UNKNOWN"}
@@ -1187,7 +1214,7 @@ def check_pypi_package(target):
         url = f"{URL_PYPI_REGISTRY}{encoded_name}/json"
         
         req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=10) as response:
+        with safe_urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode("utf-8"))
             
         info = data.get("info", {})
@@ -1840,7 +1867,7 @@ def check_nuget_package(target):
         url = f"{URL_NUGET_REGISTRY}{encoded_name}/index.json"
         
         req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=10) as response:
+        with safe_urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode("utf-8"))
             
         versions_list = data.get("versions", [])
@@ -2123,7 +2150,7 @@ def check_composer_package(target):
         url = f"{URL_PACKAGIST_REGISTRY}{name_lower}.json"
         
         req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=10) as response:
+        with safe_urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode("utf-8"))
             
         packages = data.get("packages", {})
@@ -2504,7 +2531,7 @@ def check_maven_package(target):
             try:
                 req = urllib.request.Request(url)
                 req.add_header("User-Agent", f"Kevlar-CheckDeps/{VERSION}")
-                with urllib.request.urlopen(req, timeout=10) as response:
+                with safe_urlopen(req, timeout=10) as response:
                     xml_data = response.read()
                 successful_registry = registry_url
                 break
@@ -2797,7 +2824,7 @@ def check_go_package(target):
         url = f"{URL_GO_PROXY}{escaped_name}/@v/list"
         
         req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=10) as response:
+        with safe_urlopen(req, timeout=10) as response:
             resp_data = response.read().decode("utf-8")
             
         versions_list = [v.strip() for v in resp_data.split("\n") if v.strip()]
@@ -3129,7 +3156,7 @@ def check_rust_package(target):
         # crates.io requires a User-Agent
         req.add_header("User-Agent", f"Kevlar-CheckDeps/{VERSION}")
         
-        with urllib.request.urlopen(req, timeout=10) as response:
+        with safe_urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode("utf-8"))
             
         crate_info = data.get("crate", {})
@@ -3407,7 +3434,7 @@ def check_ruby_package(target):
         try:
             url_versions = f"https://rubygems.org/api/v1/versions/{urllib.parse.quote(name)}.json"
             req_v = urllib.request.Request(url_versions)
-            with urllib.request.urlopen(req_v, timeout=10) as response:
+            with safe_urlopen(req_v, timeout=10) as response:
                 versions_data = json.loads(response.read().decode("utf-8"))
             
             stable_versions = []
@@ -3423,7 +3450,7 @@ def check_ruby_package(target):
             # Fallback to single latest version endpoint
             url_fallback = f"{URL_RUBY_REGISTRY}{urllib.parse.quote(name)}.json"
             req_fb = urllib.request.Request(url_fallback)
-            with urllib.request.urlopen(req_fb, timeout=10) as response:
+            with safe_urlopen(req_fb, timeout=10) as response:
                 data_fb = json.loads(response.read().decode("utf-8"))
             latest_version = data_fb.get("version")
             valid_versions = [latest_version] if latest_version else []
@@ -3448,7 +3475,7 @@ def check_ruby_package(target):
                 try:
                     url_gem = f"https://rubygems.org/api/v1/gems/{urllib.parse.quote(name)}.json"
                     req_g = urllib.request.Request(url_gem)
-                    with urllib.request.urlopen(req_g, timeout=5) as response:
+                    with safe_urlopen(req_g, timeout=5) as response:
                         data_g = json.loads(response.read().decode("utf-8"))
                     raw_url = data_g.get("source_code_uri") or data_g.get("homepage_uri")
                     repo_url = clean_repo_url(raw_url)
@@ -5448,7 +5475,7 @@ def check_for_updates():
             url,
             headers={"User-Agent": "Kevlar-CheckDeps-Updater"}
         )
-        with urllib.request.urlopen(req, timeout=5) as response:
+        with safe_urlopen(req, timeout=5) as response:
             content = response.read(1024).decode("utf-8")
             
         match = re.search(r'VERSION\s*=\s*["\']([^"\']+)["\']', content)
