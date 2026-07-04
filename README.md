@@ -11,7 +11,7 @@ Designed with a modular and extensible architecture, it supports checking direct
 ## Key Features
 
 - **Multi-Ecosystem Support**: Audits:
-  - **Node.js (`npm`)**: supporting `package.json`, `package-lock.json`, Yarn `yarn.lock`, and pnpm `pnpm-lock.yaml`.
+  - **Node.js (`npm`) & Engines**: supporting `package.json`, `package-lock.json`, Yarn `yarn.lock`, and pnpm `pnpm-lock.yaml`. Audits declared Node.js version constraints (`engines.node`, `.nvmrc`, `.node-version`) against EOL and maintenance schedules fetched dynamically from official sources.
   - **Python (`pip`)**: supporting `requirements.txt`, Poetry `poetry.lock` + `pyproject.toml`, Pipenv `Pipfile.lock`, and PDM `pdm.lock`.
   - **.NET (`nuget`)**: supporting C# `.csproj`, VB.NET `.vbproj`, F# `.fsproj`, Solution files (`.sln`), and Central Package Management (`Directory.Packages.props`).
   - **PHP (`php`)**: supporting `composer.json` and `composer.lock`.
