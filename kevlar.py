@@ -5437,6 +5437,50 @@ def check_pipeline_failure(results, fail_config):
         
     return False
 
+def check_for_updates():
+    """Checks for updates from remote version.md and writes local version.md."""
+    url = "https://raw.githubusercontent.com/brunoevn/kevlar-checkdeps/main/version.md"
+    print(f"{COLOR_GRAY}{ICON_INFO} Checking for updates from GitHub...{COLOR_RESET}")
+    
+    latest_version = "Unknown"
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Kevlar-CheckDeps-Updater"}
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            content = response.read(1024).decode("utf-8")
+            
+        match = re.search(r'VERSION\s*=\s*["\']([^"\']+)["\']', content)
+        if match:
+            latest_version = match.group(1)
+    except Exception as e:
+        print(f"{COLOR_RED}{ICON_ERROR} Error checking for updates: {e}{COLOR_RESET}")
+        latest_version = "Error"
+        
+    status = "Up-to-date"
+    if latest_version not in ("Unknown", "Error"):
+        try:
+            curr_parts = [int(x) for x in VERSION.split(".")]
+            late_parts = [int(x) for x in latest_version.split(".")]
+            if late_parts > curr_parts:
+                status = "Update Available"
+        except Exception:
+            if latest_version != VERSION:
+                status = "Update Available"
+                
+    try:
+        with open("version.md", "w", encoding="utf-8") as f:
+            f.write(f'VERSION="{VERSION}"\n')
+        print(f"{COLOR_GREEN}{ICON_OK} Current version written to local version.md{COLOR_RESET}")
+        
+        if status == "Update Available":
+            print(f"{COLOR_YELLOW}{ICON_WARN} A new version v{latest_version} is available! (Current: v{VERSION}). Run 'git pull' to update.{COLOR_RESET}")
+        elif latest_version not in ("Unknown", "Error"):
+            print(f"{COLOR_GREEN}{ICON_OK} Kevlar is up-to-date (v{VERSION}).{COLOR_RESET}")
+    except Exception as e:
+        print(f"{COLOR_RED}{ICON_ERROR} Error writing local version.md: {e}{COLOR_RESET}")
+
 def print_banner():
     banner = f"""{COLOR_BOLD}{COLOR_CYAN}
  _  __ _____ __     __ _        _    ____  
@@ -5451,9 +5495,12 @@ def print_banner():
 def main():
     init_colors_and_encoding()
     
-    # Check for version flags first to avoid printing banner
+    # Check for version/update flags first to avoid required arguments error
     if "--version" in sys.argv or "-V" in sys.argv:
         print(f"kevlar CheckDeps v{VERSION}")
+        sys.exit(0)
+    elif "--update" in sys.argv:
+        check_for_updates()
         sys.exit(0)
         
     print_banner()
@@ -5474,6 +5521,11 @@ Examples:
         action="version",
         version=f"kevlar CheckDeps v{VERSION}",
         help="Show program's version number and exit."
+    )
+    parser.add_argument(
+        "--update",
+        action="store_true",
+        help="Check for updates from GitHub and generate a local version.md file."
     )
     parser.add_argument(
         "--tech", "-t",
