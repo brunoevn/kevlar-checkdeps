@@ -2377,11 +2377,23 @@ def find_all_maven_poms(root_pom_path):
             
     return unique_poms
 
-def parse_maven_pom(filepath, parent_dep_mgmt=None):
-    """Parses Maven pom.xml for direct dependencies, interpolating properties and dependencyManagement."""
+def parse_maven_pom_recursive(filepath, parent_dep_mgmt=None, seen_files=None):
+    """Parses Maven pom.xml recursively, resolving parent project properties and dependencyManagement."""
+    if seen_files is None:
+        seen_files = set()
+        
+    abs_path = os.path.abspath(filepath)
+    if abs_path in seen_files:
+        return {}, {}, {}
+        
+    seen_files.add(abs_path)
+    
     dependencies = {}
-    if parent_dep_mgmt is None:
-        parent_dep_mgmt = {}
+    properties = {}
+    dep_mgmt = {}
+    
+    if parent_dep_mgmt is not None:
+        dep_mgmt.update(parent_dep_mgmt)
         
     try:
         tree = ET.parse(filepath)
@@ -2392,8 +2404,18 @@ def parse_maven_pom(filepath, parent_dep_mgmt=None):
             ns = root.tag.split("}")[0].lstrip("{")
         prefix = f"{{{ns}}}" if ns else ""
         
-        # Parse properties
-        properties = {}
+        # 1. Resolve parent POM first if declared
+        parent_elem = root.find(f"{prefix}parent")
+        if parent_elem is not None:
+            rel_path_elem = parent_elem.find(f"{prefix}relativePath")
+            rel_path = rel_path_elem.text.strip() if (rel_path_elem is not None and rel_path_elem.text) else "../pom.xml"
+            parent_pom_path = os.path.abspath(os.path.join(os.path.dirname(filepath), rel_path))
+            if os.path.exists(parent_pom_path):
+                p_deps, p_props, p_dep_mgmt = parse_maven_pom_recursive(parent_pom_path, parent_dep_mgmt, seen_files)
+                properties.update(p_props)
+                dep_mgmt.update(p_dep_mgmt)
+                
+        # 2. Parse local properties
         props_elem = root.find(f"{prefix}properties")
         if props_elem is not None:
             for elem in props_elem:
@@ -2403,18 +2425,17 @@ def parse_maven_pom(filepath, parent_dep_mgmt=None):
         properties["${project.version}"] = (root.findtext(f"{prefix}version") or "").strip()
         properties["${project.groupId}"] = (root.findtext(f"{prefix}groupId") or "").strip()
         
-        parent_elem = root.find(f"{prefix}parent")
         if parent_elem is not None:
             if not properties["${project.version}"]:
                 properties["${project.version}"] = (parent_elem.findtext(f"{prefix}version") or "").strip()
             if not properties["${project.groupId}"]:
                 properties["${project.groupId}"] = (parent_elem.findtext(f"{prefix}groupId") or "").strip()
                 
-        # Parse local dependencyManagement
+        # 3. Parse local dependencyManagement
         local_dep_mgmt = parse_maven_dependency_management(root, prefix, properties)
-        merged_dep_mgmt = {**parent_dep_mgmt, **local_dep_mgmt}
+        dep_mgmt.update(local_dep_mgmt)
         
-        # Parse active dependencies
+        # 4. Parse active dependencies
         deps_elem = root.find(f"{prefix}dependencies")
         if deps_elem is not None:
             for dep in deps_elem.findall(f"{prefix}dependency"):
@@ -2437,15 +2458,20 @@ def parse_maven_pom(filepath, parent_dep_mgmt=None):
                             version = v_elem.text.strip()
                             for prop_name, prop_val in properties.items():
                                 version = version.replace(prop_name, prop_val)
-                        elif coord in merged_dep_mgmt:
-                            version = merged_dep_mgmt[coord]
+                        elif coord in dep_mgmt:
+                            version = dep_mgmt[coord]
                             
                         dependencies[coord] = version
                         
     except Exception as e:
         print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing pom.xml: {e}{COLOR_RESET}")
         
-    return dependencies
+    return dependencies, properties, dep_mgmt
+
+def parse_maven_pom(filepath, parent_dep_mgmt=None):
+    """Parses Maven pom.xml for direct dependencies, resolving parent properties and dependencyManagement."""
+    deps, _, _ = parse_maven_pom_recursive(filepath, parent_dep_mgmt)
+    return deps
 
 def check_maven_package(target):
     """Queries Maven Central Repository for package metadata."""
@@ -3573,6 +3599,98 @@ def find_gradle_files(path):
                 
     return gradle_files, lock_files
 
+def parse_libs_versions_toml(filepath):
+    """Parses libs.versions.toml to extract version catalog declarations.
+    Returns:
+        dict: group:name -> version
+    """
+    dependencies = {}
+    if not filepath or not os.path.exists(filepath):
+        return dependencies
+        
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+            
+        versions = {}
+        in_versions = False
+        in_libraries = False
+        
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+                
+            if stripped.startswith("[versions]"):
+                in_versions = True
+                in_libraries = False
+                continue
+            elif stripped.startswith("[libraries]"):
+                in_libraries = True
+                in_versions = False
+                continue
+            elif stripped.startswith("["):
+                in_versions = False
+                in_libraries = False
+                continue
+                
+            if in_versions:
+                if "=" in stripped:
+                    parts = stripped.split("=", 1)
+                    var_name = parts[0].strip().strip('"').strip("'")
+                    var_val = parts[1].strip().strip('"').strip("'")
+                    versions[var_name] = var_val
+            elif in_libraries:
+                if "=" in stripped:
+                    parts = stripped.split("=", 1)
+                    alias = parts[0].strip().strip('"').strip("'")
+                    val = parts[1].strip()
+                    
+                    # Case 1: Simple string "group:name:version"
+                    if val.startswith('"') or val.startswith("'"):
+                        val_str = val.strip('"').strip("'")
+                        m = val_str.split(":")
+                        if len(m) >= 3:
+                            group = m[0].strip()
+                            name = m[1].strip()
+                            ver = m[2].strip()
+                            dependencies[f"{group}:{name}"] = ver
+                    # Case 2: Inline table { ... }
+                    elif val.startswith("{") and val.endswith("}"):
+                        group = ""
+                        name = ""
+                        ver = ""
+                        
+                        module_match = re.search(r'module\s*=\s*["\']([^"\']+)["\']', val)
+                        group_match = re.search(r'group\s*=\s*["\']([^"\']+)["\']', val)
+                        name_match = re.search(r'name\s*=\s*["\']([^"\']+)["\']', val)
+                        version_match = re.search(r'version\s*=\s*["\']([^"\']+)["\']', val)
+                        ref_match = re.search(r'version\.ref\s*=\s*["\']([^"\']+)["\']', val)
+                        
+                        if module_match:
+                            mod = module_match.group(1).split(":")
+                            if len(mod) >= 2:
+                                group = mod[0].strip()
+                                name = mod[1].strip()
+                        else:
+                            if group_match:
+                                group = group_match.group(1).strip()
+                            if name_match:
+                                name = name_match.group(1).strip()
+                                
+                        if version_match:
+                            ver = version_match.group(1).strip()
+                        elif ref_match:
+                            ref = ref_match.group(1).strip()
+                            ver = versions.get(ref, "*")
+                            
+                        if group and name:
+                            dependencies[f"{group}:{name}"] = ver if ver else "*"
+    except Exception as e:
+        print(f"{COLOR_YELLOW}{ICON_WARN} Warning reading libs.versions.toml: {e}{COLOR_RESET}")
+        
+    return dependencies
+
 def parse_gradle_build(filepath):
     """Parses build.gradle / build.gradle.kts to extract direct dependencies."""
     dependencies = {}
@@ -3644,13 +3762,27 @@ def parse_gradle_lockfile(filepath):
 def run_gradle_checker(args):
     """Main orchestrator for Gradle dependency checker."""
     build_files, lock_files = find_gradle_files(args.path)
-    if not build_files and not lock_files:
-        print(f"{COLOR_RED}{ICON_ERROR} No build.gradle, build.gradle.kts or lockfiles found in: {args.path}{COLOR_RESET}")
+    
+    catalog_file = None
+    if os.path.exists(args.path):
+        if os.path.isdir(args.path):
+            cand = os.path.join(args.path, "gradle", "libs.versions.toml")
+            if os.path.exists(cand):
+                catalog_file = cand
+        elif os.path.isfile(args.path) and args.path.endswith("libs.versions.toml"):
+            catalog_file = args.path
+            
+    if not build_files and not lock_files and not catalog_file:
+        print(f"{COLOR_RED}{ICON_ERROR} No build.gradle, build.gradle.kts, lockfiles or gradle/libs.versions.toml found in: {args.path}{COLOR_RESET}")
         return None, None, 0
         
     print(f"{COLOR_GRAY}{ICON_INFO} Reading Gradle files...{COLOR_RESET}")
     
     direct = {}
+    if catalog_file:
+        print(f"{COLOR_GRAY}{ICON_INFO} Reading Gradle Version Catalog (libs.versions.toml)...{COLOR_RESET}")
+        direct.update(parse_libs_versions_toml(catalog_file))
+        
     for f in build_files:
         direct.update(parse_gradle_build(f))
         
@@ -5172,12 +5304,12 @@ TECHNOLOGIES = {
         "runner": run_ruby_checker
     },
     "gradle": {
-        "files": ["build.gradle", "build.gradle.kts", "gradle.lockfile"],
+        "files": ["build.gradle", "build.gradle.kts", "gradle.lockfile", "libs.versions.toml"],
         "osv_ecosystem": "Maven",
         "runner": run_gradle_checker
     },
     "android": {
-        "files": ["build.gradle", "build.gradle.kts", "gradle.lockfile"],
+        "files": ["build.gradle", "build.gradle.kts", "gradle.lockfile", "libs.versions.toml"],
         "osv_ecosystem": "Maven",
         "runner": run_gradle_checker
     }
