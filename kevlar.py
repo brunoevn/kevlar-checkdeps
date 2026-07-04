@@ -5518,7 +5518,7 @@ Examples:
     parser.add_argument(
         "--update",
         action="store_true",
-        help="Check for updates from GitHub and generate a local version.md file."
+        help="Check for updates from GitHub."
     )
     parser.add_argument(
         "--tech", "-t",
