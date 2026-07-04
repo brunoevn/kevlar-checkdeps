@@ -20,7 +20,7 @@ import time
 from datetime import datetime
 import xml.etree.ElementTree as ET
 
-VERSION = "1.3.1"
+VERSION = "1.3.2"
 
 # External APIs Configuration
 URL_NPM_REGISTRY = "https://registry.npmjs.org/"
@@ -181,6 +181,339 @@ def compare_versions(v1_str, v2_str):
     if not p2:  # stable is higher
         return -1
     return -1 if p1 < p2 else 1
+
+# Node.js EOL Dates (Release Schedule Schedule: end-of-life date for each major)
+NODE_EOL_DATES = {
+    "0.8": "2014-07-31",
+    "0.10": "2016-10-31",
+    "0.12": "2016-12-31",
+    "4": "2018-04-30",
+    "5": "2016-06-30",
+    "6": "2019-04-30",
+    "7": "2017-06-30",
+    "8": "2019-12-31",
+    "9": "2018-06-30",
+    "10": "2021-04-30",
+    "11": "2019-06-01",
+    "12": "2022-04-30",
+    "13": "2020-06-01",
+    "14": "2023-04-30",
+    "15": "2021-06-01",
+    "16": "2023-09-11",
+    "17": "2022-06-01",
+    "18": "2025-04-30",
+    "19": "2023-06-01",
+    "20": "2026-04-30",
+    "21": "2024-06-01",
+    "22": "2027-04-30",
+    "23": "2025-06-01",
+    "24": "2028-04-30",
+    "25": "2026-06-01",
+    "26": "2029-04-30",
+    "27": "2030-04-30"
+}
+
+def fetch_node_schedule():
+    """Fetches the official Node.js release schedule from GitHub with a quick fallback.
+    Returns:
+        dict: A dictionary mapping major versions to dicts with EOL and maintenance dates.
+    """
+    url = "https://raw.githubusercontent.com/nodejs/Release/main/schedule.json"
+    import urllib.request
+    
+    # Initialize with our fallback schedule
+    schedule = {}
+    for k, v in NODE_EOL_DATES.items():
+        schedule[k] = {"maintenance": "N/A", "end": v}
+    
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Kevlar Dependency Scanner)"})
+        with urllib.request.urlopen(req, timeout=3) as response:
+            if response.status == 200:
+                data = json.loads(response.read().decode("utf-8"))
+                for k, v in data.items():
+                    major = k[1:] if k.startswith("v") else k
+                    schedule[major] = {
+                        "maintenance": v.get("maintenance", "N/A"),
+                        "end": v.get("end", "N/A")
+                    }
+    except Exception:
+        pass
+        
+    return schedule
+
+def satisfy_term(version_str, term):
+    try:
+        term = term.strip()
+        if not term or term in ("*", "x"):
+            return True
+            
+        op = ""
+        for possible_op in (">=", "<=", ">", "<", "^", "~", "=="):
+            if term.startswith(possible_op):
+                op = possible_op
+                break
+        if not op and term.startswith("="):
+            op = "="
+            
+        ver_part = term[len(op):] if op else term
+        
+        v_maj, v_min, v_pat, _ = parse_semver(version_str)
+        
+        if ver_part.endswith(".x") or ver_part.endswith(".*"):
+            parts = ver_part.split(".")
+            try:
+                if len(parts) == 2:
+                    return v_maj == int(parts[0])
+                elif len(parts) == 3:
+                    return v_maj == int(parts[0]) and v_min == int(parts[1])
+            except ValueError:
+                return False
+            return True
+            
+        if not op:
+            parts = ver_part.split(".")
+            if len(parts) == 1:
+                try:
+                    return v_maj == int(parts[0])
+                except ValueError:
+                    pass
+            elif len(parts) == 2:
+                try:
+                    return v_maj == int(parts[0]) and v_min == int(parts[1])
+                except ValueError:
+                    pass
+
+        t_maj, t_min, t_pat, _ = parse_semver(ver_part)
+        
+        if op == ">=":
+            return compare_versions(version_str, ver_part) >= 0
+        elif op == "<=":
+            return compare_versions(version_str, ver_part) <= 0
+        elif op == ">":
+            return compare_versions(version_str, ver_part) > 0
+        elif op == "<":
+            return compare_versions(version_str, ver_part) < 0
+        elif op in ("=", "==", ""):
+            return compare_versions(version_str, ver_part) == 0
+        elif op == "^":
+            if compare_versions(version_str, ver_part) < 0:
+                return False
+            if t_maj > 0:
+                return v_maj == t_maj
+            elif t_min > 0:
+                return v_maj == 0 and v_min == t_min
+            else:
+                return v_maj == 0 and v_min == 0 and v_pat == t_pat
+        elif op == "~":
+            parts_count = len(ver_part.split("."))
+            if compare_versions(version_str, ver_part) < 0:
+                return False
+            if parts_count >= 2:
+                return v_maj == t_maj and v_min == t_min
+            else:
+                return v_maj == t_maj
+    except Exception:
+        return True
+    return True
+
+def check_semver_satisfies(version_str, range_str):
+    """Checks if version_str satisfies range_str according to semver rules."""
+    if not range_str or range_str.strip() in ("*", "x", "any"):
+        return True
+    
+    range_str = re.sub(r'([><=^~])\s+', r'\1', range_str.strip())
+    or_parts = range_str.split("||")
+    
+    for or_part in or_parts:
+        or_part = or_part.strip()
+        if not or_part:
+            continue
+            
+        and_terms = or_part.split()
+        part_satisfied = True
+        
+        for term in and_terms:
+            if not satisfy_term(version_str, term):
+                part_satisfied = False
+                break
+                
+        if part_satisfied:
+            return True
+            
+    return False
+
+def analyze_node_constraint(constraint_str):
+    """Analyzes a Node.js version constraint and checks if it permits EOL versions.
+    Returns (status, deprecated_msg, error_msg, latest_recommendation).
+    """
+    schedule = fetch_node_schedule()
+    
+    from datetime import datetime, date
+    today = date.today()
+    
+    # Dynamically build test_majors list from schedule keys
+    test_majors = []
+    for k in schedule.keys():
+        try:
+            float(k)
+            test_majors.append(k)
+        except ValueError:
+            pass
+    test_majors.sort(key=lambda x: float(x))
+    test_majors.append("99")
+    
+    if not constraint_str or constraint_str.strip() in ("*", "x", "any"):
+        latest_lts = "22"
+        for major in reversed(test_majors):
+            if major == "99":
+                continue
+            try:
+                if int(float(major)) % 2 != 0:
+                    continue
+                end_info = schedule.get(major)
+                end_str = end_info.get("end") if end_info else None
+                if end_str:
+                    end_date = datetime.strptime(end_str, "%Y-%m-%d").date()
+                    if end_date > today:
+                        latest_lts = major
+                        break
+            except Exception:
+                pass
+        return "minor", f"Node.js engine constraint is wildcard or missing. Recommend specifying >={latest_lts}.0.0.", None, f">={latest_lts}.0.0"
+        
+    eol_majors = []
+    supported_majors = []
+    
+    for major in test_majors:
+        ver_str = f"{major}.0.0"
+        if check_semver_satisfies(ver_str, constraint_str):
+            end_info = schedule.get(major)
+            end_str = end_info.get("end") if end_info else None
+            is_eol = True
+            if end_str:
+                try:
+                    end_date = datetime.strptime(end_str, "%Y-%m-%d").date()
+                    if end_date > today:
+                        is_eol = False
+                except Exception:
+                    pass
+            elif major == "99":
+                is_eol = False
+                
+            if is_eol:
+                eol_majors.append(major)
+            else:
+                supported_majors.append(major)
+                
+    supported_even_majors = []
+    for major in test_majors:
+        if major == "99":
+            continue
+        try:
+            if int(float(major)) % 2 != 0:
+                continue
+            end_info = schedule.get(major)
+            end_str = end_info.get("end") if end_info else None
+            if end_str:
+                end_date = datetime.strptime(end_str, "%Y-%m-%d").date()
+                if end_date > today:
+                    supported_even_majors.append(int(float(major)))
+        except Exception:
+            pass
+
+    recommendations = []
+    if eol_majors:
+        highest_eol = max(int(float(m)) for m in eol_majors)
+        
+        # Previous active supported
+        prev_opts = [m for m in supported_even_majors if m < highest_eol]
+        if prev_opts:
+            recommendations.append(f">={max(prev_opts)}.0.0")
+            
+        # Next active supported
+        next_opts = [m for m in supported_even_majors if m > highest_eol]
+        if next_opts:
+            recommendations.append(f">={min(next_opts)}.0.0")
+            
+        # Fallback if none found
+        if not recommendations and supported_even_majors:
+            recommendations.append(f">={max(supported_even_majors)}.0.0")
+    else:
+        # Wildcard / missing constraint fallback
+        if len(supported_even_majors) >= 2:
+            recommendations.append(f">={supported_even_majors[-2]}.0.0")
+            recommendations.append(f">={supported_even_majors[-1]}.0.0")
+        elif supported_even_majors:
+            recommendations.append(f">={supported_even_majors[-1]}.0.0")
+            
+    if len(recommendations) > 1:
+        recommendation = " or ".join(recommendations)
+    elif recommendations:
+        recommendation = recommendations[0]
+    else:
+        recommendation = ">=22.0.0"
+        
+    recs_detail = []
+    for rec in recommendations:
+        m_num = rec.replace(">=", "").split(".")[0]
+        m_info = schedule.get(m_num, {})
+        m_date = m_info.get("maintenance", "N/A")
+        end_date = m_info.get("end", "N/A")
+        recs_detail.append(f"v{m_num} (Maintenance: {m_date}, EOL: {end_date})")
+        
+    detail_str = ""
+    if recs_detail:
+        detail_str = "\n    * " + "\n    * ".join(recs_detail)
+        
+    if eol_majors and not supported_majors:
+        status = "error"
+        msg = f"Node.js constraint '{constraint_str}' only satisfies EOL versions ({', '.join(eol_majors)}). Recommend updating constraint to {recommendation}.{detail_str}"
+        return status, None, msg, recommendation
+    elif eol_majors and supported_majors:
+        status = "minor"
+        msg = f"Node.js constraint '{constraint_str}' allows EOL versions ({', '.join(eol_majors)}). Recommend updating lower bound to {recommendation}.{detail_str}"
+        return status, msg, None, recommendation
+    else:
+        latest_stable = f"v{supported_even_majors[-1]}" if supported_even_majors else "v22"
+        return "up-to-date", None, None, latest_stable
+
+def find_node_constraint(base_path, pkg_data):
+    """Finds Node.js version constraint from package.json, .nvmrc, or .node-version."""
+    if pkg_data and "engines" in pkg_data and isinstance(pkg_data["engines"], dict):
+        node_req = pkg_data["engines"].get("node")
+        if node_req:
+            return node_req, "package.json (engines.node)"
+            
+    nvmrc_path = os.path.join(base_path, ".nvmrc")
+    if os.path.exists(nvmrc_path):
+        try:
+            with open(nvmrc_path, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+                if content:
+                    content = content.split("#")[0].strip()
+                    if content and not content.startswith("lts"):
+                        if re.match(r'^v?\d+', content):
+                            return f"={content}", ".nvmrc"
+                        return content, ".nvmrc"
+        except Exception:
+            pass
+            
+    node_ver_path = os.path.join(base_path, ".node-version")
+    if os.path.exists(node_ver_path):
+        try:
+            with open(node_ver_path, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+                if content:
+                    content = content.split("#")[0].strip()
+                    if content:
+                        if re.match(r'^v?\d+', content):
+                            return f"={content}", ".node-version"
+                        return content, ".node-version"
+        except Exception:
+            pass
+            
+    return None, None
 
 def classify_update(installed_str, latest_str):
     """Classifies the update difference between installed and latest version."""
@@ -578,11 +911,13 @@ def parse_package_json(filepath):
             
         dependencies = data.get("dependencies", {})
         dev_dependencies = data.get("devDependencies", {})
+        engines = data.get("engines", {})
         
         return {
             "dependencies": dependencies,
             "devDependencies": dev_dependencies,
-            "all_direct": {**dependencies, **dev_dependencies}
+            "all_direct": {**dependencies, **dev_dependencies},
+            "engines": engines
         }
     except Exception as e:
         print(f"{COLOR_RED}{ICON_ERROR} Error reading package.json: {e}{COLOR_RESET}")
@@ -1127,10 +1462,30 @@ def run_npm_checker(args):
         for r in results:
             r["vulnerabilities"] = []
             
+    # Check Node.js version if applicable
+    node_constraint, source = find_node_constraint(args.path, pkg_data)
+    if node_constraint:
+        status, deprecated_msg, error_msg, recommendation = analyze_node_constraint(node_constraint)
+            
+        results.append({
+            "name": "node",
+            "declared": node_constraint,
+            "installed": "N/A",
+            "latest": recommendation,
+            "latest_same_major": None,
+            "latest_absolute": None,
+            "status": status,
+            "deprecated": deprecated_msg,
+            "error": error_msg,
+            "repo_url": "https://nodejs.org",
+            "compare_url": None,
+            "releases_url": "https://nodejs.org/en/about/previous-releases"
+        })
+            
     # Resolve transitive dependency parents
     direct_packages = set(pkg_data["all_direct"].keys()) if pkg_data else set()
     for r in results:
-        if pkg_data and r["name"] not in direct_packages:
+        if pkg_data and r["name"] not in direct_packages and r["name"] != "node":
             direct_parents = find_direct_parents(r["name"], parents_data, direct_packages)
             r["required_by"] = sorted(list(direct_parents))
         else:
@@ -3965,12 +4320,14 @@ def print_results_table(results, pkg_data, show_all, vuls_enabled=False):
     
     for r in filtered_results:
         dep_type = "Transitive"
-        if pkg_data:
+        if r["name"] == "node":
+            dep_type = "Engine"
+        elif pkg_data:
             if r["name"] in pkg_data.get("dependencies", {}):
                 dep_type = "Direct"
             elif r["name"] in pkg_data.get("devDependencies", {}):
                 dep_type = "Dev"
-        if r.get("required_by"):
+        if r.get("required_by") and r["name"] != "node":
             dep_type = "Transitive"
                 
         status_str = r["status"]
@@ -4183,13 +4540,15 @@ def export_markdown_report(results, pkg_data, filepath, vuls_enabled=False):
             
             for r in results:
                 dep_type = "Transitive"
-                if pkg_data:
+                if r["name"] == "node":
+                    dep_type = "Engine"
+                elif pkg_data:
                     if r["name"] in pkg_data.get("dependencies", {}):
                         dep_type = "Direct"
                     elif r["name"] in pkg_data.get("devDependencies", {}):
                         dep_type = "Dev"
                         
-                if r.get("required_by"):
+                if r.get("required_by") and r["name"] != "node":
                     dep_type = f"Transitive (via {', '.join(r['required_by'])})"
                         
                 status_str = r["status"]
@@ -4421,13 +4780,15 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             
             # Type detection
             dep_type = "Transitive"
-            if pkg_data:
+            if name == "node":
+                dep_type = "Engine"
+            elif pkg_data:
                 if name in pkg_data.get("all_direct", {}):
                     dep_type = "Direct"
                 elif name in pkg_data.get("devDependencies", {}):
                     dep_type = "Dev"
                     
-            if r.get("required_by"):
+            if r.get("required_by") and name != "node":
                 dep_type = "Transitive"
                     
             badges = []

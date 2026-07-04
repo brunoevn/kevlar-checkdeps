@@ -1,0 +1,10 @@
+{
+  "name": "test-node-engine",
+  "version": "1.0.0",
+  "engines": {
+    "node": ">=99.0.0"
+  },
+  "dependencies": {
+    "express": "4.17.1"
+  }
+}
