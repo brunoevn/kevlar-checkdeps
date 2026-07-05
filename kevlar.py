@@ -19,6 +19,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 from datetime import datetime
 import xml.etree.ElementTree as ET
+import codecs
+import base64
 
 VERSION = "1.3.4"
 
@@ -676,6 +678,15 @@ def resolve_go_repo(name):
 # NPM Checker Logic
 # ==============================================================================
 
+def hex_to_base64(hex_str):
+    """Converts a SHA-1 hexadecimal string to base64 with a 'sha1-' prefix."""
+    try:
+        raw_bytes = codecs.decode(hex_str.strip(), 'hex')
+        b64_bytes = base64.b64encode(raw_bytes)
+        return "sha1-" + b64_bytes.decode('utf-8')
+    except Exception:
+        return None
+
 def find_npm_files(base_path):
     """Finds package.json and lockfile (package-lock.json, yarn.lock, pnpm-lock.yaml) in path."""
     pkg_path = os.path.join(base_path, "package.json")
@@ -693,15 +704,18 @@ def find_npm_files(base_path):
 def parse_yarn_lock(filepath):
     """Parses yarn.lock to extract resolved versions and their parent relations.
     Returns:
-        tuple: (resolved, parents) where parents is child_name -> list of parent_names
+        tuple: (resolved, parents, integrity) where integrity is (name, version) -> integrity_str
     """
     resolved = {}
     parents = {}
+    integrity_dict = {}
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             lines = f.readlines()
         
         current_names = []
+        current_version = None
+        current_integrity = None
         in_dependencies = False
         
         for line in lines:
@@ -712,8 +726,14 @@ def parse_yarn_lock(filepath):
             indent_len = len(line) - len(line.lstrip())
             
             if indent_len == 0:
+                if current_names and current_version:
+                    for name in current_names:
+                        if current_integrity:
+                            integrity_dict[(name, current_version)] = current_integrity
                 in_dependencies = False
                 current_names = []
+                current_version = None
+                current_integrity = None
                 header = stripped.rstrip(":")
                 
                 parts = []
@@ -752,8 +772,13 @@ def parse_yarn_lock(filepath):
                 if stripped.startswith("version ") or stripped.startswith("version:"):
                     ver_val = stripped.split(" ", 1)[-1] if " " in stripped else stripped.split(":", 1)[-1]
                     ver_val = ver_val.strip().strip('"').strip(':').strip()
+                    current_version = ver_val
                     for name in current_names:
                         resolved.setdefault(name, set()).add(ver_val)
+                elif stripped.startswith("integrity ") or stripped.startswith("integrity:"):
+                    integrity_val = stripped.split(" ", 1)[-1] if " " in stripped else stripped.split(":", 1)[-1]
+                    integrity_val = integrity_val.strip().strip('"').strip(':').strip()
+                    current_integrity = integrity_val
                 elif stripped.startswith("dependencies:") or stripped.startswith("optionalDependencies:"):
                     in_dependencies = True
                 elif in_dependencies and indent_len >= 4:
@@ -769,26 +794,33 @@ def parse_yarn_lock(filepath):
                 if indent_len == 2 and not (stripped.startswith("dependencies:") or stripped.startswith("optionalDependencies:")):
                     in_dependencies = False
                     
+        if current_names and current_version:
+            for name in current_names:
+                if current_integrity:
+                    integrity_dict[(name, current_version)] = current_integrity
+
         parents_clean = {k: list(v) for k, v in parents.items()}
         resolved_clean = {k: list(v) for k, v in resolved.items()}
-        return resolved_clean, parents_clean
+        return resolved_clean, parents_clean, integrity_dict
     except Exception as e:
         print(f"{COLOR_YELLOW}{ICON_WARN} Warning reading yarn.lock: {e}{COLOR_RESET}")
-        return {}, {}
+        return {}, {}, {}
 
 def parse_pnpm_lock(filepath):
     """Parses pnpm-lock.yaml to extract resolved versions and their parent relations.
     Returns:
-        tuple: (resolved, parents) where parents is child_name -> list of parent_names
+        tuple: (resolved, parents, integrity) where integrity is (name, version) -> integrity_str
     """
     resolved = {}
     parents = {}
+    integrity_dict = {}
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             lines = f.readlines()
             
         in_packages = False
         current_pkg = None
+        current_version = None
         in_pkg_deps = False
         
         for line in lines:
@@ -805,6 +837,7 @@ def parse_pnpm_lock(filepath):
             if indent == 0 and in_packages and not stripped.startswith("packages:"):
                 in_packages = False
                 current_pkg = None
+                current_version = None
                 in_pkg_deps = False
                 
             if in_packages:
@@ -846,27 +879,34 @@ def parse_pnpm_lock(filepath):
                         version = version.split("(", 1)[0]
                         
                     current_pkg = pkg_name
+                    current_version = version
                     in_pkg_deps = False
                     if pkg_name and version:
                         resolved.setdefault(pkg_name, set()).add(version)
                         
-                elif indent == 4 and current_pkg:
-                    if stripped.startswith("dependencies:") or stripped.startswith("optionalDependencies:"):
-                        in_pkg_deps = True
-                    else:
-                        in_pkg_deps = False
-                elif indent >= 6 and current_pkg and in_pkg_deps:
-                    if ":" in stripped:
-                        dep_name = stripped.split(":", 1)[0].strip().strip('"')
-                        if dep_name:
-                            parents.setdefault(dep_name, set()).add(current_pkg)
+                elif indent >= 4 and current_pkg:
+                    if "integrity" in stripped and current_version:
+                        m = re.search(r'integrity[:\s]+([^\s\}\"\']+)', stripped)
+                        if m:
+                            integrity_dict[(current_pkg, current_version)] = m.group(1).strip()
+                    
+                    if indent == 4:
+                        if stripped.startswith("dependencies:") or stripped.startswith("optionalDependencies:"):
+                            in_pkg_deps = True
+                        else:
+                            in_pkg_deps = False
+                    elif indent >= 6 and in_pkg_deps:
+                        if ":" in stripped:
+                            dep_name = stripped.split(":", 1)[0].strip().strip('"')
+                            if dep_name:
+                                parents.setdefault(dep_name, set()).add(current_pkg)
                             
         parents_clean = {k: list(v) for k, v in parents.items()}
         resolved_clean = {k: list(v) for k, v in resolved.items()}
-        return resolved_clean, parents_clean
+        return resolved_clean, parents_clean, integrity_dict
     except Exception as e:
         print(f"{COLOR_YELLOW}{ICON_WARN} Warning reading pnpm-lock.yaml: {e}{COLOR_RESET}")
-        return {}, {}
+        return {}, {}, {}
 
 def parse_package_json(filepath):
     """Parses package.json to extract direct dependencies."""
@@ -891,7 +931,7 @@ def parse_package_json(filepath):
 def parse_package_lock(filepath):
     """Parses package-lock.json to extract resolved versions and their parent relations.
     Returns:
-        tuple: (resolved, parents) where parents is child_name -> list of parent_names
+        tuple: (resolved, parents, integrity) where integrity is (name, version) -> integrity_str
     """
     try:
         with open(filepath, "r", encoding="utf-8") as f:
@@ -899,6 +939,7 @@ def parse_package_lock(filepath):
             
         resolved = {}
         parents = {}
+        integrity_dict = {}
         
         # 1. Parse packages key (v2 and v3 lockfiles)
         if "packages" in data and isinstance(data["packages"], dict):
@@ -921,6 +962,9 @@ def parse_package_lock(filepath):
                     version = pkg_info.get("version")
                     if pkg_name and version:
                         resolved.setdefault(pkg_name, set()).add(version)
+                        integrity = pkg_info.get("integrity")
+                        if integrity:
+                            integrity_dict[(pkg_name, version)] = integrity
                         
                     # Build parents map
                     deps = pkg_info.get("dependencies", {})
@@ -944,6 +988,9 @@ def parse_package_lock(filepath):
                     version = pkg_info.get("version")
                     if version:
                         resolved.setdefault(pkg_name, set()).add(version)
+                        integrity = pkg_info.get("integrity")
+                        if integrity:
+                            integrity_dict[(pkg_name, version)] = integrity
                     parents.setdefault(pkg_name, set()).add(parent_name)
                     
                     if "dependencies" in pkg_info and isinstance(pkg_info["dependencies"], dict):
@@ -953,10 +1000,10 @@ def parse_package_lock(filepath):
             
         parents_clean = {k: list(v) for k, v in parents.items()}
         resolved_clean = {k: list(v) for k, v in resolved.items()}
-        return resolved_clean, parents_clean
+        return resolved_clean, parents_clean, integrity_dict
     except Exception as e:
         print(f"{COLOR_YELLOW}{ICON_WARN} Warning reading package-lock.json: {e}{COLOR_RESET}")
-        return {}, {}
+        return {}, {}, {}
 
 def build_check_targets(pkg_data, lock_data, check_all):
     """Builds list of targets to scan."""
@@ -1033,6 +1080,25 @@ def check_npm_package(target):
             ver_meta = all_versions_meta.get(clean_ver) or all_versions_meta.get(ver_str) or {}
             deprecation_msg = ver_meta.get("deprecated")
             
+            # Check lockfile integrity against registry integrity/shasum
+            lockfile_integrity = target.get("integrity", {}).get(ver_str)
+            mismatch = False
+            reg_hashes = []
+            if lockfile_integrity:
+                lock_clean = lockfile_integrity.strip().lower()
+                dist = ver_meta.get("dist") or {}
+                reg_integrity = dist.get("integrity", "").strip().lower()
+                reg_shasum = dist.get("shasum", "").strip().lower()
+                
+                reg_hashes = [h.strip().lower() for h in reg_integrity.split() if h.strip()]
+                if reg_shasum:
+                    reg_shasum_b64 = hex_to_base64(reg_shasum)
+                    if reg_shasum_b64:
+                        reg_hashes.append(reg_shasum_b64.lower())
+                        
+                if reg_hashes and lock_clean not in reg_hashes:
+                    mismatch = True
+            
             # Find latest same major and absolute latest
             latest_same_major, latest_absolute = find_latest_same_major(clean_ver, all_versions)
             if latest_version:
@@ -1066,7 +1132,10 @@ def check_npm_package(target):
                 "error": None,
                 "repo_url": repo_url,
                 "compare_url": compare_url,
-                "releases_url": releases_url
+                "releases_url": releases_url,
+                "mismatch_checksum": mismatch,
+                "lockfile_checksum": lockfile_integrity,
+                "registry_checksums": reg_hashes
             })
             
     except urllib.error.HTTPError as e:
@@ -1079,7 +1148,10 @@ def check_npm_package(target):
                 "latest": None,
                 "status": "error",
                 "deprecated": None,
-                "error": error_msg
+                "error": error_msg,
+                "mismatch_checksum": False,
+                "lockfile_checksum": target.get("integrity", {}).get(ver_str),
+                "registry_checksums": []
             })
     except Exception as e:
         for ver_str in versions_to_check:
@@ -1090,7 +1162,10 @@ def check_npm_package(target):
                 "latest": None,
                 "status": "error",
                 "deprecated": None,
-                "error": str(e)
+                "error": str(e),
+                "mismatch_checksum": False,
+                "lockfile_checksum": target.get("integrity", {}).get(ver_str),
+                "registry_checksums": []
             })
             
     return results
@@ -1393,19 +1468,27 @@ def run_npm_checker(args):
         
     lock_data = {}
     parents_data = {}
+    integrity_data = {}
     if lock_file:
         basename = os.path.basename(lock_file)
         if basename == "package-lock.json":
             print(f"{COLOR_GRAY}{ICON_INFO} Reading package-lock.json...{COLOR_RESET}")
-            lock_data, parents_data = parse_package_lock(lock_file)
+            lock_data, parents_data, integrity_data = parse_package_lock(lock_file)
         elif basename == "yarn.lock":
             print(f"{COLOR_GRAY}{ICON_INFO} Reading yarn.lock...{COLOR_RESET}")
-            lock_data, parents_data = parse_yarn_lock(lock_file)
+            lock_data, parents_data, integrity_data = parse_yarn_lock(lock_file)
         elif basename == "pnpm-lock.yaml":
             print(f"{COLOR_GRAY}{ICON_INFO} Reading pnpm-lock.yaml...{COLOR_RESET}")
-            lock_data, parents_data = parse_pnpm_lock(lock_file)
+            lock_data, parents_data, integrity_data = parse_pnpm_lock(lock_file)
         
     targets = build_check_targets(pkg_data, lock_data, args.all)
+    for t in targets:
+        t_integrity = {}
+        for ver in t["installed"]:
+            key = (t["name"], ver)
+            if key in integrity_data:
+                t_integrity[ver] = integrity_data[key]
+        t["integrity"] = t_integrity
     
     if not targets:
         print(f"{COLOR_YELLOW}{ICON_WARN} No packages identified to check.{COLOR_RESET}")
@@ -1414,6 +1497,26 @@ def run_npm_checker(args):
     start_time = time.time()
     results = check_all_targets(targets, args.concurrent)
     
+    # Check integrity checksums
+    for r in results:
+        r["missing_checksum"] = False
+        r["weak_checksum"] = False
+        if r["name"] == "node":
+            continue
+            
+        if lock_file:
+            key = (r["name"], r["installed"])
+            if key in integrity_data and integrity_data[key]:
+                integrity_str = integrity_data[key].lower()
+                if "sha512-" in integrity_str or "sha256-" in integrity_str:
+                    pass
+                elif "sha1-" in integrity_str:
+                    r["weak_checksum"] = True
+                else:
+                    r["missing_checksum"] = True
+            else:
+                r["missing_checksum"] = True
+
     # Check vulnerabilities via OSV if requested
     if getattr(args, "vuls", False):
         tech_info = TECHNOLOGIES["npm"]
@@ -1444,7 +1547,10 @@ def run_npm_checker(args):
             "error": error_msg,
             "repo_url": "https://nodejs.org",
             "compare_url": None,
-            "releases_url": "https://nodejs.org/en/about/previous-releases"
+            "releases_url": "https://nodejs.org/en/about/previous-releases",
+            "mismatch_checksum": False,
+            "lockfile_checksum": None,
+            "registry_checksums": []
         })
             
     # Resolve transitive dependency parents
@@ -4231,6 +4337,9 @@ def print_results_table(results, pkg_data, show_all, vuls_enabled=False):
             or r["deprecated"] 
             or r["status"] == "error"
             or (vuls_enabled and r.get("vulnerabilities"))
+            or r.get("missing_checksum")
+            or r.get("weak_checksum")
+            or r.get("mismatch_checksum")
         )
         if show_all or is_issue:
             filtered_results.append(r)
@@ -4357,6 +4466,14 @@ def print_results_table(results, pkg_data, show_all, vuls_enabled=False):
             notes_to_print.append(f"  {COLOR_MAGENTA}{ICON_DEPRECATED} {r['name']}@{r['installed']}{parent_suffix}: {r['deprecated']}{COLOR_RESET}")
         elif r["status"] == "error" and r["error"]:
             notes_to_print.append(f"  {COLOR_RED}{ICON_ERROR} {r['name']}{parent_suffix}: {r['error']}{COLOR_RESET}")
+            
+        if r.get("missing_checksum"):
+            notes_to_print.append(f"  {COLOR_YELLOW}{ICON_WARN} {r['name']}@{r['installed']}{parent_suffix}: Missing integrity checksum in lockfile{COLOR_RESET}")
+        elif r.get("weak_checksum"):
+            notes_to_print.append(f"  {COLOR_YELLOW}{ICON_WARN} {r['name']}@{r['installed']}{parent_suffix}: Weak checksum (SHA-1) in lockfile{COLOR_RESET}")
+            
+        if r.get("mismatch_checksum"):
+            notes_to_print.append(f"  {COLOR_RED}{ICON_ERROR} {r['name']}@{r['installed']}{parent_suffix}: INTEGRITY MISMATCH! Lockfile checksum does not match official registry checksum.{COLOR_RESET}")
             
     if notes_to_print:
         print(f"\n{COLOR_BOLD}Notes & Warnings:{COLOR_RESET}")
@@ -4528,11 +4645,19 @@ def export_markdown_report(results, pkg_data, filepath, vuls_enabled=False):
                 elif status_str == "error":
                     status_display = f"❓ Error ({r['error']})"
                     
+                notes_list = []
                 if r["deprecated"]:
                     status_display = "🚫 Deprecated"
-                    note = f"Deprecation Warning: {r['deprecated']}"
-                else:
-                    note = ""
+                    notes_list.append(f"Deprecation Warning: {r['deprecated']}")
+                if r.get("missing_checksum"):
+                    notes_list.append("⚠️ Missing integrity checksum in lockfile")
+                elif r.get("weak_checksum"):
+                    notes_list.append("⚠️ Weak checksum (SHA-1) in lockfile")
+                
+                if r.get("mismatch_checksum"):
+                    notes_list.append("❌ **INTEGRITY MISMATCH!** Lockfile checksum does not match official registry checksum")
+                
+                note = " | ".join(notes_list)
                     
                 changelog_links = []
                 if r.get("compare_url"):
@@ -4773,9 +4898,24 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             if is_deprecated:
                 badges.append('<span class="badge badge-depr">Deprecated</span>')
                 
+            if r.get("missing_checksum"):
+                badges.append('<span class="badge badge-warning">No Checksum</span>')
+            elif r.get("weak_checksum"):
+                badges.append('<span class="badge badge-warning">Weak Checksum</span>')
+                
+            if r.get("mismatch_checksum"):
+                badges.append('<span class="badge badge-error">Checksum Mismatch</span>')
+                
             # Vulnerabilities count badge
             pkg_vulns = r.get("vulnerabilities", [])
             pkg_suppressed_vulns = r.get("suppressed_vulnerabilities", [])
+            
+            severities_list = []
+            for v in pkg_vulns:
+                sev_lower = get_severity_level(v)
+                if sev_lower:
+                    severities_list.append(sev_lower)
+            data_severities = ",".join(severities_list)
             
             is_vulnerable = len(pkg_vulns) > 0
             is_suppressed = len(pkg_suppressed_vulns) > 0
@@ -4859,6 +4999,13 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                 notes_warnings_list.append(f'<div class="note-warning-item"><span class="note-warning-icon">🚫</span> <div><strong>Deprecation Warning:</strong> {msg}</div></div>')
             if error:
                 notes_warnings_list.append(f'<div class="note-warning-item"><span class="note-warning-icon">❌</span> <div><strong>Error:</strong> {error}</div></div>')
+            if r.get("missing_checksum"):
+                notes_warnings_list.append('<div class="note-warning-item"><span class="note-warning-icon">⚠️</span> <div><strong>Security Warning:</strong> Missing integrity checksum in lockfile</div></div>')
+            elif r.get("weak_checksum"):
+                notes_warnings_list.append('<div class="note-warning-item"><span class="note-warning-icon">⚠️</span> <div><strong>Security Warning:</strong> Weak checksum (SHA-1) in lockfile</div></div>')
+            
+            if r.get("mismatch_checksum"):
+                notes_warnings_list.append('<div class="note-warning-item"><span class="note-warning-icon">❌</span> <div><strong>INTEGRITY MISMATCH:</strong> Lockfile checksum does not match official registry checksum!</div></div>')
             
             if notes_warnings_list:
                 notes_warnings_items = "\n".join(notes_warnings_list)
@@ -4897,6 +5044,7 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                  data-name="{name}" 
                  data-status="{status}" 
                  data-vulnerable="{"true" if is_vulnerable else "false"}" 
+                 data-severities="{data_severities}"
                  data-suppressed="{"true" if is_suppressed else "false"}"
                  data-deprecated="{"true" if is_deprecated else "false"}"
                  id="pkg-{i}">
@@ -5120,7 +5268,132 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             display: flex;
             gap: 8px;
             flex-wrap: wrap;
+            align-items: center;
         }}
+        
+        .filter-group {{
+            position: relative;
+            display: inline-block;
+        }}
+        
+        .chevron-inline {{
+            display: inline-block;
+            font-size: 8px;
+            margin-left: 6px;
+            opacity: 0.7;
+            transition: transform 0.2s ease;
+        }}
+        
+        .filter-btn.dropdown-open .chevron-inline {{
+            transform: rotate(180deg);
+        }}
+        
+        .filter-dropdown {{
+            position: absolute;
+            top: calc(100% + 6px);
+            left: 0;
+            z-index: 100;
+            background: rgba(17, 24, 39, 0.95);
+            backdrop-filter: blur(10px);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 12px;
+            min-width: 200px;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5), 0 4px 6px -2px rgba(0, 0, 0, 0.5);
+            display: none;
+        }}
+        
+        .dropdown-row {{
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            width: 100%;
+        }}
+        
+        .row-actions {{
+            display: inline-flex;
+            align-items: center;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.15s ease;
+            user-select: none;
+        }}
+        
+        .dropdown-row:hover .row-actions {{
+            opacity: 1;
+            pointer-events: auto;
+        }}
+        
+        .action-btn {{
+            font-size: 10px;
+            color: var(--primary);
+            cursor: pointer;
+            text-decoration: underline;
+            font-weight: 500;
+        }}
+        
+        .action-btn:hover {{
+            color: var(--text-main);
+        }}
+        
+        .action-separator {{
+            font-size: 10px;
+            color: var(--text-muted);
+            margin: 0 3px;
+        }}
+        
+        @keyframes fadeInSlide {{
+            from {{
+                opacity: 0;
+                transform: translateY(-8px);
+            }}
+            to {{
+                opacity: 1;
+                transform: translateY(0);
+            }}
+        }}
+        
+        .filter-dropdown.show {{
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            animation: fadeInSlide 0.15s ease-out forwards;
+        }}
+        
+        .filter-dropdown label {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+            color: var(--text-main);
+            cursor: pointer;
+            user-select: none;
+            transition: opacity 0.15s;
+        }}
+        
+        .filter-dropdown label:hover {{
+            opacity: 0.85;
+        }}
+        
+        .filter-dropdown input[type="checkbox"] {{
+            accent-color: var(--primary);
+            cursor: pointer;
+            width: 14px;
+            height: 14px;
+        }}
+        
+        .dot {{
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+        }}
+        .crit-dot {{ background-color: var(--error); }}
+        .high-dot {{ background-color: #f97316; }}
+        .med-dot {{ background-color: var(--warning); }}
+        .low-dot {{ background-color: var(--info); }}
+        .unkn-dot {{ background-color: var(--text-muted); }}
         
         .filter-btn {{
             background-color: var(--bg-color);
@@ -5132,6 +5405,8 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             cursor: pointer;
             font-family: inherit;
             transition: all 0.2s ease;
+            display: inline-flex;
+            align-items: center;
         }}
         
         .filter-btn:hover {{
@@ -5509,12 +5784,91 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                 <button id="clearSearch" onclick="clearSearchInput()">&times;</button>
             </div>
             <div class="filter-buttons">
-                <button class="filter-btn active" onclick="setCategory('all')">All</button>
-                <button class="filter-btn" onclick="setCategory('vulnerable')">Vulnerable</button>
-                <button class="filter-btn" onclick="setCategory('outdated')">Outdated</button>
-                <button class="filter-btn" onclick="setCategory('deprecated')">Deprecated</button>
-                <button class="filter-btn" onclick="setCategory('suppressed')">Suppressed</button>
-                <button class="filter-btn" onclick="setCategory('clean')">Clean</button>
+                <button class="filter-btn active" data-cat="all" onclick="setCategory('all', event)">All</button>
+                
+                <div class="filter-group">
+                    <button class="filter-btn" data-cat="vulnerable" onclick="setCategory('vulnerable', event)">
+                        Vulnerable <span class="chevron-inline">▼</span>
+                    </button>
+                    <div class="filter-dropdown" id="dropdown-vulnerable">
+                        <div class="dropdown-row">
+                            <label><input type="checkbox" value="critical" checked onchange="filterPackages()"> <span class="dot crit-dot"></span> Critical</label>
+                            <span class="row-actions">
+                                <span class="action-btn" onclick="selectOnly(event, 'critical')">only</span>
+                                <span class="action-separator">/</span>
+                                <span class="action-btn" onclick="selectAll(event)">all</span>
+                            </span>
+                        </div>
+                        <div class="dropdown-row">
+                            <label><input type="checkbox" value="high" checked onchange="filterPackages()"> <span class="dot high-dot"></span> High</label>
+                            <span class="row-actions">
+                                <span class="action-btn" onclick="selectOnly(event, 'high')">only</span>
+                                <span class="action-separator">/</span>
+                                <span class="action-btn" onclick="selectAll(event)">all</span>
+                            </span>
+                        </div>
+                        <div class="dropdown-row">
+                            <label><input type="checkbox" value="medium" checked onchange="filterPackages()"> <span class="dot med-dot"></span> Medium</label>
+                            <span class="row-actions">
+                                <span class="action-btn" onclick="selectOnly(event, 'medium')">only</span>
+                                <span class="action-separator">/</span>
+                                <span class="action-btn" onclick="selectAll(event)">all</span>
+                            </span>
+                        </div>
+                        <div class="dropdown-row">
+                            <label><input type="checkbox" value="low" checked onchange="filterPackages()"> <span class="dot low-dot"></span> Low</label>
+                            <span class="row-actions">
+                                <span class="action-btn" onclick="selectOnly(event, 'low')">only</span>
+                                <span class="action-separator">/</span>
+                                <span class="action-btn" onclick="selectAll(event)">all</span>
+                            </span>
+                        </div>
+                        <div class="dropdown-row">
+                            <label><input type="checkbox" value="unknown" checked onchange="filterPackages()"> <span class="dot unkn-dot"></span> Unknown</label>
+                            <span class="row-actions">
+                                <span class="action-btn" onclick="selectOnly(event, 'unknown')">only</span>
+                                <span class="action-separator">/</span>
+                                <span class="action-btn" onclick="selectAll(event)">all</span>
+                            </span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="filter-group">
+                    <button class="filter-btn" data-cat="outdated" onclick="setCategory('outdated', event)">
+                        Outdated <span class="chevron-inline">▼</span>
+                    </button>
+                    <div class="filter-dropdown" id="dropdown-outdated">
+                        <div class="dropdown-row">
+                            <label><input type="checkbox" value="major" checked onchange="filterPackages()"> Major Update</label>
+                            <span class="row-actions">
+                                <span class="action-btn" onclick="selectOnly(event, 'major')">only</span>
+                                <span class="action-separator">/</span>
+                                <span class="action-btn" onclick="selectAll(event)">all</span>
+                            </span>
+                        </div>
+                        <div class="dropdown-row">
+                            <label><input type="checkbox" value="minor" checked onchange="filterPackages()"> Minor Update</label>
+                            <span class="row-actions">
+                                <span class="action-btn" onclick="selectOnly(event, 'minor')">only</span>
+                                <span class="action-separator">/</span>
+                                <span class="action-btn" onclick="selectAll(event)">all</span>
+                            </span>
+                        </div>
+                        <div class="dropdown-row">
+                            <label><input type="checkbox" value="patch" checked onchange="filterPackages()"> Patch Update</label>
+                            <span class="row-actions">
+                                <span class="action-btn" onclick="selectOnly(event, 'patch')">only</span>
+                                <span class="action-separator">/</span>
+                                <span class="action-btn" onclick="selectAll(event)">all</span>
+                            </span>
+                        </div>
+                    </div>
+                </div>
+                
+                <button class="filter-btn" data-cat="deprecated" onclick="setCategory('deprecated', event)">Deprecated</button>
+                <button class="filter-btn" data-cat="suppressed" onclick="setCategory('suppressed', event)">Suppressed</button>
+                <button class="filter-btn" data-cat="clean" onclick="setCategory('clean', event)">Clean</button>
             </div>
         </div>
         
@@ -5525,14 +5879,107 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
     </div>
     
     <script>
-        let currentCategory = 'all';
+        let activeCategories = ['all'];
         
-        function setCategory(cat) {{
-            currentCategory = cat;
-            document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('active'));
-            event.target.classList.add('active');
+        function selectOnly(event, value) {{
+            event.preventDefault();
+            event.stopPropagation();
+            const dropdown = event.target.closest('.filter-dropdown');
+            if (dropdown) {{
+                dropdown.querySelectorAll('input[type="checkbox"]').forEach(cb => {{
+                    cb.checked = (cb.value === value);
+                }});
+                filterPackages();
+            }}
+        }}
+        
+        function selectAll(event) {{
+            event.preventDefault();
+            event.stopPropagation();
+            const dropdown = event.target.closest('.filter-dropdown');
+            if (dropdown) {{
+                dropdown.querySelectorAll('input[type="checkbox"]').forEach(cb => {{
+                    cb.checked = true;
+                }});
+                filterPackages();
+            }}
+        }}
+        
+        function setCategory(cat, event) {{
+            if (event) {{
+                event.stopPropagation();
+            }}
+            
+            if (cat === 'all') {{
+                activeCategories = ['all'];
+                document.querySelectorAll('.filter-dropdown').forEach(dd => dd.classList.remove('show'));
+                document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('dropdown-open'));
+                document.querySelectorAll('.filter-dropdown input[type="checkbox"]').forEach(cb => {{
+                    cb.checked = true;
+                }});
+            }} else if (cat === 'clean') {{
+                activeCategories = ['clean'];
+                document.querySelectorAll('.filter-dropdown').forEach(dd => dd.classList.remove('show'));
+                document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('dropdown-open'));
+                document.querySelectorAll('.filter-dropdown input[type="checkbox"]').forEach(cb => {{
+                    cb.checked = true;
+                }});
+            }} else {{
+                activeCategories = activeCategories.filter(c => c !== 'all' && c !== 'clean');
+                
+                if (activeCategories.includes(cat)) {{
+                    activeCategories = activeCategories.filter(c => c !== cat);
+                    const dd = document.getElementById(`dropdown-${{cat}}`);
+                    if (dd) {{
+                        dd.classList.remove('show');
+                        const group = dd.closest('.filter-group');
+                        if (group) {{
+                            const btn = group.querySelector('.filter-btn');
+                            if (btn) btn.classList.remove('dropdown-open');
+                        }}
+                    }}
+                }} else {{
+                    activeCategories.push(cat);
+                    document.querySelectorAll('.filter-dropdown').forEach(dd => dd.classList.remove('show'));
+                    document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('dropdown-open'));
+                    
+                    const dd = document.getElementById(`dropdown-${{cat}}`);
+                    if (dd) {{
+                        dd.classList.add('show');
+                        const group = dd.closest('.filter-group');
+                        if (group) {{
+                            const btn = group.querySelector('.filter-btn');
+                            if (btn) btn.classList.add('dropdown-open');
+                        }}
+                    }}
+                }}
+                
+                if (activeCategories.length === 0) {{
+                    activeCategories = ['all'];
+                }}
+            }}
+            
+            updateFilterButtonStates();
             filterPackages();
         }}
+        
+        function updateFilterButtonStates() {{
+            document.querySelectorAll('.filter-btn').forEach(btn => {{
+                const cat = btn.getAttribute('data-cat');
+                if (activeCategories.includes(cat)) {{
+                    btn.classList.add('active');
+                }} else {{
+                    btn.classList.remove('active');
+                }}
+            }});
+        }}
+        
+        document.addEventListener('click', function(event) {{
+            if (!event.target.closest('.filter-group')) {{
+                document.querySelectorAll('.filter-dropdown').forEach(dd => dd.classList.remove('show'));
+                document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('dropdown-open'));
+            }}
+        }});
         
         function onSearchInput() {{
             const input = document.getElementById('searchInput');
@@ -5557,26 +6004,52 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             const searchVal = document.getElementById('searchInput').value.toLowerCase();
             const cards = document.querySelectorAll('.package-card');
             
+            const checkedSeverities = Array.from(document.querySelectorAll('#dropdown-vulnerable input[type="checkbox"]:checked')).map(cb => cb.value);
+            const checkedOutdated = Array.from(document.querySelectorAll('#dropdown-outdated input[type="checkbox"]:checked')).map(cb => cb.value);
+            
             cards.forEach(card => {{
                 const name = card.getAttribute('data-name').toLowerCase();
                 const status = card.getAttribute('data-status');
                 const isVulnerable = card.getAttribute('data-vulnerable') === 'true';
+                const cardSeverities = (card.getAttribute('data-severities') || '').split(',').filter(s => s);
                 const isSuppressed = card.getAttribute('data-suppressed') === 'true';
                 const isDeprecated = card.getAttribute('data-deprecated') === 'true';
                 
                 let matchesCategory = false;
-                if (currentCategory === 'all') {{
+                if (activeCategories.includes('all')) {{
                     matchesCategory = true;
-                }} else if (currentCategory === 'vulnerable') {{
-                    matchesCategory = isVulnerable;
-                }} else if (currentCategory === 'outdated') {{
-                    matchesCategory = ['major', 'minor', 'patch'].includes(status) || isDeprecated;
-                }} else if (currentCategory === 'deprecated') {{
-                    matchesCategory = isDeprecated;
-                }} else if (currentCategory === 'suppressed') {{
-                    matchesCategory = isSuppressed;
-                }} else if (currentCategory === 'clean') {{
-                    matchesCategory = status === 'up-to-date' && !isVulnerable && !isDeprecated;
+                }} else {{
+                    let matchesAll = true;
+                    for (const cat of activeCategories) {{
+                        if (cat === 'vulnerable') {{
+                            const checkSeverities = cardSeverities.length > 0 ? cardSeverities : ['unknown'];
+                            if (!(isVulnerable && checkSeverities.some(s => checkedSeverities.includes(s)))) {{
+                                matchesAll = false;
+                                break;
+                            }}
+                        }} else if (cat === 'outdated') {{
+                            if (!(checkedOutdated.includes(status) || (checkedOutdated.includes('major') && isDeprecated))) {{
+                                matchesAll = false;
+                                break;
+                            }}
+                        }} else if (cat === 'deprecated') {{
+                            if (!isDeprecated) {{
+                                matchesAll = false;
+                                break;
+                            }}
+                        }} else if (cat === 'suppressed') {{
+                            if (!isSuppressed) {{
+                                matchesAll = false;
+                                break;
+                            }}
+                        }} else if (cat === 'clean') {{
+                            if (!(status === 'up-to-date' && !isVulnerable && !isDeprecated)) {{
+                                matchesAll = false;
+                                break;
+                            }}
+                        }}
+                    }}
+                    matchesCategory = matchesAll;
                 }}
                 
                 const matchesSearch = name.includes(searchVal);
