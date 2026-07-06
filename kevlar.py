@@ -195,15 +195,14 @@ def fetch_node_schedule():
     schedule = {}
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Kevlar Dependency Scanner)"})
-        with urllib.request.urlopen(req, timeout=5) as response:
-            if response.status == 200:
-                data = json.loads(response.read().decode("utf-8"))
-                for k, v in data.items():
-                    major = k[1:] if k.startswith("v") else k
-                    schedule[major] = {
-                        "maintenance": v.get("maintenance", "N/A"),
-                        "end": v.get("end", "N/A")
-                    }
+        with safe_urlopen(req, timeout=5) as response:
+            data = json.loads(response.read().decode("utf-8"))
+            for k, v in data.items():
+                major = k[1:] if k.startswith("v") else k
+                schedule[major] = {
+                    "maintenance": v.get("maintenance", "N/A"),
+                    "end": v.get("end", "N/A")
+                }
     except Exception as e:
         print(f"{COLOR_YELLOW}{ICON_WARN} Warning fetching Node.js release schedule: {e}{COLOR_RESET}")
         
