@@ -44,6 +44,7 @@ Designed with a modular and extensible architecture, it supports checking direct
 - **NPM Registry Checksum Auditing**: For Node.js (`npm`), cross-validates local lockfile integrity hashes against official registry metadata, flagging **Missing Checksums**, **Weak Algorithms** (SHA-1), and critical **Integrity Mismatches**.
 - **Advanced HTML Filtering Controls**: Interactive HTML dashboards include:
   - **AND Intersection Filtering**: Combine multiple filters (e.g., *Outdated* + *Vulnerable*) to show only packages matching all selected categories.
+  - **Dependency Scope/Type Filtering**: Filter packages dynamically by their scope (e.g., *Direct*, *Dev*, *Transitive*, *Engine*) using the new **Scope** dropdown filter.
   - **Quick "only / all" Hover Controls**: Instantly isolate sub-filters or check all back on hover.
   - **Auto-closing & Smart Resetting**: Auto-closes menus when clicking outside and resets checkboxes when switching to *All* or *Clean*.
 

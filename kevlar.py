@@ -5068,6 +5068,7 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                  data-severities="{data_severities}"
                  data-suppressed="{"true" if is_suppressed else "false"}"
                  data-deprecated="{"true" if is_deprecated else "false"}"
+                 data-deptype="{dep_type.lower()}"
                  id="pkg-{i}">
                 <div class="card-header" onclick="toggleDetails({i})">
                     <div class="header-left">
@@ -5888,6 +5889,46 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                     </div>
                 </div>
                 
+                <div class="filter-group">
+                    <button class="filter-btn" data-cat="scope" onclick="setCategory('scope', event)">
+                        Scope <span class="chevron-inline">▼</span>
+                    </button>
+                    <div class="filter-dropdown" id="dropdown-scope">
+                        <div class="dropdown-row">
+                            <label><input type="checkbox" value="direct" checked onchange="filterPackages()"> Direct</label>
+                            <span class="row-actions">
+                                <span class="action-btn" onclick="selectOnly(event, 'direct')">only</span>
+                                <span class="action-separator">/</span>
+                                <span class="action-btn" onclick="selectAll(event)">all</span>
+                            </span>
+                        </div>
+                        <div class="dropdown-row">
+                            <label><input type="checkbox" value="dev" checked onchange="filterPackages()"> Dev</label>
+                            <span class="row-actions">
+                                <span class="action-btn" onclick="selectOnly(event, 'dev')">only</span>
+                                <span class="action-separator">/</span>
+                                <span class="action-btn" onclick="selectAll(event)">all</span>
+                            </span>
+                        </div>
+                        <div class="dropdown-row">
+                            <label><input type="checkbox" value="transitive" checked onchange="filterPackages()"> Transitive</label>
+                            <span class="row-actions">
+                                <span class="action-btn" onclick="selectOnly(event, 'transitive')">only</span>
+                                <span class="action-separator">/</span>
+                                <span class="action-btn" onclick="selectAll(event)">all</span>
+                            </span>
+                        </div>
+                        <div class="dropdown-row">
+                            <label><input type="checkbox" value="engine" checked onchange="filterPackages()"> Engine</label>
+                            <span class="row-actions">
+                                <span class="action-btn" onclick="selectOnly(event, 'engine')">only</span>
+                                <span class="action-separator">/</span>
+                                <span class="action-btn" onclick="selectAll(event)">all</span>
+                            </span>
+                        </div>
+                    </div>
+                </div>
+                
                 <button class="filter-btn" data-cat="deprecated" onclick="setCategory('deprecated', event)">Deprecated</button>
                 <button class="filter-btn" data-cat="suppressed" onclick="setCategory('suppressed', event)">Suppressed</button>
                 <button class="filter-btn" data-cat="clean" onclick="setCategory('clean', event)">Clean</button>
@@ -6028,6 +6069,7 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             
             const checkedSeverities = Array.from(document.querySelectorAll('#dropdown-vulnerable input[type="checkbox"]:checked')).map(cb => cb.value);
             const checkedOutdated = Array.from(document.querySelectorAll('#dropdown-outdated input[type="checkbox"]:checked')).map(cb => cb.value);
+            const checkedScopes = Array.from(document.querySelectorAll('#dropdown-scope input[type="checkbox"]:checked')).map(cb => cb.value);
             
             cards.forEach(card => {{
                 const name = card.getAttribute('data-name').toLowerCase();
@@ -6036,6 +6078,7 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                 const cardSeverities = (card.getAttribute('data-severities') || '').split(',').filter(s => s);
                 const isSuppressed = card.getAttribute('data-suppressed') === 'true';
                 const isDeprecated = card.getAttribute('data-deprecated') === 'true';
+                const depType = card.getAttribute('data-deptype');
                 
                 let matchesCategory = false;
                 if (activeCategories.includes('all')) {{
@@ -6051,6 +6094,11 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                             }}
                         }} else if (cat === 'outdated') {{
                             if (!(checkedOutdated.includes(status) || (checkedOutdated.includes('major') && isDeprecated))) {{
+                                matchesAll = false;
+                                break;
+                            }}
+                        }} else if (cat === 'scope') {{
+                            if (!checkedScopes.includes(depType)) {{
                                 matchesAll = false;
                                 break;
                             }}
