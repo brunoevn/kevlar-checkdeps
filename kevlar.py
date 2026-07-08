@@ -132,31 +132,118 @@ def safe_urlopen(req, timeout=10, max_retries=3, backoff=0.5):
     if last_err:
         raise last_err
 
-def parse_semver(version_str):
-    """Parses a version string into (major, minor, patch, prerelease)."""
-    if not version_str:
-        return (0, 0, 0, '')
-    
-    # Strip common ranges characters for parsing lower bounds
-    clean_str = version_str.strip()
-    match = SEMVER_REGEX.search(clean_str)
-    if not match:
-        # Fallback parsing
-        digits = re.findall(r'\d+', clean_str)
-        if len(digits) >= 3:
-            return (int(digits[0]), int(digits[1]), int(digits[2]), '')
-        elif len(digits) == 2:
-            return (int(digits[0]), int(digits[1]), 0, '')
-        elif len(digits) == 1:
-            return (int(digits[0]), 0, 0, '')
-        return (0, 0, 0, '')
+class PrereleaseKey:
+    def __init__(self, prerelease):
+        self.prerelease = prerelease or ""
+    def __lt__(self, other):
+        return compare_prereleases(self.prerelease, other.prerelease) < 0
+    def __eq__(self, other):
+        return compare_prereleases(self.prerelease, other.prerelease) == 0
+
+def compare_prereleases(p1, p2):
+    """Compares two pre-release strings according to SemVer rules.
+    Empty string (stable release) has higher precedence than any pre-release.
+    Numeric identifiers are compared numerically.
+    Alphanumeric identifiers are compared lexicographically.
+    Numeric identifiers have lower precedence than non-numeric identifiers.
+    """
+    if p1 == p2:
+        return 0
+    if not p1:  # stable is higher
+        return 1
+    if not p2:  # stable is higher
+        return -1
         
-    gd = match.groupdict()
-    major = int(gd['major'])
-    minor = int(gd['minor'])
-    patch = int(gd['patch'])
-    prerelease = gd['prerelease'] or ''
-    return (major, minor, patch, prerelease)
+    parts1 = p1.split('.')
+    parts2 = p2.split('.')
+    
+    for part1, part2 in zip(parts1, parts2):
+        is_num1 = part1.isdigit()
+        is_num2 = part2.isdigit()
+        
+        if is_num1 and is_num2:
+            n1 = int(part1)
+            n2 = int(part2)
+            if n1 < n2:
+                return -1
+            elif n1 > n2:
+                return 1
+        elif not is_num1 and not is_num2:
+            if part1 < part2:
+                return -1
+            elif part1 > part2:
+                return 1
+        else:
+            return -1 if is_num1 else 1
+            
+    if len(parts1) < len(parts2):
+        return -1
+    elif len(parts1) > len(parts2):
+        return 1
+    return 0
+
+def parse_semver(version_str):
+    """Parses a version string into (epoch, major, minor, patch, revision, prerelease)."""
+    if not version_str:
+        return (0, 0, 0, 0, 0, '')
+    
+    clean_str = version_str.strip()
+    if clean_str.lower().startswith('v'):
+        clean_str = clean_str[1:]
+        
+    if '+' in clean_str:
+        clean_str = clean_str.split('+', 1)[0]
+        
+    epoch = 0
+    if '!' in clean_str:
+        parts = clean_str.split('!', 1)
+        try:
+            epoch = int(parts[0])
+        except ValueError:
+            epoch = 0
+        clean_str = parts[1]
+        
+    prerelease = ''
+    if '-' in clean_str:
+        clean_str, prerelease = clean_str.split('-', 1)
+    else:
+        m = re.search(r'([a-zA-Z]+.*)$', clean_str)
+        if m:
+            qualifier = m.group(1).lower()
+            if any(q in qualifier for q in ('a', 'b', 'rc', 'cr', 'dev', 'alpha', 'beta', 'preview')):
+                start_idx = m.start()
+                prerelease = clean_str[start_idx:]
+                clean_str = clean_str[:start_idx]
+                if clean_str.endswith('.'):
+                    clean_str = clean_str[:-1]
+                    
+    if prerelease:
+        p_lower = prerelease.lower()
+        if not any(q in p_lower for q in ('a', 'b', 'rc', 'cr', 'dev', 'alpha', 'beta', 'preview', 'snapshot', 'milestone', 'pre')):
+            prerelease = ''
+            
+    digits = re.findall(r'\d+', clean_str)
+    major = 0
+    minor = 0
+    patch = 0
+    revision = 0
+    
+    if len(digits) >= 4:
+        major = int(digits[0])
+        minor = int(digits[1])
+        patch = int(digits[2])
+        revision = int(digits[3])
+    elif len(digits) == 3:
+        major = int(digits[0])
+        minor = int(digits[1])
+        patch = int(digits[2])
+    elif len(digits) == 2:
+        major = int(digits[0])
+        minor = int(digits[1])
+    elif len(digits) == 1:
+        major = int(digits[0])
+        
+    return (epoch, major, minor, patch, revision, prerelease)
 
 def compare_versions(v1_str, v2_str):
     """Compares two semver version strings.
@@ -168,22 +255,12 @@ def compare_versions(v1_str, v2_str):
     t1 = parse_semver(v1_str)
     t2 = parse_semver(v2_str)
     
-    # Compare major.minor.patch
-    if t1[:3] < t2[:3]:
+    if t1[:5] < t2[:5]:
         return -1
-    elif t1[:3] > t2[:3]:
+    elif t1[:5] > t2[:5]:
         return 1
         
-    # Compare prerelease tag (empty is higher than any prerelease tag)
-    p1 = t1[3]
-    p2 = t2[3]
-    if p1 == p2:
-        return 0
-    if not p1:  # stable is higher
-        return 1
-    if not p2:  # stable is higher
-        return -1
-    return -1 if p1 < p2 else 1
+    return compare_prereleases(t1[5], t2[5])
 
 def fetch_node_schedule():
     """Fetches the official Node.js release schedule from GitHub.
@@ -224,7 +301,7 @@ def satisfy_term(version_str, term):
             
         ver_part = term[len(op):] if op else term
         
-        v_maj, v_min, v_pat, _ = parse_semver(version_str)
+        _, v_maj, v_min, v_pat, _, _ = parse_semver(version_str)
         
         if ver_part.endswith(".x") or ver_part.endswith(".*"):
             parts = ver_part.split(".")
@@ -250,7 +327,7 @@ def satisfy_term(version_str, term):
                 except ValueError:
                     pass
 
-        t_maj, t_min, t_pat, _ = parse_semver(ver_part)
+        _, t_maj, t_min, t_pat, _, _ = parse_semver(ver_part)
         
         if op == ">=":
             return compare_versions(version_str, ver_part) >= 0
@@ -308,6 +385,48 @@ def check_semver_satisfies(version_str, range_str):
             return True
             
     return False
+
+def _check_all_targets_unified(targets, check_func, label, max_workers):
+    """Unified parallel check runner with try/except wrappers and progress reporting."""
+    results = []
+    completed = 0
+    total = len(targets)
+    
+    if not targets:
+        return results
+        
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(check_func, t): t for t in targets}
+        for future in as_completed(futures):
+            completed += 1
+            sys.stdout.write(f"\r{label}: {completed}/{total}... ")
+            sys.stdout.flush()
+            try:
+                res = future.result()
+                if isinstance(res, list):
+                    results.extend(res)
+                elif res:
+                    results.append(res)
+            except Exception as e:
+                target_pkg = futures[future]
+                name = target_pkg.get("name", "unknown")
+                print(f"\n{COLOR_RED}{ICON_ERROR} Error checking {name}: {e}{COLOR_RESET}")
+                installed = target_pkg.get("installed", [])
+                versions_to_check = installed if installed else [target_pkg.get("declared")]
+                for ver_str in versions_to_check:
+                    results.append({
+                        "name": name,
+                        "declared": ver_str,
+                        "installed": ver_str,
+                        "latest": "unknown",
+                        "status": "error",
+                        "deprecated": False,
+                        "error": str(e)
+                    })
+            
+    sys.stdout.write("\r\033[K")
+    sys.stdout.flush()
+    return results
 
 def analyze_node_constraint(constraint_str):
     """Analyzes a Node.js version constraint and checks if it permits EOL versions.
@@ -492,9 +611,9 @@ def classify_update(installed_str, latest_str):
     t_inst = parse_semver(installed_str)
     t_late = parse_semver(latest_str)
     
-    if t_late[0] > t_inst[0]:
+    if t_late[0] > t_inst[0] or t_late[1] > t_inst[1]:
         return "major"
-    elif t_late[1] > t_inst[1]:
+    elif t_late[2] > t_inst[2]:
         return "minor"
     else:
         return "patch"
@@ -509,14 +628,14 @@ def find_latest_same_major(installed_ver, all_versions):
     
     # Strip common non-numeric prefix from installed version
     clean_inst = re.sub(r'^[^\d]*', '', installed_ver).split('+')[0]
-    inst_major, _, _, inst_prerelease = parse_semver(clean_inst)
+    _, inst_major, _, _, _, inst_prerelease = parse_semver(clean_inst)
     installed_is_prerelease = bool(inst_prerelease)
     
     # Filter out prerelease versions if the installed version is stable
     filtered_versions = []
     for v in all_versions:
         clean_v = re.sub(r'^[^\d]*', '', v).split('+')[0]
-        _, _, _, prerelease = parse_semver(clean_v)
+        _, _, _, _, _, prerelease = parse_semver(clean_v)
         if not installed_is_prerelease and prerelease:
             continue
         filtered_versions.append(v)
@@ -528,9 +647,9 @@ def find_latest_same_major(installed_ver, all_versions):
     # helper for sorting
     def semver_sort_key(v_str):
         clean = re.sub(r'^[^\d]*', '', v_str).split('+')[0]
-        major, minor, patch, prerelease = parse_semver(clean)
+        epoch, major, minor, patch, revision, prerelease = parse_semver(clean)
         is_stable = 1 if not prerelease else 0
-        return (major, minor, patch, is_stable, prerelease)
+        return (epoch, major, minor, patch, revision, is_stable, PrereleaseKey(prerelease))
         
     sorted_all = sorted(filtered_versions, key=semver_sort_key)
     if not sorted_all:
@@ -541,7 +660,7 @@ def find_latest_same_major(installed_ver, all_versions):
     same_major_versions = []
     for v in sorted_all:
         clean_v = re.sub(r'^[^\d]*', '', v).split('+')[0]
-        v_major, _, _, _ = parse_semver(clean_v)
+        _, v_major, _, _, _, _ = parse_semver(clean_v)
         if v_major == inst_major:
             same_major_versions.append(v)
             
@@ -566,6 +685,10 @@ def clean_repo_url(url):
     if not isinstance(url, str):
         return None
     url = url.strip()
+    
+    if url.lower().startswith("javascript:"):
+        return None
+        
     if url.startswith("git+"):
         url = url[4:]
     if url.startswith("git://"):
@@ -578,6 +701,19 @@ def clean_repo_url(url):
         url = url[:-4]
     url = url.replace("ssh://git@", "https://")
     url = url.rstrip("/")
+    
+    try:
+        parsed = urllib.parse.urlparse(url)
+        if not parsed.scheme:
+            if url:
+                url = "https://" + url
+            parsed = urllib.parse.urlparse(url)
+            
+        if parsed.scheme not in ("http", "https"):
+            return None
+    except Exception:
+        return None
+        
     return url
 
 def is_github_url(url):
@@ -1191,38 +1327,9 @@ def check_npm_package(target):
 
 def check_all_targets(targets, max_workers):
     """Executes checks concurrently and renders simple progress."""
-    results = []
     total = len(targets)
-    completed = 0
-    
     print(f"{COLOR_BOLD}{COLOR_CYAN}Checking {total} packages...{COLOR_RESET}\n")
-    
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_target = {executor.submit(check_npm_package, t): t for t in targets}
-        
-        for future in as_completed(future_to_target):
-            completed += 1
-            sys.stdout.write(f"\r{COLOR_GRAY}[Progress: {completed}/{total}] Checking {future_to_target[future]['name']}...{COLOR_RESET}\033[K")
-            sys.stdout.flush()
-            
-            try:
-                res_list = future.result()
-                results.extend(res_list)
-            except Exception as e:
-                target = future_to_target[future]
-                results.append({
-                    "name": target["name"],
-                    "declared": target["declared"],
-                    "installed": target["installed"][0] if target["installed"] else target["declared"],
-                    "latest": None,
-                    "status": "error",
-                    "deprecated": None,
-                    "error": f"Thread error: {e}"
-                })
-                
-    sys.stdout.write("\r\033[K")
-    sys.stdout.flush()
-    return results
+    return _check_all_targets_unified(targets, check_npm_package, f"{COLOR_GRAY}[Progress: NPM check]", max_workers)
 
 # ==============================================================================
 # OSV Vulnerability Scanning Logic
@@ -1287,9 +1394,35 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
         name, ver_str, clean_ver = query_mapping[i]
         vulns = res.get("vulns", [])
         
+        # Hydrate subsequent pages if next_page_token is present
+        next_page_token = res.get("next_page_token")
+        while next_page_token:
+            try:
+                url = "https://api.osv.dev/v1/query"
+                payload = {
+                    "package": {
+                        "name": name,
+                        "ecosystem": ecosystem
+                    },
+                    "version": clean_ver,
+                    "page_token": next_page_token
+                }
+                req = urllib.request.Request(
+                    url,
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json"}
+                )
+                with safe_urlopen(req, timeout=10) as page_response:
+                    page_data = json.loads(page_response.read().decode("utf-8"))
+                additional_vulns = page_data.get("vulns", [])
+                vulns.extend(additional_vulns)
+                next_page_token = page_data.get("next_page_token")
+            except Exception:
+                break
+                
         if vulns:
             ids = [v["id"] for v in vulns if "id" in v]
-            package_to_vuln_ids[(name, ver_str)] = ids
+            package_to_vuln_ids[(name, clean_ver)] = ids
             vuln_ids_to_hydrate.update(ids)
             
     if not vuln_ids_to_hydrate:
@@ -1326,7 +1459,7 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
     
     # Map back to packages
     package_to_vulns = {}
-    for (name, ver_str), vids in package_to_vuln_ids.items():
+    for (name, clean_ver), vids in package_to_vuln_ids.items():
         vuln_list = []
         for vid in vids:
             vuln_data = hydrated_details.get(vid, {})
@@ -1334,14 +1467,15 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
             severity = "UNKNOWN"
             if "severity" in vuln_data and isinstance(vuln_data["severity"], list):
                 for sev in vuln_data["severity"]:
-                    if sev.get("type") in ("CVSS_V3", "CVSS_V2"):
+                    if sev.get("type") in ("CVSS_V4", "CVSS_V3", "CVSS_V2"):
                         score = sev.get('score')
                         if score:
                             score_str = str(score)
                             if score_str.startswith("CVSS"):
                                 severity = score_str
                             else:
-                                severity = f"CVSS {score_str}"
+                                prefix = "CVSS:4.0/" if sev.get("type") == "CVSS_V4" else ("CVSS:3.0/" if sev.get("type") == "CVSS_V3" else "CVSS:2.0/")
+                                severity = f"{prefix}{score_str}"
                         break
             if severity == "UNKNOWN":
                 db_spec = vuln_data.get("database_specific")
@@ -1354,7 +1488,7 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
                 "severity": severity,
                 "details": vuln_data.get("details", "")
             })
-        package_to_vulns[(name, ver_str)] = vuln_list
+        package_to_vulns[(name, clean_ver)] = vuln_list
         
     return package_to_vulns
 
@@ -1599,7 +1733,10 @@ def parse_requirements_txt(filepath):
         parents = {}
         
         last_pkg = None
-        pkg_re = re.compile(r'^\s*([A-Za-z0-9_.-]+)\s*(?:(==|>=|<=|~=|!=|>|<)\s*([A-Za-z0-9_.-]+))?')
+        pkg_re = re.compile(
+            r'^\s*([A-Za-z0-9_.-]+(?:\[[A-Za-z0-9_,.-]+\])?)\s*'
+            r'(?:(==|>=|<=|~=|!=|>|<|=)\s*([A-Za-z0-9_.!+*-]+)(?:\s*,\s*.*)?)?'
+        )
         
         for line in lines:
             stripped = line.strip()
@@ -1615,17 +1752,26 @@ def parse_requirements_txt(filepath):
                             parents.setdefault(last_pkg, set()).add(p_clean)
                 continue
                 
+            comment = ""
+            stripped_line = stripped
             if " #" in line:
                 parts = line.split(" #", 1)
                 stripped_line = parts[0].strip()
                 comment = parts[1].strip()
-            else:
-                stripped_line = stripped
-                comment = ""
+            elif "#" in line and not any(scheme in line for scheme in ("http://", "https://", "git+")):
+                parts = line.split("#", 1)
+                stripped_line = parts[0].strip()
+                comment = parts[1].strip()
+                
+            if stripped_line.startswith("-"):
+                continue
                 
             match = pkg_re.match(stripped_line)
             if match:
                 pkg_name = match.group(1)
+                if "[" in pkg_name:
+                    pkg_name = pkg_name.split("[")[0]
+                    
                 op = match.group(2)
                 ver = match.group(3)
                 
@@ -1765,38 +1911,9 @@ def check_pypi_package(target):
 
 def check_all_pip_targets(targets, max_workers):
     """Executes PyPI checks concurrently and renders simple progress."""
-    results = []
     total = len(targets)
-    completed = 0
-    
     print(f"{COLOR_BOLD}{COLOR_CYAN}Checking {total} packages...{COLOR_RESET}\n")
-    
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_target = {executor.submit(check_pypi_package, t): t for t in targets}
-        
-        for future in as_completed(future_to_target):
-            completed += 1
-            sys.stdout.write(f"\r{COLOR_GRAY}[Progress: {completed}/{total}] Checking {future_to_target[future]['name']}...{COLOR_RESET}\033[K")
-            sys.stdout.flush()
-            
-            try:
-                res_list = future.result()
-                results.extend(res_list)
-            except Exception as e:
-                target = future_to_target[future]
-                results.append({
-                    "name": target["name"],
-                    "declared": target["declared"],
-                    "installed": target["installed"][0] if target["installed"] else target["declared"],
-                    "latest": None,
-                    "status": "error",
-                    "deprecated": None,
-                    "error": f"Thread error: {e}"
-                })
-                
-    sys.stdout.write("\r\033[K")
-    sys.stdout.flush()
-    return results
+    return _check_all_targets_unified(targets, check_pypi_package, f"{COLOR_GRAY}[Progress: PyPI check]", max_workers)
 
 def find_pip_files(base_path):
     """Finds manifest and lockfile for python/pip technologies."""
@@ -2390,38 +2507,9 @@ def check_nuget_package(target):
 
 def check_all_nuget_targets(targets, max_workers):
     """Executes NuGet checks concurrently and renders simple progress."""
-    results = []
     total = len(targets)
-    completed = 0
-    
     print(f"{COLOR_BOLD}{COLOR_CYAN}Checking {total} packages...{COLOR_RESET}\n")
-    
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_target = {executor.submit(check_nuget_package, t): t for t in targets}
-        
-        for future in as_completed(future_to_target):
-            completed += 1
-            sys.stdout.write(f"\r{COLOR_GRAY}[Progress: {completed}/{total}] Checking {future_to_target[future]['name']}...{COLOR_RESET}\033[K")
-            sys.stdout.flush()
-            
-            try:
-                res_list = future.result()
-                results.extend(res_list)
-            except Exception as e:
-                target = future_to_target[future]
-                results.append({
-                    "name": target["name"],
-                    "declared": target["declared"],
-                    "installed": target["installed"][0] if target["installed"] else target["declared"],
-                    "latest": None,
-                    "status": "error",
-                    "deprecated": None,
-                    "error": f"Thread error: {e}"
-                })
-                
-    sys.stdout.write("\r\033[K")
-    sys.stdout.flush()
-    return results
+    return _check_all_targets_unified(targets, check_nuget_package, f"{COLOR_GRAY}[Progress: NuGet check]", max_workers)
 
 def run_nuget_checker(args):
     """Main orchestrator for NuGet checker."""
@@ -2690,38 +2778,9 @@ def check_composer_package(target):
 
 def check_all_composer_targets(targets, max_workers):
     """Executes Packagist checks concurrently and renders simple progress."""
-    results = []
     total = len(targets)
-    completed = 0
-    
     print(f"{COLOR_BOLD}{COLOR_CYAN}Checking {total} packages...{COLOR_RESET}\n")
-    
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_target = {executor.submit(check_composer_package, t): t for t in targets}
-        
-        for future in as_completed(future_to_target):
-            completed += 1
-            sys.stdout.write(f"\r{COLOR_GRAY}[Progress: {completed}/{total}] Checking {future_to_target[future]['name']}...{COLOR_RESET}\033[K")
-            sys.stdout.flush()
-            
-            try:
-                res_list = future.result()
-                results.extend(res_list)
-            except Exception as e:
-                target = future_to_target[future]
-                results.append({
-                    "name": target["name"],
-                    "declared": target["declared"],
-                    "installed": target["installed"][0] if target["installed"] else target["declared"],
-                    "latest": None,
-                    "status": "error",
-                    "deprecated": None,
-                    "error": f"Thread error: {e}"
-                })
-                
-    sys.stdout.write("\r\033[K")
-    sys.stdout.flush()
-    return results
+    return _check_all_targets_unified(targets, check_composer_package, f"{COLOR_GRAY}[Progress: Composer check]", max_workers)
 
 def run_composer_checker(args):
     """Main orchestrator for PHP / Composer checker."""
@@ -2999,9 +3058,20 @@ def check_maven_package(target):
                         versions_list.append(v.text.strip())
                         
         stable_versions = []
+        prerelease_pattern = re.compile(
+            r'[-.]?(alpha|beta|rc|cr|m|preview|dev|snapshot|milestone)\d*\b',
+            re.IGNORECASE
+        )
         for v in versions_list:
             v_lower = v.lower()
-            if not any(x in v_lower for x in ("-", "alpha", "beta", "rc", "m", "cr", "dev")):
+            is_prerelease = False
+            if "snapshot" in v_lower:
+                is_prerelease = True
+            else:
+                m = prerelease_pattern.search(v_lower)
+                if m:
+                    is_prerelease = True
+            if not is_prerelease:
                 stable_versions.append(v)
                 
         valid_versions = stable_versions if stable_versions else versions_list
@@ -3072,38 +3142,9 @@ def check_maven_package(target):
 
 def check_all_maven_targets(targets, max_workers):
     """Executes Maven Repository checks concurrently and renders simple progress."""
-    results = []
     total = len(targets)
-    completed = 0
-    
     print(f"{COLOR_BOLD}{COLOR_CYAN}Checking {total} packages...{COLOR_RESET}\n")
-    
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_target = {executor.submit(check_maven_package, t): t for t in targets}
-        
-        for future in as_completed(future_to_target):
-            completed += 1
-            sys.stdout.write(f"\r{COLOR_GRAY}[Progress: {completed}/{total}] Checking {future_to_target[future]['name']}...{COLOR_RESET}\033[K")
-            sys.stdout.flush()
-            
-            try:
-                res_list = future.result()
-                results.extend(res_list)
-            except Exception as e:
-                target = future_to_target[future]
-                results.append({
-                    "name": target["name"],
-                    "declared": target["declared"],
-                    "installed": target["installed"][0] if target["installed"] else target["declared"],
-                    "latest": None,
-                    "status": "error",
-                    "deprecated": None,
-                    "error": f"Thread error: {e}"
-                })
-                
-    sys.stdout.write("\r\033[K")
-    sys.stdout.flush()
-    return results
+    return _check_all_targets_unified(targets, check_maven_package, f"{COLOR_GRAY}[Progress: Maven check]", max_workers)
 
 def run_maven_checker(args):
     """Main orchestrator for Maven dependency checker, supporting multi-module poms recursively."""
@@ -3350,38 +3391,9 @@ def check_go_package(target):
 
 def check_all_go_targets(targets, max_workers):
     """Executes Go modules checks concurrently and renders simple progress."""
-    results = []
     total = len(targets)
-    completed = 0
-    
     print(f"{COLOR_BOLD}{COLOR_CYAN}Checking {total} packages...{COLOR_RESET}\n")
-    
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_target = {executor.submit(check_go_package, t): t for t in targets}
-        
-        for future in as_completed(future_to_target):
-            completed += 1
-            sys.stdout.write(f"\r{COLOR_GRAY}[Progress: {completed}/{total}] Checking {future_to_target[future]['name']}...{COLOR_RESET}\033[K")
-            sys.stdout.flush()
-            
-            try:
-                res_list = future.result()
-                results.extend(res_list)
-            except Exception as e:
-                target = future_to_target[future]
-                results.append({
-                    "name": target["name"],
-                    "declared": target["declared"],
-                    "installed": target["installed"][0] if target["installed"] else target["declared"],
-                    "latest": None,
-                    "status": "error",
-                    "deprecated": None,
-                    "error": f"Thread error: {e}"
-                })
-                
-    sys.stdout.write("\r\033[K")
-    sys.stdout.flush()
-    return results
+    return _check_all_targets_unified(targets, check_go_package, f"{COLOR_GRAY}[Progress: Go check]", max_workers)
 
 def run_go_checker(args):
     """Main orchestrator for Go Modules checker."""
@@ -3573,7 +3585,8 @@ def parse_cargo_lock(filepath):
         for pkg in pkg_definitions:
             name = pkg["name"]
             version = pkg["version"]
-            resolved[name] = version
+            if name and version:
+                resolved.setdefault(name, set()).add(version)
             
             for dep in pkg["deps"]:
                 if dep not in parents:
@@ -3583,8 +3596,9 @@ def parse_cargo_lock(filepath):
     except Exception as e:
         print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Cargo.lock: {e}{COLOR_RESET}")
         
+    resolved_clean = {k: list(v) for k, v in resolved.items()}
     parents_clean = {k: list(v) for k, v in parents.items()}
-    return resolved, parents_clean
+    return resolved_clean, parents_clean
 
 def check_rust_package(target):
     """Queries crates.io API for crate metadata and checks target version."""
@@ -3673,21 +3687,7 @@ def check_rust_package(target):
 
 def check_all_rust_targets(targets, max_workers):
     """Checks all Rust target crates in parallel."""
-    results = []
-    completed = 0
-    total = len(targets)
-    
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(check_rust_package, t): t for t in targets}
-        for future in as_completed(futures):
-            completed += 1
-            sys.stdout.write(f"\r[Rust] Checking registry: {completed}/{total}... ")
-            sys.stdout.flush()
-            results.extend(future.result())
-            
-    sys.stdout.write("\r\033[K")
-    sys.stdout.flush()
-    return results
+    return _check_all_targets_unified(targets, check_rust_package, "[Rust] Checking registry", max_workers)
 
 def run_rust_checker(args):
     """Main orchestrator for Rust Cargo checker."""
@@ -3701,7 +3701,7 @@ def run_rust_checker(args):
     resolved, parents = parse_cargo_lock(lock_path)
     
     if not resolved and direct:
-        resolved = {name: "0.0.0" for name in direct}
+        resolved = {name: ["0.0.0"] for name in direct}
         
     pkg_data = {
         "all_direct": {name: name for name in direct},
@@ -3709,13 +3709,14 @@ def run_rust_checker(args):
     }
     
     targets = []
-    for name, version in resolved.items():
+    for name, versions in resolved.items():
         if not args.all and name not in direct:
             continue
+        declared = versions[0] if versions else None
         targets.append({
             "name": name,
-            "declared": version,
-            "installed": [version] if version != "0.0.0" else []
+            "declared": declared,
+            "installed": versions if versions != ["0.0.0"] else []
         })
         
     if not targets:
@@ -3961,21 +3962,7 @@ def check_ruby_package(target):
 
 def check_all_ruby_targets(targets, max_workers):
     """Checks all Ruby target gems in parallel."""
-    results = []
-    completed = 0
-    total = len(targets)
-    
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(check_ruby_package, t): t for t in targets}
-        for future in as_completed(futures):
-            completed += 1
-            sys.stdout.write(f"\r[Ruby] Checking registry: {completed}/{total}... ")
-            sys.stdout.flush()
-            results.extend(future.result())
-            
-    sys.stdout.write("\r\033[K")
-    sys.stdout.flush()
-    return results
+    return _check_all_targets_unified(targets, check_ruby_package, "[Ruby] Checking registry", max_workers)
 
 def run_ruby_checker(args):
     """Main orchestrator for Ruby Bundler checker."""
@@ -4740,13 +4727,14 @@ def export_markdown_report(results, pkg_data, filepath, vuls_enabled=False):
 
 def escape_html(text):
     """Safely escape HTML characters."""
-    if not isinstance(text, str):
+    if text is None:
         return ""
-    return (text.replace("&", "&amp;")
-                .replace("<", "&lt;")
-                .replace(">", "&gt;")
-                .replace('"', "&quot;")
-                .replace("'", "&#x27;"))
+    text_str = str(text)
+    return (text_str.replace("&", "&amp;")
+                    .replace("<", "&lt;")
+                    .replace(">", "&gt;")
+                    .replace('"', "&quot;")
+                    .replace("'", "&#x27;"))
 
 def get_upgraded_constraint(declared_ver, latest_ver):
     """Synthesize upgraded constraint preserving prefixes like ^, ~, ==, >=."""
@@ -5187,6 +5175,13 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             is_deprecated = r["deprecated"]
             error = r["error"]
             
+            name_esc = escape_html(name)
+            declared_esc = escape_html(declared)
+            installed_esc = escape_html(installed)
+            latest_esc = escape_html(latest)
+            status_esc = escape_html(status)
+            error_esc = escape_html(error)
+            
             # Type detection
             dep_type = "Transitive"
             if name == "node":
@@ -5200,11 +5195,13 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             if r.get("required_by") and name != "node":
                 dep_type = "Transitive"
                 
+            dep_type_esc = escape_html(dep_type)
+            
             project_badge = ""
             if r.get("project_path"):
                 proj_path = r["project_path"]
                 tech_val = r.get("technology", "")
-                project_badge = f'<span class="badge badge-project" style="font-family: monospace; text-transform: none; margin-left: 4px;">{proj_path} [{tech_val}]</span>'
+                project_badge = f'<span class="badge badge-project" style="font-family: monospace; text-transform: none; margin-left: 4px;">{escape_html(proj_path)} [{escape_html(tech_val)}]</span>'
                     
             badges = []
             
@@ -5260,29 +5257,33 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                     summary = v["summary"]
                     details = v.get("details", "")
                     
+                    vid_esc = escape_html(vid)
+                    severity_esc = escape_html(severity)
+                    summary_esc = escape_html(summary)
+                    details_esc = escape_html(details)
+                    
                     sev_lower = get_severity_level(v)
-                    sev_badge_class = f"sev-{sev_lower}"
+                    sev_badge_class = f"sev-{escape_html(sev_lower)}"
                     
                     cvss_html = ""
                     if severity.startswith("CVSS"):
                         cvss_val = severity[5:].strip() if severity.startswith(("CVSS:", "CVSS ")) else severity
-                        cvss_html = f'<div class="vuln-cvss" style="font-size: 11px; color: var(--text-muted); margin-bottom: 4px; font-family: monospace;"><strong>CVSS:</strong> {cvss_val}</div>'
-                        sev_badge_html = f'<span class="sev-badge {sev_badge_class}">{sev_lower.upper()}</span>'
+                        cvss_val_esc = escape_html(cvss_val)
+                        cvss_html = f'<div class="vuln-cvss" style="font-size: 11px; color: var(--text-muted); margin-bottom: 4px; font-family: monospace;"><strong>CVSS:</strong> {cvss_val_esc}</div>'
+                        sev_badge_html = f'<span class="sev-badge {sev_badge_class}">{escape_html(sev_lower.upper())}</span>'
                     else:
-                        sev_badge_html = f'<span class="sev-badge {sev_badge_class}">{severity}</span>'
+                        sev_badge_html = f'<span class="sev-badge {sev_badge_class}">{severity_esc}</span>'
                         
-                    details_esc = details.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                    
                     vuln_details_html.append(f"""
                     <div class="vuln-item">
                         <div class="vuln-header">
-                            <span class="vuln-id">{vid}</span>
+                            <span class="vuln-id">{vid_esc}</span>
                         </div>
                         {cvss_html}
                         <div style="margin-top: 4px; margin-bottom: 8px;">
                             {sev_badge_html}
                         </div>
-                        <div class="vuln-summary">{summary}</div>
+                        <div class="vuln-summary">{summary_esc}</div>
                         {f'<pre class="vuln-details">{details_esc}</pre>' if details else ''}
                     </div>
                     """)
@@ -5296,14 +5297,18 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                     summary = sv["summary"]
                     reason = sv.get("suppressed_reason", "No reason provided")
                     
+                    vid_esc = escape_html(vid)
+                    summary_esc = escape_html(summary)
+                    reason_esc = escape_html(reason)
+                    
                     suppressed_details_html.append(f"""
                     <div class="suppressed-item">
                         <div class="vuln-header">
-                            <span class="vuln-id">{vid}</span>
+                            <span class="vuln-id">{vid_esc}</span>
                             <span class="suppressed-label">Ignored</span>
                         </div>
-                        <div class="vuln-summary">{summary}</div>
-                        <div class="suppressed-reason"><strong>Reason:</strong> {reason}</div>
+                        <div class="vuln-summary">{summary_esc}</div>
+                        <div class="suppressed-reason"><strong>Reason:</strong> {reason_esc}</div>
                     </div>
                     """)
                     
@@ -5311,9 +5316,10 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             required_by_html = ""
             required_by = r.get("required_by", [])
             if required_by:
+                required_by_esc = [escape_html(rb) for rb in required_by]
                 required_by_html = f"""
                 <div class="required-by-section">
-                    <strong>Required by:</strong> {', '.join(required_by)}
+                    <strong>Required by:</strong> {', '.join(required_by_esc)}
                 </div>
                 """
                 
@@ -5321,9 +5327,9 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             notes_warnings_list = []
             if is_deprecated:
                 msg = is_deprecated if isinstance(is_deprecated, str) else "This package has been deprecated."
-                notes_warnings_list.append(f'<div class="note-warning-item"><span class="note-warning-icon">🚫</span> <div><strong>Deprecation Warning:</strong> {msg}</div></div>')
+                notes_warnings_list.append(f'<div class="note-warning-item"><span class="note-warning-icon">🚫</span> <div><strong>Deprecation Warning:</strong> {escape_html(msg)}</div></div>')
             if error:
-                notes_warnings_list.append(f'<div class="note-warning-item"><span class="note-warning-icon">❌</span> <div><strong>Error:</strong> {error}</div></div>')
+                notes_warnings_list.append(f'<div class="note-warning-item"><span class="note-warning-icon">❌</span> <div><strong>Error:</strong> {error_esc}</div></div>')
             if r.get("missing_checksum"):
                 notes_warnings_list.append('<div class="note-warning-item"><span class="note-warning-icon">⚠️</span> <div><strong>Security Warning:</strong> Missing integrity checksum in lockfile</div></div>')
             elif r.get("weak_checksum"):
@@ -5392,9 +5398,9 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                 releases_url = r.get("releases_url")
                 buttons = []
                 if compare_url:
-                    buttons.append(f'<a href="{compare_url}" target="_blank" class="changelog-btn">Compare Diff</a>')
+                    buttons.append(f'<a href="{escape_html(compare_url)}" target="_blank" class="changelog-btn">Compare Diff</a>')
                 if releases_url:
-                    buttons.append(f'<a href="{releases_url}" target="_blank" class="changelog-btn">Release Notes</a>')
+                    buttons.append(f'<a href="{escape_html(releases_url)}" target="_blank" class="changelog-btn">Release Notes</a>')
                 if buttons:
                     buttons_str = "\n".join(buttons)
                     changelog_html = f"""
@@ -5406,19 +5412,19 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                     
             package_cards_html.append(f"""
             <div class="package-card" 
-                 data-name="{name}" 
-                 data-status="{status}" 
+                 data-name="{name_esc}" 
+                 data-status="{status_esc}" 
                  data-vulnerable="{"true" if is_vulnerable else "false"}" 
-                 data-severities="{data_severities}"
+                 data-severities="{escape_html(data_severities)}"
                  data-suppressed="{"true" if is_suppressed else "false"}"
                  data-deprecated="{"true" if is_deprecated else "false"}"
-                 data-deptype="{dep_type.lower()}"
+                 data-deptype="{dep_type_esc.lower()}"
                  id="pkg-{i}">
                 <div class="card-header" onclick="toggleDetails({i})">
                     <div class="header-left">
                         <div class="pkg-title">
-                            <span class="pkg-name">{name}</span>
-                            <span class="pkg-type-badge">{dep_type}</span>{project_badge}
+                            <span class="pkg-name">{name_esc}</span>
+                            <span class="pkg-type-badge">{dep_type_esc}</span>{project_badge}
                         </div>
                         <div class="pkg-badges">
                             {" ".join(badges)}
@@ -5426,8 +5432,8 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                     </div>
                     <div class="header-right">
                         <div class="pkg-versions">
-                            <span class="version-item"><span class="label">Installed:</span> {installed if installed else declared}</span>
-                            <span class="version-item"><span class="label">Latest:</span> {latest}</span>
+                            <span class="version-item"><span class="label">Installed:</span> {installed_esc if installed_esc else declared_esc}</span>
+                            <span class="version-item"><span class="label">Latest:</span> {latest_esc}</span>
                         </div>
                         <svg class="chevron" id="chevron-{i}" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                             <polyline points="6 9 12 15 18 9"></polyline>
@@ -6923,6 +6929,30 @@ def find_projects_recursively(base_path):
                 
     return projects
 
+def calculate_cvss2_score(vector_str):
+    """Calculates base CVSS v2 score from a vector string."""
+    try:
+        parts = {p.split(":")[0]: p.split(":")[1] for p in vector_str.split("/") if ":" in p}
+        
+        av = {"L": 0.395, "A": 0.646, "N": 1.0}.get(parts.get("AV"), 1.0)
+        ac = {"H": 0.35, "M": 0.61, "L": 0.71}.get(parts.get("AC"), 0.71)
+        au = {"M": 0.45, "S": 0.56, "N": 0.704}.get(parts.get("Au"), 0.704)
+        
+        c = {"N": 0.0, "P": 0.275, "C": 0.660}.get(parts.get("C"), 0.0)
+        i = {"N": 0.0, "P": 0.275, "C": 0.660}.get(parts.get("I"), 0.0)
+        a = {"N": 0.0, "P": 0.275, "C": 0.660}.get(parts.get("A"), 0.0)
+        
+        impact = 10.41 * (1 - (1 - c) * (1 - i) * (1 - a))
+        exploitability = 20.0 * av * ac * au
+        
+        if impact == 0:
+            return 0.0
+            
+        score = ((0.6 * impact) + (0.4 * exploitability) - 1.5) * 1.176
+        return round(score, 1)
+    except Exception:
+        return None
+
 def calculate_cvss3_score(vector_str):
     """Calculates base CVSS v3.x score from a vector string."""
     try:
@@ -6969,6 +6999,33 @@ def calculate_cvss3_score(vector_str):
     except Exception:
         return None
 
+def calculate_cvss4_score_approx(vector_str):
+    """Approximates base CVSS v4.0 score by translating metrics to v3 equivalent."""
+    try:
+        parts = {p.split(":")[0]: p.split(":")[1] for p in vector_str.split("/") if ":" in p}
+        
+        av = parts.get("AV", "N")
+        ac = parts.get("AC", "L")
+        if parts.get("AT") == "P":
+            ac = "H"
+        pr = parts.get("PR", "N")
+        ui = "N"
+        if parts.get("UI") in ("A", "R"):
+            ui = "R"
+            
+        scope = "U"
+        if parts.get("SC") in ("H", "L") or parts.get("SI") in ("H", "L") or parts.get("SA") in ("H", "L"):
+            scope = "C"
+            
+        c = parts.get("VC", "N")
+        i = parts.get("VI", "N")
+        a = parts.get("VA", "N")
+        
+        v3_vector = f"CVSS:3.1/AV:{av}/AC:{ac}/PR:{pr}/UI:{ui}/S:{scope}/C:{c}/I:{i}/A:{a}"
+        return calculate_cvss3_score(v3_vector)
+    except Exception:
+        return None
+
 def get_severity_level(vuln):
     """Determines the severity level (critical, high, medium, low, unknown) of a vulnerability."""
     severity = vuln.get("severity", "UNKNOWN")
@@ -6983,21 +7040,44 @@ def get_severity_level(vuln):
     if "LOW" in sev_upper:
         return "low"
         
-    if "CVSS" in sev_upper:
-        m = re.search(r'(CVSS:3\.[0-9a-zA-Z/:.]+)', sev_upper)
-        if m:
-            vector = m.group(1)
+    if "CVSS" in sev_upper or "AV:" in sev_upper:
+        m4 = re.search(r'(CVSS:4\.[0-9a-zA-Z/:.]+)', sev_upper)
+        if m4:
+            vector = m4.group(1)
+            score = calculate_cvss4_score_approx(vector)
+            if score is not None:
+                if score >= 9.0: return "critical"
+                elif score >= 7.0: return "high"
+                elif score >= 4.0: return "medium"
+                elif score >= 0.1: return "low"
+                
+        m3 = re.search(r'(CVSS:3\.[0-9a-zA-Z/:.]+)', sev_upper)
+        if m3:
+            vector = m3.group(1)
             score = calculate_cvss3_score(vector)
             if score is not None:
-                if score >= 9.0:
-                    return "critical"
-                elif score >= 7.0:
-                    return "high"
-                elif score >= 4.0:
-                    return "medium"
-                elif score >= 0.1:
-                    return "low"
-                    
+                if score >= 9.0: return "critical"
+                elif score >= 7.0: return "high"
+                elif score >= 4.0: return "medium"
+                elif score >= 0.1: return "low"
+                
+        vector2 = None
+        m2 = re.search(r'(CVSS:2\.[0-9a-zA-Z/:.]+)', sev_upper)
+        if m2:
+            vector2 = m2.group(1)
+        elif "AV:" in sev_upper:
+            m_raw2 = re.search(r'(AV:[NAL]/AC:[HML]/Au:[MSN]/C:[NPC]/I:[NPC]/A:[NPC])', sev_upper)
+            if m_raw2:
+                vector2 = m_raw2.group(1)
+                
+        if vector2:
+            score = calculate_cvss2_score(vector2)
+            if score is not None:
+                if score >= 9.0: return "critical"
+                elif score >= 7.0: return "high"
+                elif score >= 4.0: return "medium"
+                elif score >= 0.1: return "low"
+                
     return "unknown"
 
 def check_pipeline_failure(results, fail_config):
