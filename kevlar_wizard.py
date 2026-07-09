@@ -29,6 +29,8 @@ class SafeWriter:
 sys.stdout = SafeWriter(sys.stdout)
 sys.stderr = SafeWriter(sys.stderr)
 
+VERSION = "1.0"
+
 # ANSI escape codes for styling (unified with kevlar.py theme)
 COLOR_RESET = "\033[0m"
 COLOR_BOLD = "\033[1m"
@@ -65,7 +67,8 @@ def clean_input(prompt_text):
 def print_banner():
     """Prints a beautiful CLI banner."""
     print(f"\n{COLOR_CYAN}{COLOR_BOLD}================================================================================{COLOR_RESET}")
-    print(f"   {COLOR_GREEN}{ICON_SHIELD}  Kevlar Vulnerability Suppressions Configuration Wizard{COLOR_RESET}")
+    print(f"   {COLOR_GREEN}{ICON_SHIELD}  Kevlar Vulnerability Suppressions Configuration Wizard v{VERSION}{COLOR_RESET}")
+    print(f"                                                             {COLOR_GRAY}by Bruno Nielsen{COLOR_RESET}")
     print(f"{COLOR_CYAN}{COLOR_BOLD}================================================================================{COLOR_RESET}\n")
     print(f"This wizard helps you generate or update {COLOR_BOLD}kevlar-suppressions.json{COLOR_RESET} safely.")
     print("It parses your generated scan report to let you select which alerts to suppress.")
