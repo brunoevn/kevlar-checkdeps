@@ -1,0 +1,50 @@
+{
+  "$schema": "./kevlar-suppressions.schema.json",
+  "metadata": {
+    "version": "1.0.0",
+    "last_modified": "2026-07-08",
+    "approved_by": "AppSec Security Office"
+  },
+  "suppressions": [
+    {
+      "id": "CVE-2023-30861",
+      "package": "flask",
+      "ecosystem": "pip",
+      "reason": "NOT_AFFECTED_BY_VULNERABILITY",
+      "justification": "Our application does not use Flask's session cookies in a way that is vulnerable, as we store session data server-side in Redis.",
+      "expires_at": "2026-12-31",
+      "created_by": "Developer Alice",
+      "approved_by": "SecOps Bob"
+    },
+    {
+      "id": "GHSA-j8r2-6x86-q33q",
+      "package": "lodash",
+      "ecosystem": "npm",
+      "reason": "COMPENSATING_CONTROL_IMPLEMENTED",
+      "justification": "Input is strictly sanitized using DOMPurify before passing to any lodash template function, preventing prototype pollution.",
+      "expires_at": "2026-12-31",
+      "created_by": "Developer Charlie",
+      "approved_by": "SecOps Bob"
+    },
+    {
+      "id": "*",
+      "package": "debug-package-test",
+      "ecosystem": "npm",
+      "reason": "VULNERABILITY_MITIGATED_BY_ENVIRONMENT",
+      "justification": "This package is only used during local development debugging and is entirely stripped from the production build artifact.",
+      "expires_at": "2027-01-01",
+      "created_by": "Developer Dave",
+      "approved_by": "SecOps Bob"
+    },
+    {
+      "id": "CVE-2022-25883",
+      "package": "semver",
+      "ecosystem": "npm",
+      "reason": "ACCEPTED_TEMPORARY_RISK",
+      "justification": "Temporary risk accepted until Q3 sprint where semver major version upgrade is scheduled for implementation.",
+      "expires_at": "2026-05-01",
+      "created_by": "Developer Alice",
+      "approved_by": "SecOps Bob"
+    }
+  ]
+}

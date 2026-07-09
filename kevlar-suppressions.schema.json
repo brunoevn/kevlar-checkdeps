@@ -1,0 +1,119 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "KevlarVulnerabilitySuppressions",
+  "description": "Schema for vulnerability suppressions configuration in Kevlar CheckDeps",
+  "type": "object",
+  "required": [
+    "metadata",
+    "suppressions"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Path or URL to the JSON schema file"
+    },
+    "metadata": {
+      "type": "object",
+      "required": [
+        "version",
+        "last_modified",
+        "approved_by"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+(\\.\\d+)?$",
+          "description": "Version of the policy configuration file"
+        },
+        "last_modified": {
+          "type": "string",
+          "format": "date",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+          "description": "Date of last modifications to this policy"
+        },
+        "approved_by": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Name or identifier of the global AppSec/Security approver"
+        }
+      }
+    },
+    "suppressions": {
+      "type": "array",
+      "description": "List of active vulnerability suppressions",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "package",
+          "reason",
+          "justification",
+          "expires_at"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Unique vulnerability ID (e.g. GHSA-xxx, CVE-xxx, OSV-xxx) or '*' to match all vulnerabilities for the package"
+          },
+          "package": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Exact name of the package (case-insensitive in matching)"
+          },
+          "ecosystem": {
+            "type": "string",
+            "enum": [
+              "npm",
+              "pip",
+              "nuget",
+              "php",
+              "maven",
+              "go",
+              "rust",
+              "ruby",
+              "gradle",
+              "android"
+            ],
+            "description": "Optional ecosystem or technology descriptor to prevent cross-language collisions"
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "NOT_AFFECTED_BY_VULNERABILITY",
+              "VULNERABILITY_MITIGATED_BY_ENVIRONMENT",
+              "COMPENSATING_CONTROL_IMPLEMENTED",
+              "FALSE_POSITIVE",
+              "ACCEPTED_TEMPORARY_RISK"
+            ],
+            "description": "Approved risk management categorization"
+          },
+          "justification": {
+            "type": "string",
+            "minLength": 15,
+            "description": "Technical justification explaining why this vulnerability is safely suppressed"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "Expiration date for this suppression rule (YYYY-MM-DD)"
+          },
+          "created_by": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Developer who created this suppression request"
+          },
+          "approved_by": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Security officer who reviewed and approved this suppression request"
+          }
+        }
+      }
+    }
+  }
+}

@@ -180,5 +180,163 @@ class TestKevlar(unittest.TestCase):
         generic_err = Exception("Internal database connection string leaked: postgres://user:pwd@host:5432/db")
         self.assertEqual(kevlar._sanitize_error_message(generic_err, "pkg"), "Unexpected execution error during analysis")
 
+    def test_validate_suppressions_schema(self):
+        # Valid schema
+        valid_data = {
+            "metadata": {
+                "version": "1.0",
+                "last_modified": "2026-07-08",
+                "approved_by": "SecOps"
+            },
+            "suppressions": [
+                {
+                    "id": "CVE-2023-1234",
+                    "package": "requests",
+                    "ecosystem": "pip",
+                    "reason": "NOT_AFFECTED_BY_VULNERABILITY",
+                    "justification": "This is a detailed technical justification that meets length requirement.",
+                    "expires_at": "2026-12-31"
+                }
+            ]
+        }
+        # Should not raise exception
+        kevlar.validate_suppressions_schema(valid_data)
+
+        # Invalid metadata version
+        invalid_meta_version = dict(valid_data)
+        invalid_meta_version["metadata"] = dict(valid_data["metadata"], version="abc")
+        with self.assertRaises(ValueError):
+            kevlar.validate_suppressions_schema(invalid_meta_version)
+
+        # Invalid reason enum
+        invalid_reason = {
+            "metadata": valid_data["metadata"],
+            "suppressions": [
+                {
+                    "id": "CVE-2023-1234",
+                    "package": "requests",
+                    "reason": "UNSUPPORTED_REASON_HERE",
+                    "justification": "This is a detailed technical justification that meets length requirement.",
+                    "expires_at": "2026-12-31"
+                }
+            ]
+        }
+        with self.assertRaises(ValueError):
+            kevlar.validate_suppressions_schema(invalid_reason)
+
+    def test_apply_suppressions_logic(self):
+        import tempfile
+        import json
+        from datetime import date, timedelta
+        
+        # Build temp json suppressions file
+        future_date = (date.today() + timedelta(days=30)).strftime("%Y-%m-%d")
+        past_date = (date.today() - timedelta(days=30)).strftime("%Y-%m-%d")
+        
+        supp_data = {
+            "metadata": {
+                "version": "1.0.0",
+                "last_modified": "2026-07-08",
+                "approved_by": "SecurityTeam"
+            },
+            "suppressions": [
+                {
+                    "id": "CVE-2023-3000",
+                    "package": "flask",
+                    "ecosystem": "pip",
+                    "reason": "NOT_AFFECTED_BY_VULNERABILITY",
+                    "justification": "Technical justification for flask vulnerability bypass.",
+                    "expires_at": future_date,
+                    "approved_by": "Bob the Reviewer"
+                },
+                {
+                    "id": "*",
+                    "package": "lodash",
+                    "ecosystem": "npm",
+                    "reason": "FALSE_POSITIVE",
+                    "justification": "Technical justification for lodash wildcard bypass.",
+                    "expires_at": future_date
+                },
+                {
+                    "id": "CVE-2023-4000",
+                    "package": "expired-pkg",
+                    "ecosystem": "pip",
+                    "reason": "ACCEPTED_TEMPORARY_RISK",
+                    "justification": "This rule has expired and should not be matched.",
+                    "expires_at": past_date
+                }
+            ]
+        }
+        
+        # Write to temp file
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json", encoding="utf-8") as tmp:
+            json.dump(supp_data, tmp)
+            tmp_path = tmp.name
+            
+        try:
+            results = [
+                {
+                    "name": "flask",
+                    "status": "up-to-date",
+                    "installed": "2.0.0",
+                    "declared": "2.0.0",
+                    "deprecated": False,
+                    "technology": "pip",
+                    "vulnerabilities": [
+                        {"id": "CVE-2023-3000", "summary": "flask vuln", "severity": "HIGH", "details": ""}
+                    ]
+                },
+                {
+                    "name": "lodash",
+                    "status": "up-to-date",
+                    "installed": "4.17.21",
+                    "declared": "4.17.21",
+                    "deprecated": False,
+                    "technology": "npm",
+                    "vulnerabilities": [
+                        {"id": "CVE-2023-5000", "summary": "lodash vuln 1", "severity": "MEDIUM", "details": ""},
+                        {"id": "CVE-2023-6000", "summary": "lodash vuln 2", "severity": "LOW", "details": ""}
+                    ]
+                },
+                {
+                    "name": "expired-pkg",
+                    "status": "up-to-date",
+                    "installed": "1.0.0",
+                    "declared": "1.0.0",
+                    "deprecated": False,
+                    "technology": "pip",
+                    "vulnerabilities": [
+                        {"id": "CVE-2023-4000", "summary": "expired vuln", "severity": "MEDIUM", "details": ""}
+                    ]
+                }
+            ]
+            
+            # Apply suppressions
+            kevlar.apply_vulnerability_suppressions(results, tmp_path)
+            
+            # flask checks: CVE-2023-3000 should be suppressed and enriched
+            flask_res = results[0]
+            self.assertEqual(len(flask_res["vulnerabilities"]), 0)
+            self.assertEqual(len(flask_res["suppressed_vulnerabilities"]), 1)
+            supp_vuln = flask_res["suppressed_vulnerabilities"][0]
+            self.assertEqual(supp_vuln["suppressed_reason"], "NOT_AFFECTED_BY_VULNERABILITY")
+            self.assertEqual(supp_vuln["justification"], "Technical justification for flask vulnerability bypass.")
+            self.assertEqual(supp_vuln["expires_at"], future_date)
+            self.assertEqual(supp_vuln["approved_by"], "Bob the Reviewer")
+            
+            # lodash checks: wildcard '*' matches all vulnerabilities
+            lodash_res = results[1]
+            self.assertEqual(len(lodash_res["vulnerabilities"]), 0)
+            self.assertEqual(len(lodash_res["suppressed_vulnerabilities"]), 2)
+            
+            # expired-pkg checks: should NOT be suppressed since rule expired
+            expired_res = results[2]
+            self.assertEqual(len(expired_res["vulnerabilities"]), 1)
+            self.assertEqual(len(expired_res["suppressed_vulnerabilities"]), 0)
+            
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
 if __name__ == "__main__":
     unittest.main()

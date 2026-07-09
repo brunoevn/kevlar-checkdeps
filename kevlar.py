@@ -1616,6 +1616,90 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
         
     return package_to_vulns
 
+def validate_suppressions_schema(data):
+    """Manually validates the suppressions JSON data structure to avoid external dependencies."""
+    if not isinstance(data, dict):
+        raise ValueError("Root element of the JSON file must be a JSON object.")
+        
+    if "metadata" not in data:
+        raise ValueError("Missing required root key: 'metadata'")
+    if "suppressions" not in data:
+        raise ValueError("Missing required root key: 'suppressions'")
+        
+    # Validate metadata
+    metadata = data["metadata"]
+    if not isinstance(metadata, dict):
+        raise ValueError("'metadata' must be a JSON object.")
+        
+    for req_meta in ["version", "last_modified", "approved_by"]:
+        if req_meta not in metadata:
+            raise ValueError(f"Missing required metadata field: '{req_meta}'")
+        if not isinstance(metadata[req_meta], str) or not metadata[req_meta].strip():
+            raise ValueError(f"Metadata field '{req_meta}' must be a non-empty string.")
+            
+    # Validate version pattern (e.g. 1.0 or 1.0.0)
+    version = metadata["version"].strip()
+    if not re.match(r"^\d+\.\d+(\.\d+)?$", version):
+        raise ValueError(f"Metadata version '{version}' is invalid. Must match pattern 'X.Y' or 'X.Y.Z'.")
+        
+    # Validate last_modified date
+    last_mod_str = metadata["last_modified"].strip()
+    try:
+        datetime.strptime(last_mod_str, "%Y-%m-%d")
+    except ValueError:
+        raise ValueError(f"Metadata 'last_modified' '{last_mod_str}' is invalid. Must be in 'YYYY-MM-DD' format.")
+        
+    # Validate suppressions
+    suppressions = data["suppressions"]
+    if not isinstance(suppressions, list):
+        raise ValueError("'suppressions' must be a JSON array.")
+        
+    allowed_reasons = {
+        "NOT_AFFECTED_BY_VULNERABILITY",
+        "VULNERABILITY_MITIGATED_BY_ENVIRONMENT",
+        "COMPENSATING_CONTROL_IMPLEMENTED",
+        "FALSE_POSITIVE",
+        "ACCEPTED_TEMPORARY_RISK"
+    }
+    
+    for idx, rule in enumerate(suppressions):
+        if not isinstance(rule, dict):
+            raise ValueError(f"Suppression rule at index {idx} must be a JSON object.")
+            
+        # Check required fields
+        required_fields = ["id", "package", "reason", "justification", "expires_at"]
+        for req_field in required_fields:
+            if req_field not in rule:
+                raise ValueError(f"Suppression rule at index {idx} is missing required field: '{req_field}'")
+            if not isinstance(rule[req_field], str) or not rule[req_field].strip():
+                raise ValueError(f"Suppression rule field '{req_field}' at index {idx} must be a non-empty string.")
+                
+        # Validate reason enum
+        reason = rule["reason"].strip()
+        if reason not in allowed_reasons:
+            raise ValueError(
+                f"Suppression rule 'reason' at index {idx} is '{reason}'. "
+                f"Must be one of: {', '.join(allowed_reasons)}"
+            )
+            
+        # Validate expires_at date
+        expires_at_str = rule["expires_at"].strip()
+        try:
+            datetime.strptime(expires_at_str, "%Y-%m-%d")
+        except ValueError:
+            raise ValueError(
+                f"Suppression rule 'expires_at' at index {idx} is '{expires_at_str}'. "
+                f"Must be in 'YYYY-MM-DD' format."
+            )
+            
+        # Validate optional fields
+        for opt_field in ["ecosystem", "created_by", "approved_by"]:
+            if opt_field in rule:
+                val = rule[opt_field]
+                if val is not None:
+                    if not isinstance(val, str) or not val.strip():
+                        raise ValueError(f"Optional field '{opt_field}' at index {idx} must be a non-empty string if specified.")
+
 def apply_vulnerability_suppressions(results, suppress_path):
     """Applies vulnerability suppressions from a JSON file.
     Suppressed vulnerabilities are moved from 'vulnerabilities' to 'suppressed_vulnerabilities'.
@@ -1646,29 +1730,36 @@ def apply_vulnerability_suppressions(results, suppress_path):
         print(f"{COLOR_RED}{ICON_ERROR} Failed to parse suppressions file: {e}{COLOR_RESET}")
         sys.exit(1)
         
-    suppressions = data.get("suppressions", [])
-    if not isinstance(suppressions, list):
-        print(f"{COLOR_RED}{ICON_ERROR} 'suppressions' field in JSON must be a list{COLOR_RESET}")
+    try:
+        validate_suppressions_schema(data)
+    except ValueError as e:
+        print(f"{COLOR_RED}{ICON_ERROR} Suppressions file schema validation failed: {e}{COLOR_RESET}")
         sys.exit(1)
         
-    rules = []
-    for s in suppressions:
-        rule_id = s.get("id")
-        rule_pkg = s.get("package")
-        reason = s.get("reason", "No reason provided")
-        
-        if not rule_id and not rule_pkg:
+    suppressions = data.get("suppressions", [])
+    
+    # Process and filter rules by expiration date
+    active_rules = []
+    today = date.today()
+    for rule in suppressions:
+        expires_at_str = rule["expires_at"].strip()
+        try:
+            expires_at_date = datetime.strptime(expires_at_str, "%Y-%m-%d").date()
+        except ValueError:
+            # Should already be caught by schema validation, but keep as safety fallback
             continue
             
-        rules.append({
-            "id": rule_id.strip().upper() if rule_id else None,
-            "package": rule_pkg.strip().lower() if rule_pkg else None,
-            "reason": reason
-        })
+        if expires_at_date < today:
+            # Rule has expired, print a warning in COLOR_YELLOW and discard it
+            print(f"{COLOR_YELLOW}{ICON_WARN} Suppression rule for package '{rule['package']}' (vuln: '{rule['id']}') expired on {expires_at_str} and was discarded.{COLOR_RESET}")
+            continue
+            
+        active_rules.append(rule)
         
     suppressed_count = 0
     for r in results:
         pkg_name = r["name"].lower()
+        pkg_tech = r.get("technology", "").lower()
         active_vulns = []
         suppressed_vulns = []
         
@@ -1676,25 +1767,37 @@ def apply_vulnerability_suppressions(results, suppress_path):
             vuln_id = vuln["id"].upper()
             
             matched_rule = None
-            for rule in rules:
-                if rule["id"] and rule["package"]:
-                    if rule["id"] == vuln_id and rule["package"] == pkg_name:
-                        matched_rule = rule
-                        break
-                elif rule["id"]:
-                    if rule["id"] == vuln_id:
-                        matched_rule = rule
-                        break
-                elif rule["package"]:
-                    if rule["package"] == pkg_name:
-                        matched_rule = rule
-                        break
-                        
+            for rule in active_rules:
+                # 1. Package must match exactly
+                if rule["package"].strip().lower() != pkg_name:
+                    continue
+                # 2. Ecosystem must match if specified
+                if rule.get("ecosystem"):
+                    if rule["ecosystem"].strip().lower() != pkg_tech:
+                        continue
+                # 3. ID must match exactly or be wildcard '*'
+                rule_id = rule["id"].strip().upper()
+                if rule_id != "*" and rule_id != vuln_id:
+                    continue
+                    
+                matched_rule = rule
+                break
+                
             if matched_rule:
+                # Enrich vulnerability with governance metadata
                 vuln["suppressed_reason"] = matched_rule["reason"]
+                vuln["justification"] = matched_rule["justification"]
+                vuln["expires_at"] = matched_rule["expires_at"]
+                if matched_rule.get("created_by"):
+                    vuln["created_by"] = matched_rule["created_by"]
+                if matched_rule.get("approved_by"):
+                    vuln["approved_by"] = matched_rule["approved_by"]
+                    
                 suppressed_vulns.append(vuln)
                 suppressed_count += 1
-                print(f"{COLOR_GRAY}[SUPPRESSED] Ignored {vuln['id']} for package '{r['name']}' (Reason: {matched_rule['reason']}){COLOR_RESET}")
+                
+                tech_suffix = f" ({pkg_tech})" if pkg_tech else ""
+                print(f"{COLOR_GRAY}[SUPPRESSED] Ignored {vuln['id']} for package '{r['name']}'{tech_suffix} (Reason: {matched_rule['reason']}){COLOR_RESET}")
             else:
                 active_vulns.append(vuln)
                 
@@ -4846,7 +4949,12 @@ def export_markdown_report(results, pkg_data, filepath, vuls_enabled=False):
                         f.write(f"### `{name}@{ver}`{parent_suffix} ({len(s_list)} suppressed)\n\n")
                         for vuln in s_list:
                             f.write(f"- **{vuln['id']}**: {vuln['summary']}\n")
-                            f.write(f"  *Reason: {vuln.get('suppressed_reason', 'No reason provided')}*\n\n")
+                            f.write(f"  - **Reason**: {vuln.get('suppressed_reason', 'N/A')}\n")
+                            f.write(f"  - **Justification**: {vuln.get('justification', 'N/A')}\n")
+                            f.write(f"  - **Expires At**: {vuln.get('expires_at', 'N/A')}\n")
+                            if vuln.get("approved_by"):
+                                f.write(f"  - **Approved By**: {vuln['approved_by']}\n")
+                            f.write("\n")
                                 
         print(f"{COLOR_GREEN}{ICON_OK} Markdown report successfully exported to {filepath}{COLOR_RESET}")
     except Exception as e:
@@ -5434,10 +5542,18 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                     vid = sv["id"]
                     summary = sv["summary"]
                     reason = sv.get("suppressed_reason", "No reason provided")
+                    justification = sv.get("justification", "N/A")
+                    expires_at = sv.get("expires_at", "N/A")
+                    approved_by = sv.get("approved_by", "")
                     
                     vid_esc = escape_html(vid)
                     summary_esc = escape_html(summary)
                     reason_esc = escape_html(reason)
+                    justification_esc = escape_html(justification)
+                    expires_at_esc = escape_html(expires_at)
+                    approved_by_esc = escape_html(approved_by)
+                    
+                    approved_by_html = f'<div style="margin-top: 4px; font-size: 12.5px; padding: 0 4px; color: var(--text-muted);"><strong>Approved By:</strong> {approved_by_esc}</div>' if approved_by else ''
                     
                     suppressed_details_html.append(f"""
                     <div class="suppressed-item">
@@ -5447,6 +5563,13 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                         </div>
                         <div class="vuln-summary">{summary_esc}</div>
                         <div class="suppressed-reason"><strong>Reason:</strong> {reason_esc}</div>
+                        <div style="margin-top: 6px; font-size: 12.5px; padding: 0 4px; color: var(--text-muted);">
+                            <strong>Justification:</strong> {justification_esc}
+                        </div>
+                        <div style="margin-top: 4px; font-size: 12.5px; padding: 0 4px; color: var(--text-muted);">
+                            <strong>Expires At:</strong> {expires_at_esc}
+                        </div>
+                        {approved_by_html}
                     </div>
                     """)
                     
