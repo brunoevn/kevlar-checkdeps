@@ -602,7 +602,8 @@ def check_semver_satisfies(version_str, range_str):
         if not or_part:
             continue
             
-        and_terms = or_part.split()
+        # Treat commas as logical AND delimiters by replacing them with spaces
+        and_terms = or_part.replace(",", " ").split()
         part_satisfied = True
         
         for term in and_terms:

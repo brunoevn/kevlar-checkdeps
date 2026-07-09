@@ -499,5 +499,27 @@ class TestKevlar(unittest.TestCase):
         self.assertIsNone(kevlar_wizard.parse_selection("1, 6", 5)) # Out of bounds
         self.assertIsNone(kevlar_wizard.parse_selection("abc", 5))  # Invalid syntax
 
+    def test_check_semver_satisfies(self):
+        # Basic validation
+        self.assertTrue(kevlar.check_semver_satisfies("1.2.3", ">=1.2.3"))
+        self.assertTrue(kevlar.check_semver_satisfies("1.2.3", "*"))
+        self.assertTrue(kevlar.check_semver_satisfies("1.2.3", "any"))
+        self.assertTrue(kevlar.check_semver_satisfies("1.2.3", ""))
+        
+        # Space-separated AND ranges (existing functionality)
+        self.assertTrue(kevlar.check_semver_satisfies("1.5.0", ">=1.2.3 <2.0.0"))
+        self.assertFalse(kevlar.check_semver_satisfies("2.1.0", ">=1.2.3 <2.0.0"))
+        
+        # Comma-separated AND ranges (with and without spaces)
+        self.assertTrue(kevlar.check_semver_satisfies("1.5.0", ">=1.2.3,<=2.0.0"))
+        self.assertTrue(kevlar.check_semver_satisfies("1.5.0", ">=1.2.3, <=2.0.0"))
+        self.assertFalse(kevlar.check_semver_satisfies("2.1.0", ">=1.2.3,<=2.0.0"))
+        self.assertFalse(kevlar.check_semver_satisfies("2.1.0", ">=1.2.3, <=2.0.0"))
+        
+        # Multiple OR ranges mixed with comma-separated ANDs
+        self.assertTrue(kevlar.check_semver_satisfies("2.5.0", ">=1.2.3,<=2.0.0 || >=2.4.0,<=3.0.0"))
+        self.assertFalse(kevlar.check_semver_satisfies("2.1.0", ">=1.2.3,<=2.0.0 || >=2.4.0,<=3.0.0"))
+        self.assertTrue(kevlar.check_semver_satisfies("3.0.0", ">=1.2.3,<=2.0.0 || >=2.4.0,<=3.0.0"))
+
 if __name__ == "__main__":
     unittest.main()
