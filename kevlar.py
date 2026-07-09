@@ -1720,11 +1720,42 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
                 if db_spec and isinstance(db_spec, dict):
                     severity = db_spec.get("severity") or "UNKNOWN"
             
+            summary = vuln_data.get("summary")
+            details = vuln_data.get("details", "")
+            
+            # If severity is UNKNOWN or summary is missing/generic, try to resolve via aliases already in hydrated_details
+            if (severity == "UNKNOWN" or not summary or summary == "No summary provided") and "aliases" in vuln_data:
+                for alias in vuln_data["aliases"]:
+                    alias_data = hydrated_details.get(alias)
+                    if alias_data:
+                        if severity == "UNKNOWN":
+                            if "severity" in alias_data and isinstance(alias_data["severity"], list):
+                                for sev in alias_data["severity"]:
+                                    if sev.get("type") in ("CVSS_V4", "CVSS_V3", "CVSS_V2"):
+                                        score = sev.get('score')
+                                        if score:
+                                            score_str = str(score)
+                                            if score_str.startswith("CVSS"):
+                                                severity = score_str
+                                            else:
+                                                prefix = "CVSS:4.0/" if sev.get("type") == "CVSS_V4" else ("CVSS:3.0/" if sev.get("type") == "CVSS_V3" else "CVSS:2.0/")
+                                                severity = f"{prefix}{score_str}"
+                                        break
+                            if severity == "UNKNOWN":
+                                db_spec = alias_data.get("database_specific")
+                                if db_spec and isinstance(db_spec, dict):
+                                    severity = db_spec.get("severity") or "UNKNOWN"
+                        
+                        if not summary or summary == "No summary provided":
+                            summary = alias_data.get("summary")
+                        if not details:
+                            details = alias_data.get("details", "")
+            
             vuln_list.append({
                 "id": vid,
-                "summary": vuln_data.get("summary", "No summary provided"),
+                "summary": summary or "No summary provided",
                 "severity": severity,
-                "details": vuln_data.get("details", "")
+                "details": details or ""
             })
         package_to_vulns[(name, clean_ver)] = vuln_list
         
@@ -5429,6 +5460,20 @@ def populate_remediation_recommendations(results, default_project_path):
 
 def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
     """Exports results as a rich, interactive HTML dashboard report."""
+    def escape_js_string(s):
+        if not s:
+            return ""
+        s = str(s)
+        s = s.replace("\\", "\\\\")
+        s = s.replace("'", "\\'")
+        s = s.replace('"', '\\"')
+        s = s.replace("\n", "\\n")
+        s = s.replace("\r", "\\r")
+        return s
+
+    def js_arg(val):
+        return escape_html(escape_js_string(val))
+
     try:
         # Calculate summary statistics
         total = len(results)
@@ -5775,6 +5820,51 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                 </div>
                 """
             
+            ai_button_html = ""
+            requires_attention = (status in ("major", "minor", "patch")) or is_deprecated or is_vulnerable
+            if requires_attention:
+                alert_types = []
+                details_parts = []
+                if is_vulnerable:
+                    alert_types.append("Vulnerability")
+                    vuln_strings = []
+                    for v in pkg_vulns:
+                        vuln_id = v.get("id", "Unknown ID")
+                        vuln_summary = v.get("summary", "")
+                        vuln_strings.append(f"{vuln_id}: {vuln_summary}")
+                    details_parts.append("Vulnerabilities: " + "; ".join(vuln_strings))
+                if is_deprecated:
+                    alert_types.append("Deprecation")
+                    dep_msg = is_deprecated if isinstance(is_deprecated, str) else "This package has been deprecated."
+                    details_parts.append(f"Deprecation Warning: {dep_msg}")
+                if status in ("major", "minor", "patch"):
+                    alert_types.append(f"Outdated ({status.capitalize()})")
+                    details_parts.append(f"Outdated: {status.upper()} update available (Latest: {latest})")
+
+                alert_type = ", ".join(alert_types)
+                details_str = " | ".join(details_parts)
+                
+                tech_val = r.get("technology", "")
+                tech_map = {
+                    "npm": "Node.js / npm",
+                    "pip": "Python / pip",
+                    "nuget": ".NET / NuGet",
+                    "php": "PHP / Composer",
+                    "maven": "Java / Maven",
+                    "go": "Go",
+                    "rust": "Rust / Crates.io",
+                    "ruby": "Ruby / RubyGems",
+                    "gradle": "Java / Gradle",
+                    "android": "Android / Gradle"
+                }
+                ecosystem_name = tech_map.get(tech_val.lower(), tech_val) if tech_val else "Software Development"
+                
+                curr_ver = installed if installed else declared
+                
+                ai_button_html = f"""
+                <button class="btn-ai-prompt" onclick="copiarPromptRemediacion('{js_arg(name)}', '{js_arg(ecosystem_name)}', '{js_arg(curr_ver)}', '{js_arg(latest)}', '{js_arg(alert_type)}', '{js_arg(details_str)}'); event.stopPropagation();">📋 AI Prompt</button>
+                """
+
             remediation_button_html = ""
             if r.get("remediation") and is_direct_install:
                 manifest_abs_path = r["remediation"]["manifest_path"]
@@ -5805,13 +5895,23 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                 remediation_button_html = f"""
                 <div class="remediation-section" style="margin-top: 12px; border-top: 1px solid var(--border-color); padding-top: 10px; margin-bottom: 12px;">
                     <div style="font-size: 12px; font-weight: 700; color: var(--success); margin-bottom: 8px;">Remediation:</div>
-                    <button class="btn-remediation" data-remediation="{escaped_remediation}" onclick="openRemediationModal(this); event.stopPropagation();">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;">
-                            <path d="M12 20h9"></path>
-                            <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
-                        </svg>
-                        Show suggested change
-                    </button>
+                    <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                        <button class="btn-remediation" data-remediation="{escaped_remediation}" onclick="openRemediationModal(this); event.stopPropagation();">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;">
+                                <path d="M12 20h9"></path>
+                                <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
+                            </svg>
+                            Show suggested change
+                        </button>
+                        {ai_button_html}
+                    </div>
+                </div>
+                """
+            elif ai_button_html:
+                remediation_button_html = f"""
+                <div class="remediation-section" style="margin-top: 12px; border-top: 1px solid var(--border-color); padding-top: 10px; margin-bottom: 12px;">
+                    <div style="font-size: 12px; font-weight: 700; color: var(--success); margin-bottom: 8px;">Remediation Support:</div>
+                    {ai_button_html}
                 </div>
                 """
             
@@ -5832,7 +5932,7 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                         {buttons_str}
                     </div>
                     """
-                    
+
             package_cards_html.append(f"""
             <div class="package-card" 
                  data-name="{name_esc}" 
@@ -6726,6 +6826,32 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             filter: brightness(1.1);
             transform: translateY(-1px);
         }}
+        
+        .btn-ai-prompt {{
+            background: linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%);
+            border: none;
+            color: white;
+            font-weight: 600;
+            padding: 8px 16px;
+            font-size: 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            transition: transform 0.1s ease, filter 0.2s ease;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+            margin-top: 10px;
+        }}
+        
+        .btn-ai-prompt:hover {{
+            filter: brightness(1.15);
+            transform: translateY(-1px);
+        }}
+        
+        .btn-ai-prompt:active {{
+            transform: translateY(0);
+        }}
     </style>
 </head>
 <body>
@@ -7200,6 +7326,48 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                 modal.style.display = 'none';
                 backdrop.style.display = 'none';
             }}, 300);
+        }}
+        
+        function copiarPromptRemediacion(pkgName, ecosystem, currentVer, targetVer, alertType, details) {{
+            if (window.event) {{
+                window.event.stopPropagation();
+            }}
+            
+            const promptTexto = `Act as a Senior AppSec Expert and Principal Software Engineer specialized in the ${{ecosystem}} ecosystem.
+
+I have the package "${{pkgName}}" in my project, which is currently on version "${{currentVer}}".
+An alert of type "${{alertType}}" has been detected.
+Detailed information/Associated alerts:
+${{details}}
+
+I want to update this package to version "${{targetVer}}". Please perform the following tasks in a detailed and professional manner:
+
+1. Critically analyze any potential 'Breaking Changes' or destructive impacts when upgrading from version "${{currentVer}}" to "${{targetVer}}".
+2. Verify if the target version "${{targetVer}}" safely resolves the issues and vulnerabilities described in the details above.
+3. Provide a step-by-step action plan with the exact console commands to perform the upgrade or mitigate risks if there are disruptive changes or incompatibilities.`;
+
+            navigator.clipboard.writeText(promptTexto).then(() => {{
+                let btn = null;
+                if (window.event) {{
+                    btn = window.event.currentTarget || window.event.target;
+                }}
+                if (!btn || btn.tagName !== 'BUTTON') {{
+                    btn = document.activeElement;
+                }}
+                if (btn && btn.tagName !== 'BUTTON') {{
+                    btn = btn.closest('button');
+                }}
+                if (btn) {{
+                    const originalText = btn.innerHTML;
+                    btn.innerHTML = "Copied!";
+                    setTimeout(() => {{
+                        btn.innerHTML = originalText;
+                    }}, 2000);
+                }}
+            }}).catch(err => {{
+                console.error('Failed to copy text to clipboard: ', err);
+                alert('Failed to copy to clipboard. Please check browser permissions.');
+            }});
         }}
     </script>
     
