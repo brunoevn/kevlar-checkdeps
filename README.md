@@ -28,10 +28,6 @@ Designed with a modular and extensible architecture, it supports checking direct
   - For `pip`: Identifies and reports "yanked" (deprecated/withdrawn) releases on PyPI.
   - For `rust`: Identifies and reports "yanked" crates on crates.io.
 - **Security Vulnerability Audits**: Queries the public Google OSV database to identify active vulnerabilities, including CVE/GHSA IDs, CVSS vectors, and advisory summaries.
-- **Hardened Validation Checkpoints**:
-  - **XML Multi-Byte Encoding Sniffer**: Sniffs UTF-16 and UTF-32 encodings (Big/Little Endian, with/without BOM) to prevent encoding-evasion bypasses for DOCTYPE/XML entity injections.
-  - **Maven Cycle Detection**: Prevents Denial-of-Service (`RecursionError`) stack overflows on cyclic POM references using visited path tracking.
-  - **Symlink Path-Safety Check**: Prevents path-traversal bypasses using realpath symlink resolution inside internal path security checks.
 - **Transitive Parent Tracing**:
   - For `npm`: Recursively builds a dependency graph from `package-lock.json`, Yarn `yarn.lock`, or pnpm `pnpm-lock.yaml`.
   - For `pip`: Parses transitives from lockfiles (`poetry.lock`, `Pipfile.lock`, `pdm.lock`) or `# via parent_name` comments inside `requirements.txt`.
@@ -53,7 +49,6 @@ Designed with a modular and extensible architecture, it supports checking direct
   - **Quick "only / all" Hover Controls**: Instantly isolate sub-filters or check all back on hover.
   - **Auto-closing & Smart Resetting**: Auto-closes menus when clicking outside and resets checkboxes when switching to *All* or *Clean*.
   - **Interactive AI Remediation Prompt Helper**: Clipboard copy button (`📋 AI Prompt`) that dynamically generates high-fidelity remediation prompts (specifying same-major vs absolute updates, project scopes, transitive relations, and cleanup tasks) to easily direct LLMs.
-  - **Floating controls-toolbar**: Control toolbar transforms into a beautiful floating/sticky panel upon scrolling for instant desktop/mobile accessibility.
 
 ---
 
@@ -327,7 +322,7 @@ Kevlar CheckDeps includes a robust, enterprise-grade policy engine to suppress s
 The suppressions file follows a formal schema containing global metadata and rule exclusions.
 
 > [!NOTE]
-> `kevlar-suppressions.example.json` is provided in the repository root as a template/example. The active policy file, `kevlar-suppressions.json`, is ignored by Git (`.gitignore`).
+> `kevlar-suppressions.example.json` is provided in the repository root as a template/example.
 > During a scan, Kevlar searches for `kevlar-suppressions.json` inside each project's directory first, then falls back to the current working directory, enabling different projects in a multi-project codebase to define their own independent policy rules.
 
 The policy structure is:
