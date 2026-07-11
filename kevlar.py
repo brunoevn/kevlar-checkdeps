@@ -81,6 +81,11 @@ BORDER_CHARS = {
 }
 
 # Regex for parsing semantic version strings
+
+# Cached Regex patterns for performance
+RE_SEMVER_ALPHA = re.compile(r'([a-zA-Z]+.*)$')
+RE_SEMVER_DIGITS = re.compile(r'\d+')
+
 SEMVER_REGEX = re.compile(
     r'^v?(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)'
     r'(?:-(?P<prerelease>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?'
@@ -436,7 +441,7 @@ def parse_semver(version_str):
     if '-' in clean_str:
         clean_str, prerelease = clean_str.split('-', 1)
     else:
-        m = re.search(r'([a-zA-Z]+.*)$', clean_str)
+        m = RE_SEMVER_ALPHA.search(clean_str)
         if m:
             qualifier = m.group(1).lower()
             if any(q in qualifier for q in ('a', 'b', 'rc', 'cr', 'dev', 'alpha', 'beta', 'preview')):
@@ -451,7 +456,7 @@ def parse_semver(version_str):
         if not any(q in p_lower for q in ('a', 'b', 'rc', 'cr', 'dev', 'alpha', 'beta', 'preview', 'snapshot', 'milestone', 'pre')):
             prerelease = ''
             
-    digits = re.findall(r'\d+', clean_str)
+    digits = RE_SEMVER_DIGITS.findall(clean_str)
     major = 0
     minor = 0
     patch = 0
