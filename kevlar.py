@@ -1207,88 +1207,103 @@ def parse_pnpm_lock(filepath):
     integrity_dict = {}
     try:
         with open(filepath, "r", encoding="utf-8") as f:
-            in_packages = False
+            # The stack stores tuples of (indentation_level, state_name, context_data)
+            # Valid state names: 'ROOT', 'PACKAGES', 'PACKAGE_BODY', 'DEPENDENCIES'
+            stack = []
             current_pkg = None
             current_version = None
-            in_pkg_deps = False
             
             for line in f:
                 stripped = line.strip()
-                if not stripped or stripped.startswith("#"):
+                if not stripped or stripped.startswith("#") or stripped == "---" or stripped == "...":
                     continue
-                    
+                
                 indent = len(line) - len(line.lstrip())
                 
+                # Maintain the indentation stack: pop states that are at the same or deeper indentation
+                while stack and indent <= stack[-1][0]:
+                    stack.pop()
+                
+                current_state = stack[-1][1] if stack else 'ROOT'
+                current_pkg = None
+                current_version = None
+                for item in reversed(stack):
+                    if item[1] == 'PACKAGE_BODY' and item[2]:
+                        current_pkg, current_version = item[2]
+                        break
+                
+                # Check transition out/in of the packages block at root level
                 if stripped.startswith("packages:"):
-                    in_packages = True
+                    stack.append((indent, 'PACKAGES', None))
                     continue
+                
+                if current_state == 'PACKAGES':
+                    # We are expecting package definitions as keys, e.g., '/direct-dep@1.0.1:'
+                    raw_pkg = stripped.rstrip(":").strip("'\"")
+                    if raw_pkg.startswith("/"):
+                        raw_pkg = raw_pkg[1:]
+                    if "/" in raw_pkg and not raw_pkg.startswith("@"):
+                        first_part = raw_pkg.split("/", 1)[0]
+                        if "." in first_part or "localhost" in first_part:
+                            raw_pkg = raw_pkg.split("/", 1)[1]
+                            
+                    pkg_name = None
+                    version = None
                     
-                if indent == 0 and in_packages and not stripped.startswith("packages:"):
-                    in_packages = False
-                    current_pkg = None
-                    current_version = None
-                    in_pkg_deps = False
-                    
-                if in_packages:
-                    if indent == 2 and stripped.endswith(":"):
-                        raw_pkg = stripped.rstrip(":")
-                        if raw_pkg.startswith("/"):
-                            raw_pkg = raw_pkg[1:]
-                        if "/" in raw_pkg and not raw_pkg.startswith("@"):
-                            first_part = raw_pkg.split("/", 1)[0]
-                            if "." in first_part or "localhost" in first_part:
-                                raw_pkg = raw_pkg.split("/", 1)[1]
-                                
-                        pkg_name = None
-                        version = None
-                        
-                        if "@" in raw_pkg:
-                            if raw_pkg.startswith("@"):
-                                parts = raw_pkg[1:].rsplit("@", 1)
-                                if len(parts) == 2:
-                                    pkg_name = "@" + parts[0]
-                                    version = parts[1]
-                            else:
-                                parts = raw_pkg.rsplit("@", 1)
-                                if len(parts) == 2:
-                                    pkg_name = parts[0]
-                                    version = parts[1]
-                                    
-                        if not pkg_name and "/" in raw_pkg:
-                            parts = raw_pkg.rsplit("/", 1)
+                    if "@" in raw_pkg:
+                        if raw_pkg.startswith("@"):
+                            parts = raw_pkg[1:].rsplit("@", 1)
+                            if len(parts) == 2:
+                                pkg_name = "@" + parts[0]
+                                version = parts[1]
+                        else:
+                            parts = raw_pkg.rsplit("@", 1)
                             if len(parts) == 2:
                                 pkg_name = parts[0]
                                 version = parts[1]
                                 
-                        if not pkg_name:
-                            pkg_name = raw_pkg
-                            version = "unknown"
+                    if not pkg_name and "/" in raw_pkg:
+                        parts = raw_pkg.rsplit("/", 1)
+                        if len(parts) == 2:
+                            pkg_name = parts[0]
+                            version = parts[1]
                             
-                        if version and "(" in version:
-                            version = version.split("(", 1)[0]
-                            
-                        current_pkg = pkg_name
-                        current_version = version
-                        in_pkg_deps = False
-                        if pkg_name and version:
-                            resolved.setdefault(pkg_name, set()).add(version)
-                            
-                    elif indent >= 4 and current_pkg:
-                        if "integrity" in stripped and current_version:
-                            m = re.search(r'integrity[:\s]+([^\s\}\"\']+)', stripped)
-                            if m:
-                                integrity_dict[(current_pkg, current_version)] = m.group(1).strip()
+                    if not pkg_name:
+                        pkg_name = raw_pkg
+                        version = "unknown"
                         
-                        if indent == 4:
-                            if stripped.startswith("dependencies:") or stripped.startswith("optionalDependencies:") or stripped.startswith("peerDependencies:"):
-                                in_pkg_deps = True
-                            else:
-                                in_pkg_deps = False
-                        elif indent >= 6 and in_pkg_deps:
-                            if ":" in stripped:
-                                dep_name = stripped.split(":", 1)[0].strip().strip('"')
-                                if dep_name:
-                                    parents.setdefault(dep_name, set()).add(current_pkg)
+                    if version and "(" in version:
+                        version = version.split("(", 1)[0]
+                    
+                    if pkg_name and version:
+                        resolved.setdefault(pkg_name, set()).add(version)
+                        # Push this package's context onto the stack
+                        stack.append((indent, 'PACKAGE_BODY', (pkg_name, version)))
+                
+                elif current_state == 'PACKAGE_BODY':
+                    # Inside a package block. We check for integrity and dependency subsections.
+                    if "integrity" in stripped and current_version:
+                        parts = stripped.split("integrity", 1)
+                        if len(parts) == 2:
+                            val = parts[1].strip()
+                            if val.startswith(":"):
+                                val = val[1:].strip()
+                            val = val.strip("{}\"'").strip()
+                            val = val.split()[0].strip(",}'\"")
+                            if val:
+                                integrity_dict[(current_pkg, current_version)] = val
+                                
+                    if stripped.startswith("dependencies:") or stripped.startswith("optionalDependencies:") or stripped.startswith("peerDependencies:"):
+                        stack.append((indent, 'DEPENDENCIES', None))
+                
+                elif current_state == 'DEPENDENCIES':
+                    # We are in a list of dependencies under a package.
+                    # Each line is: dependency_name: version
+                    if ":" in stripped:
+                        dep_name, dep_ver = stripped.split(":", 1)
+                        dep_name = dep_name.strip().strip("'\"")
+                        if dep_name and current_pkg:
+                            parents.setdefault(dep_name, set()).add(current_pkg)
                             
         parents_clean = {k: list(v) for k, v in parents.items()}
         resolved_clean = {k: list(v) for k, v in resolved.items()}
