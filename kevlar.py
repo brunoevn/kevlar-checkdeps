@@ -1104,93 +1104,91 @@ def parse_yarn_lock(filepath):
     integrity_dict = {}
     try:
         with open(filepath, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        
-        current_names = []
-        current_version = None
-        current_integrity = None
-        in_dependencies = False
-        
-        for line in lines:
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
+            current_names = []
+            current_version = None
+            current_integrity = None
+            in_dependencies = False
             
-            indent_len = len(line) - len(line.lstrip())
-            
-            if indent_len == 0:
-                if current_names and current_version:
-                    for name in current_names:
-                        if current_integrity:
-                            integrity_dict[(name, current_version)] = current_integrity
-                in_dependencies = False
-                current_names = []
-                current_version = None
-                current_integrity = None
-                header = stripped.rstrip(":")
+            for line in f:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
                 
-                parts = []
-                current_part = []
-                in_quotes = False
-                for char in header:
-                    if char == '"':
-                        in_quotes = not in_quotes
-                    elif char == ',' and not in_quotes:
-                        parts.append("".join(current_part).strip())
-                        current_part = []
-                    else:
-                        current_part.append(char)
-                if current_part:
-                    parts.append("".join(current_part).strip())
+                indent_len = len(line) - len(line.lstrip())
                 
-                for part in parts:
-                    part = part.strip('"')
-                    if "@" in part:
-                        if part.startswith("@"):
-                            name_part = part[1:]
-                            if "@" in name_part:
-                                pkg_name = "@" + name_part.rsplit("@", 1)[0]
-                            else:
-                                pkg_name = part
-                        else:
-                            pkg_name = part.rsplit("@", 1)[0]
-                    else:
-                        pkg_name = part
-                    
-                    if pkg_name.startswith("npm:"):
-                        pkg_name = pkg_name[4:]
-                    current_names.append(pkg_name)
-                    
-            elif indent_len > 0:
-                if stripped.startswith("version ") or stripped.startswith("version:"):
-                    ver_val = stripped.split(" ", 1)[-1] if " " in stripped else stripped.split(":", 1)[-1]
-                    ver_val = ver_val.strip().strip('"').strip(':').strip()
-                    current_version = ver_val
-                    for name in current_names:
-                        resolved.setdefault(name, set()).add(ver_val)
-                elif stripped.startswith("integrity ") or stripped.startswith("integrity:"):
-                    integrity_val = stripped.split(" ", 1)[-1] if " " in stripped else stripped.split(":", 1)[-1]
-                    integrity_val = integrity_val.strip().strip('"').strip(':').strip()
-                    current_integrity = integrity_val
-                elif stripped.startswith("dependencies:") or stripped.startswith("optionalDependencies:") or stripped.startswith("peerDependencies:"):
-                    in_dependencies = True
-                elif in_dependencies and indent_len >= 4:
-                    dep_line = stripped
-                    if ":" in dep_line:
-                        dep_name = dep_line.split(":", 1)[0].strip().strip('"')
-                    else:
-                        dep_name = dep_line.split(" ", 1)[0].strip().strip('"')
-                    if dep_name:
+                if indent_len == 0:
+                    if current_names and current_version:
                         for name in current_names:
-                            parents.setdefault(dep_name, set()).add(name)
-                
-                if indent_len == 2 and not (stripped.startswith("dependencies:") or stripped.startswith("optionalDependencies:") or stripped.startswith("peerDependencies:")):
+                            if current_integrity:
+                                integrity_dict[(name, current_version)] = current_integrity
                     in_dependencies = False
+                    current_names = []
+                    current_version = None
+                    current_integrity = None
+                    header = stripped.rstrip(":")
                     
-        if current_names and current_version:
-            for name in current_names:
-                if current_integrity:
-                    integrity_dict[(name, current_version)] = current_integrity
+                    parts = []
+                    current_part = []
+                    in_quotes = False
+                    for char in header:
+                        if char == '"':
+                            in_quotes = not in_quotes
+                        elif char == ',' and not in_quotes:
+                            parts.append("".join(current_part).strip())
+                            current_part = []
+                        else:
+                            current_part.append(char)
+                    if current_part:
+                        parts.append("".join(current_part).strip())
+                    
+                    for part in parts:
+                        part = part.strip('"')
+                        if "@" in part:
+                            if part.startswith("@"):
+                                name_part = part[1:]
+                                if "@" in name_part:
+                                    pkg_name = "@" + name_part.rsplit("@", 1)[0]
+                                else:
+                                    pkg_name = part
+                            else:
+                                pkg_name = part.rsplit("@", 1)[0]
+                        else:
+                            pkg_name = part
+                        
+                        if pkg_name.startswith("npm:"):
+                            pkg_name = pkg_name[4:]
+                        current_names.append(pkg_name)
+                        
+                elif indent_len > 0:
+                    if stripped.startswith("version ") or stripped.startswith("version:"):
+                        ver_val = stripped.split(" ", 1)[-1] if " " in stripped else stripped.split(":", 1)[-1]
+                        ver_val = ver_val.strip().strip('"').strip(':').strip()
+                        current_version = ver_val
+                        for name in current_names:
+                            resolved.setdefault(name, set()).add(ver_val)
+                    elif stripped.startswith("integrity ") or stripped.startswith("integrity:"):
+                        integrity_val = stripped.split(" ", 1)[-1] if " " in stripped else stripped.split(":", 1)[-1]
+                        integrity_val = integrity_val.strip().strip('"').strip(':').strip()
+                        current_integrity = integrity_val
+                    elif stripped.startswith("dependencies:") or stripped.startswith("optionalDependencies:") or stripped.startswith("peerDependencies:"):
+                        in_dependencies = True
+                    elif in_dependencies and indent_len >= 4:
+                        dep_line = stripped
+                        if ":" in dep_line:
+                            dep_name = dep_line.split(":", 1)[0].strip().strip('"')
+                        else:
+                            dep_name = dep_line.split(" ", 1)[0].strip().strip('"')
+                        if dep_name:
+                            for name in current_names:
+                                parents.setdefault(dep_name, set()).add(name)
+                    
+                    if indent_len == 2 and not (stripped.startswith("dependencies:") or stripped.startswith("optionalDependencies:") or stripped.startswith("peerDependencies:")):
+                        in_dependencies = False
+                        
+            if current_names and current_version:
+                for name in current_names:
+                    if current_integrity:
+                        integrity_dict[(name, current_version)] = current_integrity
 
         parents_clean = {k: list(v) for k, v in parents.items()}
         resolved_clean = {k: list(v) for k, v in resolved.items()}
@@ -1209,90 +1207,88 @@ def parse_pnpm_lock(filepath):
     integrity_dict = {}
     try:
         with open(filepath, "r", encoding="utf-8") as f:
-            lines = f.readlines()
+            in_packages = False
+            current_pkg = None
+            current_version = None
+            in_pkg_deps = False
             
-        in_packages = False
-        current_pkg = None
-        current_version = None
-        in_pkg_deps = False
-        
-        for line in lines:
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-                
-            indent = len(line) - len(line.lstrip())
-            
-            if stripped.startswith("packages:"):
-                in_packages = True
-                continue
-                
-            if indent == 0 and in_packages and not stripped.startswith("packages:"):
-                in_packages = False
-                current_pkg = None
-                current_version = None
-                in_pkg_deps = False
-                
-            if in_packages:
-                if indent == 2 and stripped.endswith(":"):
-                    raw_pkg = stripped.rstrip(":")
-                    if raw_pkg.startswith("/"):
-                        raw_pkg = raw_pkg[1:]
-                    if "/" in raw_pkg and not raw_pkg.startswith("@"):
-                        first_part = raw_pkg.split("/", 1)[0]
-                        if "." in first_part or "localhost" in first_part:
-                            raw_pkg = raw_pkg.split("/", 1)[1]
-                            
-                    pkg_name = None
-                    version = None
+            for line in f:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
                     
-                    if "@" in raw_pkg:
-                        if raw_pkg.startswith("@"):
-                            parts = raw_pkg[1:].rsplit("@", 1)
-                            if len(parts) == 2:
-                                pkg_name = "@" + parts[0]
-                                version = parts[1]
-                        else:
-                            parts = raw_pkg.rsplit("@", 1)
+                indent = len(line) - len(line.lstrip())
+                
+                if stripped.startswith("packages:"):
+                    in_packages = True
+                    continue
+                    
+                if indent == 0 and in_packages and not stripped.startswith("packages:"):
+                    in_packages = False
+                    current_pkg = None
+                    current_version = None
+                    in_pkg_deps = False
+                    
+                if in_packages:
+                    if indent == 2 and stripped.endswith(":"):
+                        raw_pkg = stripped.rstrip(":")
+                        if raw_pkg.startswith("/"):
+                            raw_pkg = raw_pkg[1:]
+                        if "/" in raw_pkg and not raw_pkg.startswith("@"):
+                            first_part = raw_pkg.split("/", 1)[0]
+                            if "." in first_part or "localhost" in first_part:
+                                raw_pkg = raw_pkg.split("/", 1)[1]
+                                
+                        pkg_name = None
+                        version = None
+                        
+                        if "@" in raw_pkg:
+                            if raw_pkg.startswith("@"):
+                                parts = raw_pkg[1:].rsplit("@", 1)
+                                if len(parts) == 2:
+                                    pkg_name = "@" + parts[0]
+                                    version = parts[1]
+                            else:
+                                parts = raw_pkg.rsplit("@", 1)
+                                if len(parts) == 2:
+                                    pkg_name = parts[0]
+                                    version = parts[1]
+                                    
+                        if not pkg_name and "/" in raw_pkg:
+                            parts = raw_pkg.rsplit("/", 1)
                             if len(parts) == 2:
                                 pkg_name = parts[0]
                                 version = parts[1]
                                 
-                    if not pkg_name and "/" in raw_pkg:
-                        parts = raw_pkg.rsplit("/", 1)
-                        if len(parts) == 2:
-                            pkg_name = parts[0]
-                            version = parts[1]
+                        if not pkg_name:
+                            pkg_name = raw_pkg
+                            version = "unknown"
                             
-                    if not pkg_name:
-                        pkg_name = raw_pkg
-                        version = "unknown"
+                        if version and "(" in version:
+                            version = version.split("(", 1)[0]
+                            
+                        current_pkg = pkg_name
+                        current_version = version
+                        in_pkg_deps = False
+                        if pkg_name and version:
+                            resolved.setdefault(pkg_name, set()).add(version)
+                            
+                    elif indent >= 4 and current_pkg:
+                        if "integrity" in stripped and current_version:
+                            m = re.search(r'integrity[:\s]+([^\s\}\"\']+)', stripped)
+                            if m:
+                                integrity_dict[(current_pkg, current_version)] = m.group(1).strip()
                         
-                    if version and "(" in version:
-                        version = version.split("(", 1)[0]
-                        
-                    current_pkg = pkg_name
-                    current_version = version
-                    in_pkg_deps = False
-                    if pkg_name and version:
-                        resolved.setdefault(pkg_name, set()).add(version)
-                        
-                elif indent >= 4 and current_pkg:
-                    if "integrity" in stripped and current_version:
-                        m = re.search(r'integrity[:\s]+([^\s\}\"\']+)', stripped)
-                        if m:
-                            integrity_dict[(current_pkg, current_version)] = m.group(1).strip()
-                    
-                    if indent == 4:
-                        if stripped.startswith("dependencies:") or stripped.startswith("optionalDependencies:") or stripped.startswith("peerDependencies:"):
-                            in_pkg_deps = True
-                        else:
-                            in_pkg_deps = False
-                    elif indent >= 6 and in_pkg_deps:
-                        if ":" in stripped:
-                            dep_name = stripped.split(":", 1)[0].strip().strip('"')
-                            if dep_name:
-                                parents.setdefault(dep_name, set()).add(current_pkg)
+                        if indent == 4:
+                            if stripped.startswith("dependencies:") or stripped.startswith("optionalDependencies:") or stripped.startswith("peerDependencies:"):
+                                in_pkg_deps = True
+                            else:
+                                in_pkg_deps = False
+                        elif indent >= 6 and in_pkg_deps:
+                            if ":" in stripped:
+                                dep_name = stripped.split(":", 1)[0].strip().strip('"')
+                                if dep_name:
+                                    parents.setdefault(dep_name, set()).add(current_pkg)
                             
         parents_clean = {k: list(v) for k, v in parents.items()}
         resolved_clean = {k: list(v) for k, v in resolved.items()}
