@@ -21,6 +21,10 @@ from datetime import datetime, date
 import xml.etree.ElementTree as ET
 import codecs
 import base64
+import xml.parsers.expat
+import traceback
+import unicodedata
+import ctypes
 
 # Safe terminal output wrapping to prevent UnicodeEncodeError on Windows
 class SafeWriter:
@@ -92,7 +96,6 @@ def init_colors_and_encoding():
     # 1. Enable virtual terminal processing on Windows for ANSI colors
     if sys.platform == "win32":
         try:
-            import ctypes
             kernel32 = ctypes.windll.kernel32
             # 0xfffffff5 is STD_OUTPUT_HANDLE
             h_out = kernel32.GetStdHandle(-11)
@@ -202,6 +205,68 @@ def _validate_xml_raw_content(content):
     if pattern.search(text):
         raise ValueError("XML parsing rejected: XML contains forbidden DOCTYPE/ENTITY declarations.")
 
+class SecureXMLBuilder:
+    def __init__(self, max_depth=15, max_expanded_size=10 * 1024 * 1024):
+        self.max_depth = max_depth
+        self.max_expanded_size = max_expanded_size
+        self.depth = 0
+        self.total_size = 0
+        self.stack = []
+        self.root = None
+
+    def start_element(self, name, attrs):
+        self.depth += 1
+        if self.depth > self.max_depth:
+            raise ValueError(f"XML parsing rejected: Node depth exceeds limit of {self.max_depth}")
+        self.total_size += len(name)
+        for k, v in attrs.items():
+            self.total_size += len(k) + len(v)
+        if self.total_size > self.max_expanded_size:
+            raise ValueError("XML parsing rejected: Expanded data size limit exceeded")
+        element = ET.Element(name, attrs)
+        if not self.stack:
+            self.root = element
+        else:
+            self.stack[-1].append(element)
+        self.stack.append(element)
+
+    def end_element(self, name):
+        self.depth -= 1
+        if self.stack:
+            self.stack.pop()
+
+    def char_data(self, data):
+        self.total_size += len(data)
+        if self.total_size > self.max_expanded_size:
+            raise ValueError("XML parsing rejected: Expanded data size limit exceeded")
+        if self.stack:
+            elem = self.stack[-1]
+            if len(elem) == 0:
+                elem.text = (elem.text or "") + data
+            else:
+                last_child = elem[-1]
+                last_child.tail = (last_child.tail or "") + data
+
+    def entity_decl(self, *args, **kwargs):
+        raise ValueError("XML parsing rejected: XML contains forbidden Entity declarations.")
+
+    def doctype_decl(self, *args, **kwargs):
+        raise ValueError("XML parsing rejected: XML contains forbidden DOCTYPE declarations.")
+
+def parse_secure_xml(content, max_depth=15, max_expanded_size=10*1024*1024):
+    builder = SecureXMLBuilder(max_depth, max_expanded_size)
+    parser = xml.parsers.expat.ParserCreate()
+    parser.StartElementHandler = builder.start_element
+    parser.EndElementHandler = builder.end_element
+    parser.CharacterDataHandler = builder.char_data
+    parser.EntityDeclHandler = builder.entity_decl
+    parser.StartDoctypeDeclHandler = builder.doctype_decl
+    
+    if isinstance(content, str):
+        content = content.encode("utf-8")
+    parser.Parse(content, True)
+    return builder.root
+
 def safe_et_parse(source):
     """
     Safely parses an XML file path using ET, validating it first.
@@ -210,7 +275,7 @@ def safe_et_parse(source):
     with open(source, 'rb') as f:
         content = f.read()
     _validate_xml_raw_content(content)
-    root = ET.fromstring(content)
+    root = parse_secure_xml(content)
     return ET.ElementTree(root)
 
 def safe_et_fromstring(text):
@@ -219,16 +284,13 @@ def safe_et_fromstring(text):
     Returns the root Element.
     """
     _validate_xml_raw_content(text)
-    return ET.fromstring(text)
+    return parse_secure_xml(text)
 
 def _sanitize_error_message(exc, target_name):
     """
     Translates an internal exception into a business-safe, standardized error message
     without exposing system-level details, internal URLs, paths, or tracebacks.
     """
-    import urllib.error
-    import json
-    
     msg = str(exc)
     
     if isinstance(exc, urllib.error.HTTPError):
@@ -643,7 +705,6 @@ def _check_all_targets_unified(targets, check_func, label, max_workers):
                 sanitized_msg = _sanitize_error_message(e, name)
                 
                 if DEBUG_MODE:
-                    import traceback
                     print(f"\n{COLOR_RED}{ICON_ERROR} Error checking {name}: {e}{COLOR_RESET}")
                     traceback.print_exc(file=sys.stdout)
                 else:
@@ -4753,7 +4814,6 @@ def get_char_width(char):
     """Returns visual terminal width of a character."""
     if char in ("🚫", "🛡️", "🛡"):
         return 2
-    import unicodedata
     w = unicodedata.east_asian_width(char)
     if w in ('W', 'F'):
         return 2

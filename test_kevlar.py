@@ -278,6 +278,28 @@ class TestKevlar(unittest.TestCase):
             with self.assertRaises(ValueError):
                 kevlar._validate_xml_raw_content(encoded_bytes_ws)
 
+    def test_security_xml_parser_protections(self):
+        # 1. Depth <= 15 should succeed
+        nested_ok = "<root>" + "<nested>" * 14 + "text" + "</nested>" * 14 + "</root>"
+        root = kevlar.safe_et_fromstring(nested_ok)
+        self.assertIsNotNone(root)
+        
+        # 2. Depth > 15 should fail
+        nested_deep = "<root>" + "<nested>" * 15 + "text" + "</nested>" * 15 + "</root>"
+        with self.assertRaises(ValueError) as ctx:
+            kevlar.safe_et_fromstring(nested_deep)
+        self.assertIn("Node depth exceeds limit", str(ctx.exception))
+        
+        # 3. DOCTYPE/ENTITY declarations should fail in parser
+        xml_entity = "<!DOCTYPE root [<!ENTITY x \"y\">]><root>&x;</root>"
+        with self.assertRaises(ValueError):
+            kevlar.safe_et_fromstring(xml_entity)
+
+        # 4. Total size limit check
+        with self.assertRaises(ValueError) as ctx:
+            kevlar.parse_secure_xml("<root>Some long text</root>", max_expanded_size=10)
+        self.assertIn("Expanded data size limit exceeded", str(ctx.exception))
+
     def test_security_sanitize_error_message(self):
         import urllib.error
         import json
