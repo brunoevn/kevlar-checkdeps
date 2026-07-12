@@ -4,4 +4,5 @@ __pycache__
 *report*.html
 *report*.json
 *report*.md
+*report*.sarif
 kevlar-suppressions.json

@@ -1506,5 +1506,46 @@ class TestKevlar(unittest.TestCase):
             self.assertIn("KEVLAR-OUTDATED-DEPENDENCY", rule_ids)
             self.assertIn("KEVLAR-DEPRECATED-PACKAGE", rule_ids)
 
+    def test_generate_sarif_run_consolidation(self):
+        # Verify generate_sarif_run works and creates valid runs that can be combined in runs array
+        results_project_1 = [
+            {
+                "name": "flask",
+                "installed": "2.0.0",
+                "declared": "2.0.0",
+                "status": "up-to-date",
+                "technology": "pip",
+                "deprecated": False,
+                "vulnerabilities": [
+                    {"id": "CVE-2023-3000", "summary": "flask vuln", "severity": "HIGH", "details": ""}
+                ]
+            }
+        ]
+        results_project_2 = [
+            {
+                "name": "express",
+                "installed": "4.17.1",
+                "declared": "4.17.1",
+                "status": "major",
+                "technology": "npm",
+                "deprecated": False,
+                "latest": "5.0.0"
+            }
+        ]
+        
+        run_1 = kevlar.generate_sarif_run(results_project_1)
+        run_2 = kevlar.generate_sarif_run(results_project_2)
+        
+        consolidated_log = {
+            "$schema": "https://schemastore.org/json/schema/sarif-2.1.0-rtm.5.json",
+            "version": "2.1.0",
+            "runs": [run_1, run_2]
+        }
+        
+        self.assertEqual(len(consolidated_log["runs"]), 2)
+        self.assertEqual(consolidated_log["runs"][0]["tool"]["driver"]["name"], "Kevlar CheckDeps")
+        self.assertEqual(consolidated_log["runs"][0]["results"][0]["ruleId"], "CVE-2023-3000")
+        self.assertEqual(consolidated_log["runs"][1]["results"][0]["ruleId"], "KEVLAR-OUTDATED-DEPENDENCY")
+
 if __name__ == "__main__":
     unittest.main()

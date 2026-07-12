@@ -5170,250 +5170,249 @@ def export_json_report(results, filepath):
     except Exception as e:
         print(f"{COLOR_RED}{ICON_ERROR} Failed to export JSON report: {e}{COLOR_RESET}")
 
+def generate_sarif_run(results):
+    """Generates a SARIF run object from results."""
+    # Cache for reading manifest file lines to avoid redundant disk I/O
+    manifest_lines_cache = {}
+
+    run = {
+        "tool": {
+            "driver": {
+                "name": "Kevlar CheckDeps",
+                "version": VERSION,
+                "informationUri": "https://github.com/brunoevn/kevlar-checkdeps",
+                "rules": []
+            }
+        },
+        "results": []
+    }
+    
+    sarif_results = run["results"]
+    rules_map = {}
+    
+    for r in results:
+        name = r.get("name")
+        installed = r.get("installed")
+        declared = r.get("declared")
+        status = r.get("status")
+        deprecated = r.get("deprecated")
+        tech = r.get("technology")
+        error_msg = r.get("error")
+        
+        # Determine manifest file path and line number
+        manifest_path = None
+        line_number = 1
+        
+        rem = r.get("remediation")
+        if rem and isinstance(rem, dict):
+            manifest_path = rem.get("manifest_path")
+            line_number = rem.get("line_number") or 1
+            
+        if not manifest_path:
+            project_path = r.get("project_path") or "."
+            if tech:
+                manifest_files = find_manifest_files(project_path, tech)
+                if manifest_files:
+                    found_line = False
+                    for path in manifest_files:
+                        if path not in manifest_lines_cache:
+                            if os.path.exists(path):
+                                try:
+                                    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                                        manifest_lines_cache[path] = f.readlines()
+                                except Exception:
+                                    manifest_lines_cache[path] = []
+                            else:
+                                manifest_lines_cache[path] = []
+                        
+                        lines = manifest_lines_cache[path]
+                        for idx, line in enumerate(lines):
+                            if match_line_for_dependency(line, name, tech):
+                                manifest_path = path
+                                line_number = idx + 1
+                                found_line = True
+                                break
+                        if found_line:
+                            break
+                    if not manifest_path:
+                        manifest_path = manifest_files[0]
+        
+        # Standardize relative path for URI field (using forward slashes)
+        rel_uri = "unknown_manifest"
+        if manifest_path:
+            try:
+                rel_uri = os.path.relpath(manifest_path).replace("\\", "/")
+            except Exception:
+                rel_uri = str(manifest_path).replace("\\", "/")
+            
+        # Helper to create locations array
+        def make_locations(uri, line):
+            return [
+                {
+                    "physicalLocation": {
+                        "artifactLocation": {
+                            "uri": uri
+                        },
+                        "region": {
+                            "startLine": line,
+                            "startColumn": 1
+                        }
+                    }
+                }
+            ]
+            
+        # 1. Map Vulnerabilities
+        vulns = r.get("vulnerabilities", [])
+        for vuln in vulns:
+            vuln_id = vuln.get("id") or "KEVLAR-VULN-UNKNOWN"
+            summary = vuln.get("summary") or "Security vulnerability detected"
+            details = vuln.get("details") or ""
+            severity = get_severity_level(vuln)
+            
+            # Severity level mapping for SARIF:
+            # critical/high -> error, medium -> warning, low/unknown -> note
+            if severity in ("critical", "high"):
+                sarif_level = "error"
+            elif severity == "medium":
+                sarif_level = "warning"
+            else:
+                sarif_level = "note"
+                
+            msg_text = f"Security Vulnerability: package '{name}' (version {installed}) has vulnerability {vuln_id}. Summary: {summary}"
+            if details:
+                msg_text += f"\nDetails: {details}"
+                
+            sarif_results.append({
+                "ruleId": vuln_id,
+                "message": {
+                    "text": msg_text
+                },
+                "level": sarif_level,
+                "locations": make_locations(rel_uri, line_number),
+                "properties": {
+                    "packageName": name,
+                    "installedVersion": installed,
+                    "declaredConstraint": declared,
+                    "technology": tech,
+                    "vulnerabilityDetails": vuln
+                }
+            })
+            
+            # Track in tool rules
+            if vuln_id not in rules_map:
+                rules_map[vuln_id] = {
+                    "id": vuln_id,
+                    "shortDescription": {
+                        "text": f"Vulnerability {vuln_id} in {name}"
+                    }
+                }
+                
+        # 2. Map Configuration Drift (status == "error" and error starts with "Configuration Drift")
+        is_config_drift = False
+        if status == "error" and error_msg and error_msg.startswith("Configuration Drift"):
+            is_config_drift = True
+            rule_id = "KEVLAR-CONFIG-DRIFT"
+            sarif_results.append({
+                "ruleId": rule_id,
+                "message": {
+                    "text": error_msg
+                },
+                "level": "error",
+                "locations": make_locations(rel_uri, line_number),
+                "properties": {
+                    "packageName": name,
+                    "installedVersion": installed,
+                    "declaredConstraint": declared,
+                    "technology": tech
+                }
+            })
+            if rule_id not in rules_map:
+                rules_map[rule_id] = {
+                    "id": rule_id,
+                    "shortDescription": {
+                        "text": "Installed version of dependency violates declared constraint (Configuration Drift)"
+                    }
+                }
+                
+        # 3. Map Outdated Dependency (status in ("major", "minor", "patch") and not is_config_drift)
+        if status in ("major", "minor", "patch") and not is_config_drift:
+            rule_id = "KEVLAR-OUTDATED-DEPENDENCY"
+            latest = r.get("latest") or "unknown"
+            
+            if status == "major":
+                sarif_level = "error"
+            elif status == "minor":
+                sarif_level = "warning"
+            else:
+                sarif_level = "note"
+                
+            msg_text = f"Outdated dependency: package '{name}' (version {installed}) is behind latest version '{latest}' ({status} update available)."
+            
+            sarif_results.append({
+                "ruleId": rule_id,
+                "message": {
+                    "text": msg_text
+                },
+                "level": sarif_level,
+                "locations": make_locations(rel_uri, line_number),
+                "properties": {
+                    "packageName": name,
+                    "installedVersion": installed,
+                    "latestVersion": latest,
+                    "declaredConstraint": declared,
+                    "technology": tech,
+                    "updateType": status
+                }
+            })
+            if rule_id not in rules_map:
+                rules_map[rule_id] = {
+                    "id": rule_id,
+                    "shortDescription": {
+                        "text": "Package version is outdated"
+                    }
+                }
+                
+        # 4. Map Deprecation
+        if deprecated:
+            rule_id = "KEVLAR-DEPRECATED-PACKAGE"
+            dep_msg = str(deprecated)
+            
+            sarif_results.append({
+                "ruleId": rule_id,
+                "message": {
+                    "text": f"Deprecated package '{name}': {dep_msg}"
+                },
+                "level": "warning",
+                "locations": make_locations(rel_uri, line_number),
+                "properties": {
+                    "packageName": name,
+                    "installedVersion": installed,
+                    "technology": tech
+                }
+            })
+            if rule_id not in rules_map:
+                rules_map[rule_id] = {
+                    "id": rule_id,
+                    "shortDescription": {
+                        "text": "Package is deprecated"
+                    }
+                }
+
+    # Set rules
+    run["tool"]["driver"]["rules"] = list(rules_map.values())
+    return run
+
 def export_sarif_report(results, filepath):
     """Exports results as a SARIF v2.1.0 JSON document."""
     try:
-        # Cache for reading manifest file lines to avoid redundant disk I/O
-        manifest_lines_cache = {}
-
-        # Define the base SARIF structure
+        run = generate_sarif_run(results)
         sarif_log = {
             "$schema": "https://schemastore.org/json/schema/sarif-2.1.0-rtm.5.json",
             "version": "2.1.0",
-            "runs": [
-                {
-                    "tool": {
-                        "driver": {
-                            "name": "Kevlar CheckDeps",
-                            "version": VERSION,
-                            "informationUri": "https://github.com/brunoevn/kevlar-checkdeps",
-                            "rules": []
-                        }
-                    },
-                    "results": []
-                }
-            ]
+            "runs": [run]
         }
-        
-        run = sarif_log["runs"][0]
-        sarif_results = run["results"]
-        rules_map = {}
-        
-        for r in results:
-            name = r.get("name")
-            installed = r.get("installed")
-            declared = r.get("declared")
-            status = r.get("status")
-            deprecated = r.get("deprecated")
-            tech = r.get("technology")
-            error_msg = r.get("error")
-            
-            # Determine manifest file path and line number
-            manifest_path = None
-            line_number = 1
-            
-            rem = r.get("remediation")
-            if rem and isinstance(rem, dict):
-                manifest_path = rem.get("manifest_path")
-                line_number = rem.get("line_number") or 1
-                
-            if not manifest_path:
-                project_path = r.get("project_path") or "."
-                if tech:
-                    manifest_files = find_manifest_files(project_path, tech)
-                    if manifest_files:
-                        found_line = False
-                        for path in manifest_files:
-                            if path not in manifest_lines_cache:
-                                if os.path.exists(path):
-                                    try:
-                                        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                                            manifest_lines_cache[path] = f.readlines()
-                                    except Exception:
-                                        manifest_lines_cache[path] = []
-                                else:
-                                    manifest_lines_cache[path] = []
-                            
-                            lines = manifest_lines_cache[path]
-                            for idx, line in enumerate(lines):
-                                if match_line_for_dependency(line, name, tech):
-                                    manifest_path = path
-                                    line_number = idx + 1
-                                    found_line = True
-                                    break
-                            if found_line:
-                                break
-                        if not manifest_path:
-                            manifest_path = manifest_files[0]
-            
-            # Standardize relative path for URI field (using forward slashes)
-            rel_uri = "unknown_manifest"
-            if manifest_path:
-                try:
-                    rel_uri = os.path.relpath(manifest_path).replace("\\", "/")
-                except Exception:
-                    rel_uri = str(manifest_path).replace("\\", "/")
-                
-            # Helper to create locations array
-            def make_locations(uri, line):
-                return [
-                    {
-                        "physicalLocation": {
-                            "artifactLocation": {
-                                "uri": uri
-                            },
-                            "region": {
-                                "startLine": line,
-                                "startColumn": 1
-                            }
-                        }
-                    }
-                ]
-                
-            # 1. Map Vulnerabilities
-            vulns = r.get("vulnerabilities", [])
-            for vuln in vulns:
-                vuln_id = vuln.get("id") or "KEVLAR-VULN-UNKNOWN"
-                summary = vuln.get("summary") or "Security vulnerability detected"
-                details = vuln.get("details") or ""
-                severity = get_severity_level(vuln)
-                
-                # Severity level mapping for SARIF:
-                # critical/high -> error, medium -> warning, low/unknown -> note
-                if severity in ("critical", "high"):
-                    sarif_level = "error"
-                elif severity == "medium":
-                    sarif_level = "warning"
-                else:
-                    sarif_level = "note"
-                    
-                msg_text = f"Security Vulnerability: package '{name}' (version {installed}) has vulnerability {vuln_id}. Summary: {summary}"
-                if details:
-                    msg_text += f"\nDetails: {details}"
-                    
-                sarif_results.append({
-                    "ruleId": vuln_id,
-                    "message": {
-                        "text": msg_text
-                    },
-                    "level": sarif_level,
-                    "locations": make_locations(rel_uri, line_number),
-                    "properties": {
-                        "packageName": name,
-                        "installedVersion": installed,
-                        "declaredConstraint": declared,
-                        "technology": tech,
-                        "vulnerabilityDetails": vuln
-                    }
-                })
-                
-                # Track in tool rules
-                if vuln_id not in rules_map:
-                    rules_map[vuln_id] = {
-                        "id": vuln_id,
-                        "shortDescription": {
-                            "text": f"Vulnerability {vuln_id} in {name}"
-                        }
-                    }
-                    
-            # 2. Map Configuration Drift (status == "error" and error starts with "Configuration Drift")
-            is_config_drift = False
-            if status == "error" and error_msg and error_msg.startswith("Configuration Drift"):
-                is_config_drift = True
-                rule_id = "KEVLAR-CONFIG-DRIFT"
-                sarif_results.append({
-                    "ruleId": rule_id,
-                    "message": {
-                        "text": error_msg
-                    },
-                    "level": "error",
-                    "locations": make_locations(rel_uri, line_number),
-                    "properties": {
-                        "packageName": name,
-                        "installedVersion": installed,
-                        "declaredConstraint": declared,
-                        "technology": tech
-                    }
-                })
-                if rule_id not in rules_map:
-                    rules_map[rule_id] = {
-                        "id": rule_id,
-                        "shortDescription": {
-                            "text": "Installed version of dependency violates declared constraint (Configuration Drift)"
-                        }
-                    }
-                    
-            # 3. Map Outdated Dependency (status in ("major", "minor", "patch") and not is_config_drift)
-            if status in ("major", "minor", "patch") and not is_config_drift:
-                rule_id = "KEVLAR-OUTDATED-DEPENDENCY"
-                latest = r.get("latest") or "unknown"
-                
-                if status == "major":
-                    sarif_level = "error"
-                elif status == "minor":
-                    sarif_level = "warning"
-                else:
-                    sarif_level = "note"
-                    
-                msg_text = f"Outdated dependency: package '{name}' (version {installed}) is behind latest version '{latest}' ({status} update available)."
-                
-                sarif_results.append({
-                    "ruleId": rule_id,
-                    "message": {
-                        "text": msg_text
-                    },
-                    "level": sarif_level,
-                    "locations": make_locations(rel_uri, line_number),
-                    "properties": {
-                        "packageName": name,
-                        "installedVersion": installed,
-                        "latestVersion": latest,
-                        "declaredConstraint": declared,
-                        "technology": tech,
-                        "updateType": status
-                    }
-                })
-                if rule_id not in rules_map:
-                    rules_map[rule_id] = {
-                        "id": rule_id,
-                        "shortDescription": {
-                            "text": "Package version is outdated"
-                        }
-                    }
-                    
-            # 4. Map Deprecation
-            if deprecated:
-                rule_id = "KEVLAR-DEPRECATED-PACKAGE"
-                dep_msg = str(deprecated)
-                
-                sarif_results.append({
-                    "ruleId": rule_id,
-                    "message": {
-                        "text": f"Deprecated package '{name}': {dep_msg}"
-                    },
-                    "level": "warning",
-                    "locations": make_locations(rel_uri, line_number),
-                    "properties": {
-                        "packageName": name,
-                        "installedVersion": installed,
-                        "technology": tech
-                    }
-                })
-                if rule_id not in rules_map:
-                    rules_map[rule_id] = {
-                        "id": rule_id,
-                        "shortDescription": {
-                            "text": "Package is deprecated"
-                        }
-                    }
-
-        # Set rules
-        run["tool"]["driver"]["rules"] = list(rules_map.values())
-        
-        # Write to file
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(sarif_log, f, indent=2)
-            
         print(f"{COLOR_GREEN}{ICON_OK} SARIF report successfully exported to {filepath}{COLOR_RESET}")
     except Exception as e:
         print(f"{COLOR_RED}{ICON_ERROR} Failed to export SARIF report: {e}{COLOR_RESET}")
@@ -8670,6 +8669,7 @@ Examples:
         combined_devDependencies = {}
         combined_all_direct = {}
         total_elapsed = 0.0
+        sarif_runs = []
         
         original_path = args.path
         original_tech = getattr(args, "tech", None)
@@ -8727,8 +8727,8 @@ Examples:
                         export_json_report(results, proj_json_filepath)
                         
                     if args.format == "sarif":
-                        proj_sarif_filepath = f"report-{safe_proj_dirname}.sarif"
-                        export_sarif_report(results, proj_sarif_filepath)
+                        run_obj = generate_sarif_run(results)
+                        sarif_runs.append(run_obj)
                     
                     combined_results.extend(results)
                     total_elapsed += elapsed
@@ -8760,6 +8760,20 @@ Examples:
         print("CONSOLIDATED SUMMARY")
         print("=" * 80)
         print_summary(combined_results, total_elapsed, args.vuls)
+        
+        if args.format == "sarif" and sarif_runs:
+            consolidated_path = "report-consolidated.sarif"
+            try:
+                consolidated_log = {
+                    "$schema": "https://schemastore.org/json/schema/sarif-2.1.0-rtm.5.json",
+                    "version": "2.1.0",
+                    "runs": sarif_runs
+                }
+                with open(consolidated_path, "w", encoding="utf-8") as f:
+                    json.dump(consolidated_log, f, indent=2)
+                print(f"\n{COLOR_GREEN}{ICON_OK} Consolidated SARIF report successfully exported to {consolidated_path}{COLOR_RESET}")
+            except Exception as e:
+                print(f"\n{COLOR_RED}{ICON_ERROR} Failed to export consolidated SARIF report: {e}{COLOR_RESET}")
         
         failed = False
         if args.fail_on_vulns and check_pipeline_failure(combined_results, args.fail_on_vulns):
