@@ -2156,7 +2156,7 @@ def run_npm_checker(args):
         # Group result indices by package name
         by_name = {}
         for idx, r in enumerate(results):
-            if r["name"] != "node":
+            if not r.get("is_engine", False):
                 by_name.setdefault(r["name"], []).append(idx)
                 
         for name, indices in by_name.items():
@@ -2181,7 +2181,7 @@ def run_npm_checker(args):
     for r in results:
         r["missing_checksum"] = False
         r["weak_checksum"] = False
-        if r["name"] == "node":
+        if r.get("is_engine", False):
             continue
             
         if lock_file:
@@ -2230,13 +2230,14 @@ def run_npm_checker(args):
             "releases_url": "https://nodejs.org/en/about/previous-releases",
             "mismatch_checksum": False,
             "lockfile_checksum": None,
-            "registry_checksums": []
+            "registry_checksums": [],
+            "is_engine": True
         })
             
     # Resolve transitive dependency parents
     direct_packages = set(pkg_data["all_direct"].keys()) if pkg_data else set()
     for r in results:
-        if r["name"] != "node":
+        if not r.get("is_engine", False):
             direct_parents = find_direct_parents(r["name"], parents_data, direct_packages)
             r["required_by"] = sorted(list(direct_parents - {r["name"]}))
         else:
@@ -4996,14 +4997,14 @@ def print_results_table(results, pkg_data, show_all, vuls_enabled=False):
     
     for r in filtered_results:
         dep_type = "Transitive"
-        if r["name"] == "node":
+        if r.get("is_engine", False):
             dep_type = "Engine"
         elif pkg_data:
             if r["name"] in pkg_data.get("dependencies", {}):
                 dep_type = "Direct"
             elif r["name"] in pkg_data.get("devDependencies", {}):
                 dep_type = "Dev"
-        if dep_type == "Transitive" and r.get("required_by") and r["name"] != "node":
+        if dep_type == "Transitive" and r.get("required_by") and not r.get("is_engine", False):
             dep_type = "Transitive"
                 
         status_str = r["status"]
@@ -5224,7 +5225,7 @@ def export_markdown_report(results, pkg_data, filepath, vuls_enabled=False):
             
             for r in results:
                 dep_type = "Transitive"
-                if r["name"] == "node":
+                if r.get("is_engine", False):
                     dep_type = "Engine"
                 elif pkg_data:
                     if r["name"] in pkg_data.get("dependencies", {}):
@@ -5232,7 +5233,7 @@ def export_markdown_report(results, pkg_data, filepath, vuls_enabled=False):
                     elif r["name"] in pkg_data.get("devDependencies", {}):
                         dep_type = "Dev"
                         
-                if dep_type == "Transitive" and r.get("required_by") and r["name"] != "node":
+                if dep_type == "Transitive" and r.get("required_by") and not r.get("is_engine", False):
                     dep_type = f"Transitive (via {', '.join(r['required_by'])})"
                         
                 status_str = r["status"]
@@ -5605,15 +5606,15 @@ def populate_remediation_recommendations(results, default_project_path):
         name = r.get("name")
         declared = r.get("declared")
         
-        # 1. Handle Special Case for node engine
-        if name == "node":
+        # 1. Handle Special Case for engine
+        if r.get("is_engine", False):
             package_json_path = os.path.join(project_path, "package.json")
             if os.path.exists(package_json_path):
                 try:
                     with open(package_json_path, "r", encoding="utf-8", errors="ignore") as f:
                         lines = f.readlines()
                     for idx, line in enumerate(lines):
-                        if '"node"' in line or '"engines"' in line:
+                        if f'"{name}"' in line or '"engines"' in line:
                             diff = generate_remediation_diff(package_json_path, idx + 1, declared, latest_ver, tech)
                             if diff:
                                 r["remediation"] = diff
@@ -7451,7 +7452,7 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             
             # Type detection
             dep_type = "Transitive"
-            if name == "node":
+            if r.get("is_engine", False):
                 dep_type = "Engine"
             elif pkg_data and is_direct_install:
                 if name in pkg_data.get("all_direct", {}):
@@ -7459,7 +7460,7 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                 elif name in pkg_data.get("devDependencies", {}):
                     dep_type = "Dev"
                     
-            if r.get("required_by") and name != "node" and not is_direct_install:
+            if r.get("required_by") and not r.get("is_engine", False) and not is_direct_install:
                 dep_type = "Transitive"
                 
             dep_type_esc = escape_html(dep_type)

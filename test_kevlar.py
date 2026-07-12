@@ -637,7 +637,7 @@ class TestKevlar(unittest.TestCase):
         
         by_name = {}
         for idx, r in enumerate(results):
-            if r["name"] != "node":
+            if not r.get("is_engine", False):
                 by_name.setdefault(r["name"], []).append(idx)
                 
         for name, indices in by_name.items():
@@ -1181,6 +1181,80 @@ class TestKevlar(unittest.TestCase):
             self.assertEqual(len(results[0]["vulnerabilities"]), 0)
             self.assertEqual(len(results[0]["suppressed_vulnerabilities"]), 1)
             self.assertEqual(results[0]["suppressed_vulnerabilities"][0]["suppressed_reason"], "FALSE_POSITIVE")
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_engine_abstraction(self):
+        import tempfile
+        import json
+        import shutil
+        import io
+        
+        # Test 1: verify that print_results_table/export_markdown_report/generate_html_report respect is_engine flag
+        results = [
+            {
+                "name": "my-custom-engine",
+                "declared": ">=1.0.0",
+                "installed": "N/A",
+                "latest": "2.0.0",
+                "latest_same_major": None,
+                "latest_absolute": None,
+                "status": "minor",
+                "deprecated": False,
+                "error": None,
+                "is_engine": True
+            }
+        ]
+        
+        # We can intercept stdout to see if print_results_table displays "Engine" type
+        captured_output = io.StringIO()
+        original_stdout = sys.stdout
+        sys.stdout = captured_output
+        try:
+            kevlar.print_results_table(results, pkg_data={}, show_all=True)
+        finally:
+            sys.stdout = original_stdout
+            
+        output_str = captured_output.getvalue()
+        self.assertIn("Engine", output_str)
+        self.assertIn("my-custom-engine", output_str)
+        
+        # Test 2: verify populate_remediation_recommendations finds the engine block correctly
+        temp_dir = tempfile.mkdtemp()
+        try:
+            package_json_content = {
+                "name": "test-project",
+                "engines": {
+                    "my-custom-engine": ">=1.0.0"
+                }
+            }
+            with open(os.path.join(temp_dir, "package.json"), "w", encoding="utf-8") as f:
+                json.dump(package_json_content, f, indent=2)
+                
+            results_for_remed = [
+                {
+                    "name": "my-custom-engine",
+                    "declared": ">=1.0.0",
+                    "installed": "N/A",
+                    "latest": "2.0.0",
+                    "latest_same_major": None,
+                    "latest_absolute": None,
+                    "status": "minor",
+                    "deprecated": False,
+                    "error": None,
+                    "technology": "npm",
+                    "project_path": temp_dir,
+                    "is_engine": True
+                }
+            ]
+            
+            kevlar.populate_remediation_recommendations(results_for_remed, temp_dir)
+            
+            remed = results_for_remed[0].get("remediation")
+            self.assertIsNotNone(remed)
+            self.assertEqual(os.path.basename(remed["manifest_path"]), "package.json")
+            has_custom_engine = any("my-custom-engine" in item["html"] for item in remed["current_code"])
+            self.assertTrue(has_custom_engine)
         finally:
             shutil.rmtree(temp_dir)
 
