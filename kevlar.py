@@ -192,25 +192,6 @@ def _detect_xml_encoding(content):
 
     return "utf-8"
 
-def _validate_xml_raw_content(content):
-    """
-    Checks the raw XML string or bytes content for DOCTYPE or ENTITY tags to block XXE / Billion Laughs.
-    """
-    if not content:
-        return
-    if isinstance(content, bytes):
-        encoding = _detect_xml_encoding(content)
-        try:
-            text = content.decode(encoding, errors='replace')
-        except Exception:
-            text = content.decode('latin-1', errors='replace')
-    else:
-        text = content
-        
-    pattern = re.compile(r'<\s*!\s*(?:d\s*o\s*c\s*t\s*y\s*p\s*e|e\s*n\s*t\s*i\s*t\s*y)\b', re.IGNORECASE)
-    if pattern.search(text):
-        raise ValueError("XML parsing rejected: XML contains forbidden DOCTYPE/ENTITY declarations.")
-
 class SecureXMLBuilder:
     def __init__(self, max_depth=15, max_expanded_size=10 * 1024 * 1024):
         self.max_depth = max_depth
@@ -253,24 +234,44 @@ class SecureXMLBuilder:
                 last_child = elem[-1]
                 last_child.tail = (last_child.tail or "") + data
 
-    def entity_decl(self, *args, **kwargs):
-        raise ValueError("XML parsing rejected: XML contains forbidden Entity declarations.")
-
-    def doctype_decl(self, *args, **kwargs):
-        raise ValueError("XML parsing rejected: XML contains forbidden DOCTYPE declarations.")
-
 def parse_secure_xml(content, max_depth=15, max_expanded_size=10*1024*1024):
     builder = SecureXMLBuilder(max_depth, max_expanded_size)
-    parser = xml.parsers.expat.ParserCreate()
+    
+    # 3. Asegurar que el manejo de encodings mediante sniffing de BOM se mantenga intacto
+    if isinstance(content, bytes):
+        encoding = _detect_xml_encoding(content)
+        try:
+            content_str = content.decode(encoding, errors='replace')
+        except Exception:
+            content_str = content.decode('latin-1', errors='replace')
+    else:
+        content_str = content
+
+    content_bytes = content_str.encode("utf-8")
+
+    parser = xml.parsers.expat.ParserCreate(encoding="utf-8")
     parser.StartElementHandler = builder.start_element
     parser.EndElementHandler = builder.end_element
     parser.CharacterDataHandler = builder.char_data
-    parser.EntityDeclHandler = builder.entity_decl
-    parser.StartDoctypeDeclHandler = builder.doctype_decl
     
-    if isinstance(content, str):
-        content = content.encode("utf-8")
-    parser.Parse(content, True)
+    # 1 y 2. Delegar la validación a los handlers de Expat y lanzar ValueError inmediato
+    def forbid_doctype(*args, **kwargs):
+        raise ValueError("XML parsing rejected: XML contains forbidden DOCTYPE declarations.")
+        
+    def forbid_entity(*args, **kwargs):
+        raise ValueError("XML parsing rejected: XML contains forbidden Entity declarations.")
+
+    parser.StartDoctypeDeclHandler = forbid_doctype
+    parser.EntityDeclHandler = forbid_entity
+    
+    try:
+        parser.Parse(content_bytes, True)
+    except xml.parsers.expat.ExpatError as e:
+        err = ET.ParseError(str(e))
+        err.code = e.code
+        err.offset = e.offset
+        err.position = (e.lineno, e.offset)
+        raise err
     return builder.root
 
 def safe_et_parse(source):
@@ -280,7 +281,6 @@ def safe_et_parse(source):
     """
     with open(source, 'rb') as f:
         content = f.read()
-    _validate_xml_raw_content(content)
     root = parse_secure_xml(content)
     return ET.ElementTree(root)
 
@@ -289,7 +289,6 @@ def safe_et_fromstring(text):
     Safely parses an XML string or bytes using ET, validating it first.
     Returns the root Element.
     """
-    _validate_xml_raw_content(text)
     return parse_secure_xml(text)
 
 def _sanitize_error_message(exc, target_name):

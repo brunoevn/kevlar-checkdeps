@@ -223,12 +223,14 @@ class TestKevlar(unittest.TestCase):
             self.assertEqual(len(poms), 2)
 
     def test_security_xml_pre_validation(self):
+        import xml.etree.ElementTree as ET
+        
         # Safe XMLs
         safe_xml_1 = "<project><dependencies></dependencies></project>"
         safe_xml_2 = "<?xml version='1.0'?><root>Hello World</root>"
         # Should not raise exception
-        kevlar._validate_xml_raw_content(safe_xml_1)
-        kevlar._validate_xml_raw_content(safe_xml_2)
+        kevlar.safe_et_fromstring(safe_xml_1)
+        kevlar.safe_et_fromstring(safe_xml_2)
         
         # Dangerous XMLs with DOCTYPE / ENTITY
         unsafe_xml_1 = """<!DOCTYPE foo [ <!ENTITY xxe SYSTEM "file:///etc/passwd"> ]>
@@ -239,16 +241,16 @@ class TestKevlar(unittest.TestCase):
         unsafe_xml_4 = """<!   doCType foo>"""
         unsafe_xml_5 = """<!   EnTiTy foo SYSTEM "bar">"""
         
-        with self.assertRaises(ValueError):
-            kevlar._validate_xml_raw_content(unsafe_xml_1)
-        with self.assertRaises(ValueError):
-            kevlar._validate_xml_raw_content(unsafe_xml_2)
-        with self.assertRaises(ValueError):
-            kevlar._validate_xml_raw_content(unsafe_xml_3)
-        with self.assertRaises(ValueError):
-            kevlar._validate_xml_raw_content(unsafe_xml_4)
-        with self.assertRaises(ValueError):
-            kevlar._validate_xml_raw_content(unsafe_xml_5)
+        with self.assertRaises((ValueError, ET.ParseError)):
+            kevlar.safe_et_fromstring(unsafe_xml_1)
+        with self.assertRaises((ValueError, ET.ParseError)):
+            kevlar.safe_et_fromstring(unsafe_xml_2)
+        with self.assertRaises((ValueError, ET.ParseError)):
+            kevlar.safe_et_fromstring(unsafe_xml_3)
+        with self.assertRaises((ValueError, ET.ParseError)):
+            kevlar.safe_et_fromstring(unsafe_xml_4)
+        with self.assertRaises((ValueError, ET.ParseError)):
+            kevlar.safe_et_fromstring(unsafe_xml_5)
 
         # Multi-encoding evasion tests (UTF-16 and UTF-32)
         payload = """<!DOCTYPE foo [ <!ENTITY xxe SYSTEM "file:///etc/passwd"> ]><root>&xxe;</root>"""
@@ -270,24 +272,24 @@ class TestKevlar(unittest.TestCase):
         # Test with BOM
         for enc, bom in encodings_with_bom:
             encoded_bytes = bom + payload.encode(enc)
-            with self.assertRaises(ValueError):
-                kevlar._validate_xml_raw_content(encoded_bytes)
+            with self.assertRaises((ValueError, ET.ParseError)):
+                kevlar.safe_et_fromstring(encoded_bytes)
                 
             # Leading whitespace + BOM
             encoded_bytes_ws = bom + ("   \n  " + payload).encode(enc)
-            with self.assertRaises(ValueError):
-                kevlar._validate_xml_raw_content(encoded_bytes_ws)
+            with self.assertRaises((ValueError, ET.ParseError)):
+                kevlar.safe_et_fromstring(encoded_bytes_ws)
                 
         # Test without BOM
         for enc in encodings_no_bom:
             encoded_bytes = payload.encode(enc)
-            with self.assertRaises(ValueError):
-                kevlar._validate_xml_raw_content(encoded_bytes)
+            with self.assertRaises((ValueError, ET.ParseError)):
+                kevlar.safe_et_fromstring(encoded_bytes)
                 
             # Leading whitespace (without BOM)
             encoded_bytes_ws = (" \n\t " + payload).encode(enc)
-            with self.assertRaises(ValueError):
-                kevlar._validate_xml_raw_content(encoded_bytes_ws)
+            with self.assertRaises((ValueError, ET.ParseError)):
+                kevlar.safe_et_fromstring(encoded_bytes_ws)
 
     def test_security_xml_parser_protections(self):
         # 1. Depth <= 15 should succeed
