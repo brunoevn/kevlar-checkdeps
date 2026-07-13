@@ -5623,7 +5623,7 @@ def export_markdown_report(results, pkg_data, filepath, vuls_enabled=False):
                         parent_suffix = f" (via {', '.join(required_by)})" if required_by else ""
                         f.write(f"### `{name}@{ver}`{parent_suffix} ({len(v_list)} vulnerabilities)\n\n")
                         for vuln in v_list:
-                            f.write(f"- **{vuln['id']}** [{vuln['severity']}]: {vuln['summary']}\n")
+                            f.write(f"- **{vuln['id']}** [{get_severity_level(vuln).upper()} - {vuln['severity']}]: {vuln['summary']}\n")
                             if vuln.get("details"):
                                 details_escaped = vuln['details'].replace('\n', '\n> ')
                                 f.write(f"  > {details_escaped}\n\n")
@@ -6473,6 +6473,33 @@ class HTMLReportTemplateProvider:
         .badge-danger { background-color: rgba(220, 38, 38, 0.25); color: #fca5a5; border: 1px solid rgba(220, 38, 38, 0.4); }
         .badge-muted { background-color: rgba(100, 116, 139, 0.15); color: #94a3b8; border: 1px solid rgba(100, 116, 139, 0.3); }
         .badge-project { background-color: rgba(55, 65, 81, 0.4); color: #9ca3af; border: 1px solid rgba(75, 85, 99, 0.4); }
+        
+        .badge-vuln-stats {
+            background-color: rgba(17, 24, 39, 0.6);
+            border: 1px solid #374151;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        }
+        .badge-vuln-stats .divider {
+            color: #4b5563;
+            font-weight: normal;
+            margin: 0 1px;
+        }
+        .badge-vuln-stats .lbl-vuls {
+            color: #ef4444;
+            font-weight: bold;
+        }
+        .badge-vuln-stats .sev-c { color: #f87171; font-weight: bold; }
+        .badge-vuln-stats .sev-h { color: #fb923c; font-weight: bold; }
+        .badge-vuln-stats .sev-m { color: #facc15; font-weight: bold; }
+        .badge-vuln-stats .sev-l { color: #38bdf8; font-weight: bold; }
+        .badge-vuln-stats .sev-u { color: #9ca3af; font-weight: bold; }
+        .badge-vuln-stats .muted {
+            opacity: 0.3;
+            font-weight: normal;
+        }
         
         .header-right {
             display: flex;
@@ -7856,7 +7883,45 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             is_suppressed = len(pkg_suppressed_vulns) > 0
             
             if is_vulnerable:
-                badges.append(f'<span class="badge badge-danger">{len(pkg_vulns)} Vulns</span>')
+                # Count severities for this specific package
+                c_cnt = 0
+                h_cnt = 0
+                m_cnt = 0
+                l_cnt = 0
+                u_cnt = 0
+                for v in pkg_vulns:
+                    level = get_severity_level(v)
+                    if level == "critical":
+                        c_cnt += 1
+                    elif level == "high":
+                        h_cnt += 1
+                    elif level == "medium":
+                        m_cnt += 1
+                    elif level == "low":
+                        l_cnt += 1
+                    else:
+                        u_cnt += 1
+                
+                def get_class(cnt, base_class):
+                    return base_class if cnt > 0 else f"{base_class} muted"
+                
+                total_v = len(pkg_vulns)
+                badge_html = (
+                    f'<span class="badge badge-vuln-stats" title="{total_v} Vulnerabilities">'
+                    f'<span class="lbl-vuls">vuls {total_v}</span>'
+                    f'<span class="divider">|</span>'
+                    f'<span class="{get_class(c_cnt, "sev-c")}">C {c_cnt}</span>'
+                    f'<span class="divider">|</span>'
+                    f'<span class="{get_class(h_cnt, "sev-h")}">H {h_cnt}</span>'
+                    f'<span class="divider">|</span>'
+                    f'<span class="{get_class(m_cnt, "sev-m")}">M {m_cnt}</span>'
+                    f'<span class="divider">|</span>'
+                    f'<span class="{get_class(l_cnt, "sev-l")}">L {l_cnt}</span>'
+                    f'<span class="divider">|</span>'
+                    f'<span class="{get_class(u_cnt, "sev-u")}">U {u_cnt}</span>'
+                    f'</span>'
+                )
+                badges.append(badge_html)
             if is_suppressed:
                 badges.append(f'<span class="badge badge-muted">{len(pkg_suppressed_vulns)} Suppressed</span>')
                 
