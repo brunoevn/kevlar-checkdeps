@@ -1,5 +1,6 @@
 mejoras.md
 __pycache__
+.venv/
 # Generated reports
 *report*.html
 *report*.json

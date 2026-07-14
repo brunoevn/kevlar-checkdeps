@@ -755,20 +755,25 @@ class TestKevlar(unittest.TestCase):
             with open(filepath, "r", encoding="utf-8") as f:
                 content = f.read()
                 
-            # Assert function definition and copierPromptRemediacion parameter signature in JS script block
+            # Assert function definition and helper function in JS script block
             self.assertIn("function copiarPromptRemediacion(pkgName, ecosystem, currentVer, latestSameMajor, latestAbsolute, alertType, details, projName, projDir, depType, requiredBy)", content)
+            self.assertIn("function copiarPromptRemediacionByIndex(i)", content)
             
-            # Assert correct arguments passed in buttons for the composite pip case
-            self.assertIn("copiarPromptRemediacion('certifi', 'Python / pip', '2022.12.7', '2022.12.7', '2026.6.17'", content)
+            # Assert correct JSON structures are embedded in the report
+            self.assertIn('"name": "certifi"', content)
+            self.assertIn('"latest_same_major": "2022.12.7"', content)
+            self.assertIn('"latest_absolute": "2026.6.17"', content)
             
-            # Assert correct arguments passed in buttons for the composite npm case
-            self.assertIn("copiarPromptRemediacion('lodash', 'Node.js / npm', '4.17.15', '4.17.21', '5.0.0'", content)
+            self.assertIn('"name": "lodash"', content)
+            self.assertIn('"latest_same_major": "4.17.21"', content)
+            self.assertIn('"latest_absolute": "5.0.0"', content)
             
-            # Assert correct arguments passed for simple nuget case
-            self.assertIn("copiarPromptRemediacion('Newtonsoft.Json', '.NET / NuGet', '13.0.1', '13.0.3', '13.0.3'", content)
+            self.assertIn('"name": "Newtonsoft.Json"', content)
+            self.assertIn('"latest_same_major": "13.0.3"', content)
+            self.assertIn('"latest_absolute": "13.0.3"', content)
             
-            # Assert correct arguments passed for php vuln case
-            self.assertIn("copiarPromptRemediacion('guzzlehttp/guzzle', 'PHP / Composer', '7.5.0', '7.5.0', '7.5.0'", content)
+            self.assertIn('"name": "guzzlehttp/guzzle"', content)
+            self.assertIn('"GHSA-1111-2222-3333"', content)
             
     def test_parse_package_lock_all_dep_types(self):
         import tempfile

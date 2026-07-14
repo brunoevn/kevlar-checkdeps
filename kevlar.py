@@ -44,7 +44,7 @@ class SafeWriter:
 sys.stdout = SafeWriter(sys.stdout)
 sys.stderr = SafeWriter(sys.stderr)
 
-VERSION = "1.9.2"
+VERSION = "1.9.3"
 
 # External APIs Configuration
 URL_NPM_REGISTRY = "https://registry.npmjs.org/"
@@ -6483,11 +6483,15 @@ class HTMLReportTemplateProvider:
             border: 1px solid var(--border-color);
             border-radius: 12px;
             overflow: hidden;
-            transition: border-color 0.2s ease;
+            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
         }
         
         .package-card:hover {
-            border-color: var(--muted);
+            border-color: rgba(59, 130, 246, 0.5);
+            background-color: var(--card-hover);
+            transform: translateY(-1px);
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
         }
         
         .card-header {
@@ -6553,49 +6557,98 @@ class HTMLReportTemplateProvider:
         .badge-project { background-color: rgba(55, 65, 81, 0.4); color: #9ca3af; border: 1px solid rgba(75, 85, 99, 0.4); }
         
         .badge-vuln-stats {
-            background-color: rgba(17, 24, 39, 0.6);
-            border: 1px solid #374151;
+            background-color: rgba(239, 68, 68, 0.1);
+            border: 1px solid rgba(239, 68, 68, 0.2);
+            color: #ef4444;
             display: inline-flex;
             align-items: center;
             gap: 4px;
-            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-weight: 700;
         }
-        .badge-vuln-stats .divider {
-            color: #4b5563;
-            font-weight: normal;
-            margin: 0 1px;
+        .vuln-severity-pills {
+            display: inline-flex;
+            gap: 4px;
+            align-items: center;
         }
-        .badge-vuln-stats .lbl-vuls {
-            color: #ef4444;
-            font-weight: bold;
+        .sev-pill {
+            font-size: 10px;
+            padding: 2px 6px;
+            border-radius: 5px;
+            font-weight: 700;
+            display: inline-flex;
+            align-items: center;
         }
-        .badge-vuln-stats .sev-c { color: #f87171; font-weight: bold; }
-        .badge-vuln-stats .sev-h { color: #fb923c; font-weight: bold; }
-        .badge-vuln-stats .sev-m { color: #facc15; font-weight: bold; }
-        .badge-vuln-stats .sev-l { color: #38bdf8; font-weight: bold; }
-        .badge-vuln-stats .sev-u { color: #9ca3af; font-weight: bold; }
-        .badge-vuln-stats .muted {
-            opacity: 0.3;
-            font-weight: normal;
-        }
+        .sev-pill.sev-c { background-color: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
+        .sev-pill.sev-h { background-color: rgba(245, 158, 11, 0.2); color: #fb923c; border: 1px solid rgba(245, 158, 11, 0.3); }
+        .sev-pill.sev-m { background-color: rgba(234, 179, 8, 0.2); color: #facc15; border: 1px solid rgba(234, 179, 8, 0.3); }
+        .sev-pill.sev-l { background-color: rgba(156, 163, 175, 0.2); color: #d1d5db; border: 1px solid rgba(156, 163, 175, 0.3); }
+        .sev-pill.sev-u { background-color: rgba(156, 163, 175, 0.15); color: #9ca3af; border: 1px solid rgba(156, 163, 175, 0.25); }
         
         .header-right {
             display: flex;
             align-items: center;
-            gap: 25px;
+            gap: 20px;
         }
         
         .pkg-versions {
             display: flex;
             flex-direction: column;
-            gap: 4px;
-            font-size: 13px;
-            text-align: right;
+            align-items: flex-end;
+            gap: 6px;
+            font-family: 'Outfit', sans-serif;
         }
         
-        .pkg-versions .label {
-            color: var(--text-muted);
+        .version-installed {
+            font-size: 13px;
+            color: var(--text-main);
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        
+        .version-installed .label {
             font-size: 11px;
+            color: var(--text-muted);
+            font-weight: 400;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .version-chips {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 4px;
+        }
+        
+        .v-chip {
+            font-size: 11px;
+            padding: 3px 8px;
+            border-radius: 6px;
+            font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            transition: all 0.2s ease;
+        }
+        
+        .v-chip-ok {
+            background-color: rgba(16, 185, 129, 0.1);
+            border: 1px solid rgba(16, 185, 129, 0.2);
+            color: #34d399;
+        }
+        
+        .v-chip-safe {
+            background-color: rgba(14, 165, 233, 0.1);
+            border: 1px solid rgba(14, 165, 233, 0.2);
+            color: #38bdf8;
+        }
+        
+        .v-chip-major {
+            background-color: rgba(245, 158, 11, 0.1);
+            border: 1px solid rgba(245, 158, 11, 0.2);
+            color: #fbbf24;
         }
         
         .chevron {
@@ -7030,7 +7083,12 @@ class HTMLReportTemplateProvider:
     <div class="container">
         <header>
             <div>
-                <h1>Kevlar CheckDeps <span style="font-size: 13px; font-weight: normal; color: var(--text-muted); margin-left: 6px;">v${VERSION}</span></h1>
+                <h1 style="display: flex; align-items: center; gap: 10px;">
+                    <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="var(--primary)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0; filter: drop-shadow(0 2px 8px rgba(56, 189, 248, 0.3));">
+                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+                    </svg>
+                    <span>Kevlar CheckDeps <span style="font-size: 13px; font-weight: normal; color: var(--text-muted); margin-left: 6px;">v${VERSION}</span></span>
+                </h1>
                 <div style="font-size: 14px; color: var(--text-muted); margin-top: 4px;">Dependency Status & Security Audit</div>
                 <div style="font-size: 12px; margin-top: 6px;"><a href="https://github.com/brunoevn/kevlar-checkdeps" target="_blank" style="color: var(--primary); text-decoration: none;">https://github.com/brunoevn/kevlar-checkdeps</a></div>
             </div>
@@ -7220,14 +7278,497 @@ class HTMLReportTemplateProvider:
     </div>
         
         <!-- Packages List -->
-        <div class="packages-list">
-            ${package_cards}
+        <div class="packages-list" id="packageContainer">
+            <!-- Dynamic cards are rendered here -->
         </div>
     </div>
     
     <script>
+        const KEVLAR_REPORT_PACKAGES = ${packages_json_data};
+        const KEVLAR_VULNERABILITY_STORE = ${vulns_json_data};
+        const SHOW_PROJECT_GLOBALLY = ${show_project_globally};
+        const UNIQUE_PROJECT_PATHS = ${unique_project_paths};
+        const VULS_ENABLED = ${vuls_enabled};
+        
+        function renderPackages() {
+            const container = document.getElementById('packageContainer');
+            if (!container) return;
+            
+            let htmlBuffer = '';
+            
+            KEVLAR_REPORT_PACKAGES.forEach((r, i) => {
+                const name = r.name;
+                const declared = r.declared;
+                const installed = r.installed;
+                const latest = r.latest;
+                const status = r.status;
+                const is_deprecated = r.deprecated;
+                const error = r.error;
+                const dep_type = r.dep_type;
+                
+                const name_esc = escapeHtml(name);
+                const declared_esc = declared ? escapeHtml(declared) : "";
+                const installed_esc = escapeHtml(installed);
+                const latest_esc = escapeHtml(latest);
+                const status_esc = escapeHtml(status);
+                const error_esc = escapeHtml(error || '');
+                const dep_type_esc = escapeHtml(dep_type);
+                
+                let project_badge = "";
+                if (!SHOW_PROJECT_GLOBALLY && r.project_path) {
+                    const proj_path = r.project_path;
+                    const tech_val = r.technology || "";
+                    project_badge = '<span class="badge badge-project" style="font-family: monospace; text-transform: none; margin-left: 4px;">' + escapeHtml(proj_path) + ' [' + escapeHtml(tech_val) + ']</span>';
+                }
+                
+                let badges = [];
+                if (error) {
+                    badges.push('<span class="badge badge-error">Error</span>');
+                } else if (status === "up-to-date") {
+                    badges.push('<span class="badge badge-success">Up-to-date</span>');
+                } else if (status.includes("major")) {
+                    badges.push('<span class="badge badge-error">Major Update</span>');
+                } else if (status === "minor") {
+                    badges.push('<span class="badge badge-warning">Minor Update</span>');
+                } else if (status === "patch") {
+                    badges.push('<span class="badge badge-info">Patch Update</span>');
+                } else if (status === "local") {
+                    badges.push('<span class="badge badge-info">Verify Local</span>');
+                }
+                
+                if (is_deprecated) {
+                    badges.push('<span class="badge badge-depr">Deprecated</span>');
+                }
+                
+                if (r.missing_checksum) {
+                    badges.push('<span class="badge badge-warning">No Checksum</span>');
+                } else if (r.weak_checksum) {
+                    badges.push('<span class="badge badge-warning">Weak Checksum</span>');
+                }
+                
+                if (r.mismatch_checksum) {
+                    badges.push('<span class="badge badge-error">Checksum Mismatch</span>');
+                }
+                
+                const pkg_vulns = r.vulnerabilities || [];
+                const pkg_suppressed_vulns = r.suppressed_vulnerabilities || [];
+                const is_vulnerable = pkg_vulns.length > 0;
+                const is_suppressed = pkg_suppressed_vulns.length > 0;
+                
+                let severities_list = [];
+                pkg_vulns.forEach(vid => {
+                    const v = KEVLAR_VULNERABILITY_STORE[vid];
+                    if (v && v.severity) {
+                        severities_list.push(getSeverityLevel(v.severity));
+                    }
+                });
+                const data_severities = severities_list.join(',');
+                
+                if (is_vulnerable) {
+                    let c_cnt = 0, h_cnt = 0, m_cnt = 0, l_cnt = 0, u_cnt = 0;
+                    pkg_vulns.forEach(vid => {
+                        const v = KEVLAR_VULNERABILITY_STORE[vid];
+                        if (v) {
+                            const level = getSeverityLevel(v.severity);
+                            if (level === "critical") c_cnt++;
+                            else if (level === "high") h_cnt++;
+                            else if (level === "medium") m_cnt++;
+                            else if (level === "low") l_cnt++;
+                            else u_cnt++;
+                        }
+                    });
+                    
+                    const total_v = pkg_vulns.length;
+                    const badge_html = 
+                        '<span class="badge badge-vuln-stats" title="' + total_v + ' Vulnerabilities">' +
+                            '<svg class="icon-shield" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px; vertical-align: middle;"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>' +
+                            '<span>' + total_v + ' vuls</span>' +
+                        '</span>';
+                    badges.push(badge_html);
+                    
+                    let pills = [];
+                    if (c_cnt > 0) pills.push('<span class="sev-pill sev-c">' + c_cnt + ' C</span>');
+                    if (h_cnt > 0) pills.push('<span class="sev-pill sev-h">' + h_cnt + ' H</span>');
+                    if (m_cnt > 0) pills.push('<span class="sev-pill sev-m">' + m_cnt + ' M</span>');
+                    if (l_cnt > 0) pills.push('<span class="sev-pill sev-l">' + l_cnt + ' L</span>');
+                    if (u_cnt > 0) pills.push('<span class="sev-pill sev-u">' + u_cnt + ' U</span>');
+                    
+                    if (pills.length > 0) {
+                        badges.push('<div class="vuln-severity-pills">' + pills.join('') + '</div>');
+                    }
+                }
+                
+                if (is_suppressed) {
+                    badges.push('<span class="badge badge-muted">' + pkg_suppressed_vulns.length + ' Suppressed</span>');
+                }
+                
+                let vuln_details_html = '';
+                if (is_vulnerable && VULS_ENABLED) {
+                    vuln_details_html += '<div class="section-title">Active Vulnerabilities</div>';
+                    
+                    const severity_order = {
+                        "critical": 4,
+                        "high": 3,
+                        "medium": 2,
+                        "low": 1,
+                        "unknown": 0
+                    };
+                    
+                    const sorted_vulns = [...pkg_vulns].sort((a_id, b_id) => {
+                        const a = KEVLAR_VULNERABILITY_STORE[a_id];
+                        const b = KEVLAR_VULNERABILITY_STORE[b_id];
+                        const a_sev = a ? getSeverityLevel(a.severity) : "unknown";
+                        const b_sev = b ? getSeverityLevel(b.severity) : "unknown";
+                        return (severity_order[b_sev] || 0) - (severity_order[a_sev] || 0);
+                    });
+                    
+                    sorted_vulns.forEach(vid => {
+                        const v = KEVLAR_VULNERABILITY_STORE[vid];
+                        if (!v) return;
+                        
+                        const severity = v.severity;
+                        const summary = v.summary;
+                        const details = v.details || "";
+                        
+                        const vid_esc = escapeHtml(vid);
+                        const severity_esc = escapeHtml(severity);
+                        const summary_esc = escapeHtml(summary);
+                        const details_esc = escapeHtml(details);
+                        
+                        const sev_lower = getSeverityLevel(severity);
+                        const sev_badge_class = 'sev-' + escapeHtml(sev_lower);
+                        
+                        let cvss_html = '';
+                        // severity is now always a normalized text label (critical/high/medium/low/unknown)
+                        const sev_badge_html = '<span class="sev-badge ' + sev_badge_class + '">' + escapeHtml((sev_lower || 'unknown').toUpperCase()) + '</span>';
+                        
+                        vuln_details_html += 
+                            '<div class="vuln-item">' +
+                                '<div class="vuln-header">' +
+                                    '<span class="vuln-id">' + vid_esc + '</span>' +
+                                '</div>' +
+                                cvss_html +
+                                '<div style="margin-top: 4px; margin-bottom: 8px;">' +
+                                    sev_badge_html +
+                                '</div>' +
+                                '<div class="vuln-summary">' + summary_esc + '</div>' +
+                                (details ? '<pre class="vuln-details">' + details_esc + '</pre>' : '') +
+                            '</div>';
+                    });
+                }
+                
+                let suppressed_details_html = '';
+                if (is_suppressed) {
+                    suppressed_details_html += '<div class="section-title">Suppressed Vulnerabilities (Ignored)</div>';
+                    pkg_suppressed_vulns.forEach(sv => {
+                        const vid = sv.id;
+                        const v_info = KEVLAR_VULNERABILITY_STORE[vid] || {};
+                        const summary = v_info.summary || sv.summary || "";
+                        const reason = sv.suppressed_reason || "No reason provided";
+                        const justification = sv.justification || "N/A";
+                        const expires_at = sv.expires_at || "N/A";
+                        const approved_by = sv.approved_by || "";
+                        
+                        const vid_esc = escapeHtml(vid);
+                        const summary_esc = escapeHtml(summary);
+                        const reason_esc = escapeHtml(reason);
+                        const justification_esc = escapeHtml(justification);
+                        const expires_at_esc = escapeHtml(expires_at);
+                        const approved_by_esc = escapeHtml(approved_by);
+                        
+                        const approved_by_html = approved_by_esc ? '<div style="margin-top: 4px; font-size: 12.5px; padding: 0 4px; color: var(--text-muted);"><strong>Approved By:</strong> ' + approved_by_esc + '</div>' : '';
+                        
+                        suppressed_details_html += 
+                            '<div class="suppressed-item">' +
+                                '<div class="vuln-header">' +
+                                    '<span class="vuln-id">' + vid_esc + '</span>' +
+                                    '<span class="suppressed-label">Ignored</span>' +
+                                '</div>' +
+                                '<div class="vuln-summary">' + summary_esc + '</div>' +
+                                '<div class="suppressed-reason"><strong>Reason:</strong> ' + reason_esc + '</div>' +
+                                '<div style="margin-top: 6px; font-size: 12.5px; padding: 0 4px; color: var(--text-muted);">' +
+                                    '<strong>Justification:</strong> ' + justification_esc +
+                                '</div>' +
+                                '<div style="margin-top: 4px; font-size: 12.5px; padding: 0 4px; color: var(--text-muted);">' +
+                                    '<strong>Expires At:</strong> ' + expires_at_esc +
+                                '</div>' +
+                                approved_by_html +
+                            '</div>';
+                    });
+                }
+                
+                let required_by_html = '';
+                const required_by = r.required_by || [];
+                const is_direct = (declared && dep_type !== 'Transitive');
+                if (required_by.length > 0 && !is_direct) {
+                    const required_by_esc = required_by.map(rb => escapeHtml(rb));
+                    required_by_html = 
+                        '<div class="required-by-section">' +
+                            '<strong>Required by:</strong> ' + required_by_esc.join(', ') +
+                        '</div>';
+                }
+                
+                let notes_warnings_html = '';
+                let notes_warnings_list = [];
+                if (is_deprecated) {
+                    const msg = typeof is_deprecated === 'string' ? is_deprecated : "This package has been deprecated.";
+                    notes_warnings_list.push('<div class="note-warning-item"><span class="note-warning-icon">🚫</span> <div><strong>Deprecation Warning:</strong> ' + escapeHtml(msg) + '</div></div>');
+                }
+                if (error) {
+                    notes_warnings_list.push('<div class="note-warning-item"><span class="note-warning-icon">❌</span> <div><strong>Error:</strong> ' + error_esc + '</div></div>');
+                }
+                if (r.missing_checksum) {
+                    notes_warnings_list.push('<div class="note-warning-item"><span class="note-warning-icon">⚠️</span> <div><strong>Security Warning:</strong> Missing integrity checksum in lockfile</div></div>');
+                } else if (r.weak_checksum) {
+                    notes_warnings_list.push('<div class="note-warning-item"><span class="note-warning-icon">⚠️</span> <div><strong>Security Warning:</strong> Weak checksum (SHA-1) in lockfile</div></div>');
+                }
+                if (r.mismatch_checksum) {
+                    notes_warnings_list.push('<div class="note-warning-item"><span class="note-warning-icon">❌</span> <div><strong>INTEGRITY MISMATCH:</strong> Lockfile checksum does not match official registry checksum!</div></div>');
+                }
+                
+                if (notes_warnings_list.length > 0) {
+                    notes_warnings_html = 
+                        '<div class="notes-warnings-section">' +
+                            '<div class="section-title-inline">' +
+                                '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>' +
+                                ' Notes & Warnings' +
+                            '</div>' +
+                            '<div class="notes-warnings-body">' +
+                                notes_warnings_list.join('\\n') +
+                            '</div>' +
+                        '</div>';
+                }
+                
+                let ai_button_html = '';
+                const requires_attention = (['major', 'minor', 'patch', 'minor-major', 'patch-major'].includes(status)) || is_deprecated || is_vulnerable;
+                if (requires_attention) {
+                    ai_button_html = '<button class="btn-ai-prompt" onclick="copiarPromptRemediacionByIndex(' + i + '); event.stopPropagation();">📋 AI Prompt</button>';
+                }
+                
+                let remediation_button_html = '';
+                if (r.remediation && is_direct) {
+                    remediation_button_html = 
+                        '<div class="remediation-section" style="margin-top: 12px; border-top: 1px solid var(--border-color); padding-top: 10px; margin-bottom: 12px;">' +
+                            '<div style="font-size: 12px; font-weight: 700; color: var(--success); margin-bottom: 8px;">Remediation:</div>' +
+                            '<div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">' +
+                                '<button class="btn-remediation" onclick="openRemediationModalByIndex(' + i + '); event.stopPropagation();">' +
+                                    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;">' +
+                                        '<path d="M12 20h9"></path>' +
+                                        '<path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>' +
+                                    '</svg>' +
+                                    'Show suggested change' +
+                                '</button>' +
+                                ai_button_html +
+                            '</div>' +
+                        '</div>';
+                } else if (ai_button_html) {
+                    remediation_button_html = 
+                        '<div class="remediation-section" style="margin-top: 12px; border-top: 1px solid var(--border-color); padding-top: 10px; margin-bottom: 12px;">' +
+                            '<div style="font-size: 12px; font-weight: 700; color: var(--success); margin-bottom: 8px;">Remediation Support:</div>' +
+                            ai_button_html +
+                        '</div>';
+                }
+                
+                let changelog_html = '';
+                if (status === "major" || status === "minor-major" || status === "patch-major") {
+                    const compare_url = r.compare_url;
+                    const releases_url = r.releases_url;
+                    let buttons = [];
+                    if (compare_url) {
+                        buttons.push('<a href="' + escapeHtml(compare_url) + '" target="_blank" class="changelog-btn">Compare Diff</a>');
+                    }
+                    if (releases_url) {
+                        buttons.push('<a href="' + escapeHtml(releases_url) + '" target="_blank" class="changelog-btn">Release Notes</a>');
+                    }
+                    if (buttons.length > 0) {
+                        changelog_html = 
+                            '<div class="changelog-section" style="margin-top: 12px; border-top: 1px solid var(--border-color); padding-top: 10px; margin-bottom: 12px;">' +
+                                '<div style="font-size: 12px; font-weight: 700; color: var(--warning); margin-bottom: 8px;">Analysis & Migration Links:</div>' +
+                                buttons.join('\\n') +
+                            '</div>';
+                    }
+                }
+                
+                htmlBuffer += 
+                    '<div class="package-card" ' +
+                         'data-name="' + name_esc + '" ' +
+                         'data-status="' + status_esc + '" ' +
+                         'data-vulnerable="' + (is_vulnerable ? 'true' : 'false') + '" ' +
+                         'data-severities="' + escapeHtml(data_severities) + '" ' +
+                         'data-suppressed="' + (is_suppressed ? 'true' : 'false') + '" ' +
+                         'data-deprecated="' + (is_deprecated ? 'true' : 'false') + '" ' +
+                         'data-error="' + (error ? 'true' : 'false') + '" ' +
+                         'data-deptype="' + dep_type_esc.toLowerCase() + '" ' +
+                         'id="pkg-' + i + '">' +
+                        '<div class="card-header" onclick="toggleDetails(' + i + ')">' +
+                            '<div class="header-left">' +
+                                '<div class="pkg-title">' +
+                                    '<span class="pkg-name">' + name_esc + '</span>' +
+                                    '<span class="pkg-type-badge">' + dep_type_esc + '</span>' + project_badge +
+                                '</div>' +
+                                '<div class="pkg-badges">' +
+                                    badges.join(' ') +
+                                '</div>' +
+                            '</div>' +
+                            '<div class="header-right">' +
+                                (function() {
+                                    const installed = r.installed;
+                                    const latest_sm = r.latest_same_major || installed;
+                                    const latest_abs = r.latest_absolute || installed;
+                                    
+                                    let declared_html = '';
+                                    if (declared_esc) {
+                                        declared_html = '<div class="version-installed" style="margin-bottom: 2px;">' +
+                                            '<span class="label">Declared:</span>' +
+                                            '<span>' + declared_esc + '</span>' +
+                                        '</div>';
+                                    }
+                                    
+                                    let versions_html = '<div class="pkg-versions">' +
+                                        declared_html +
+                                        '<div class="version-installed">' +
+                                            '<span class="label">Installed:</span>' +
+                                            '<span>v' + escapeHtml(installed) + '</span>' +
+                                        '</div>' +
+                                        '<div class="version-chips">';
+                                    
+                                    if (status === 'up-to-date' || status === 'local') {
+                                        versions_html += 
+                                            '<span class="v-chip v-chip-ok">' +
+                                                '<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 3px;"><polyline points="20 6 9 17 4 12"></polyline></svg>' +
+                                                'Up to date' +
+                                            '</span>';
+                                    } else {
+                                        // Safe update available (minor or patch)
+                                        if ((status.includes('minor') || status.includes('patch')) && latest_sm !== installed) {
+                                            versions_html += 
+                                                '<span class="v-chip v-chip-safe" title="Safe update within the same major version">' +
+                                                    '<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 3px;"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>' +
+                                                    'Safe: v' + escapeHtml(latest_sm) +
+                                                '</span>';
+                                        }
+                                        // Major update available (requires upgrade to new major)
+                                        if (status.includes('major') && latest_abs !== installed) {
+                                            versions_html += 
+                                                '<span class="v-chip v-chip-major" title="Major update with potential breaking changes">' +
+                                                    '<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 3px;"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path></svg>' +
+                                                    'Major: v' + escapeHtml(latest_abs) +
+                                                '</span>';
+                                        }
+                                    }
+                                    
+                                    versions_html += '</div></div>';
+                                    return versions_html;
+                                })() +
+                                '<svg class="chevron" id="chevron-' + i + '" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+                                    '<polyline points="6 9 12 15 18 9"></polyline>' +
+                                    '</svg>' +
+                            '</div>' +
+                        '</div>' +
+                        '<div class="card-details" id="detail-' + i + '" style="display: none;">' +
+                            required_by_html +
+                            notes_warnings_html +
+                            changelog_html +
+                            remediation_button_html +
+                            vuln_details_html +
+                            suppressed_details_html +
+                        '</div>' +
+                    '</div>';
+            });
+            
+            container.innerHTML = htmlBuffer;
+        }
+        
+        function getSeverityLevel(severity) {
+            if (!severity) return 'unknown';
+            const s = severity.toLowerCase();
+            if (s.includes('critical')) return 'critical';
+            if (s.includes('high')) return 'high';
+            if (s.includes('medium')) return 'medium';
+            if (s.includes('low')) return 'low';
+            return 'unknown';
+        }
+        
+        function openRemediationModalByIndex(i) {
+            const r = KEVLAR_REPORT_PACKAGES[i];
+            if (r && r.remediation) {
+                openRemediationModal(r.remediation);
+            }
+        }
+        
+        function escapeJsString(str) {
+            if (!str) return '';
+            return str.toString()
+                      .replace(/\\\\/g, '\\\\\\\\')
+                      .replace(/'/g, "\\\\'")
+                      .replace(/"/g, '\\\\"')
+                      .replace(/\\n/g, '\\\\n')
+                      .replace(/\\r/g, '\\\\r');
+        }
+        
+        function copiarPromptRemediacionByIndex(i) {
+            const r = KEVLAR_REPORT_PACKAGES[i];
+            const name = r.name;
+            const status = r.status;
+            const is_deprecated = r.deprecated;
+            const pkg_vulns = r.vulnerabilities || [];
+            const is_vulnerable = pkg_vulns.length > 0;
+            const required_by = r.required_by || [];
+            
+            let alert_types = [];
+            let details_parts = [];
+            if (is_vulnerable) {
+                alert_types.push("Vulnerability");
+                let vuln_strings = [];
+                pkg_vulns.forEach(vid => {
+                    const v = KEVLAR_VULNERABILITY_STORE[vid];
+                    if (v) {
+                        vuln_strings.push(vid + ': ' + (v.summary || ''));
+                    }
+                });
+                details_parts.push("Vulnerabilities: " + vuln_strings.join('; '));
+            }
+            if (is_deprecated) {
+                alert_types.push("Deprecation");
+                const dep_msg = typeof is_deprecated === 'string' ? is_deprecated : "This package has been deprecated.";
+                details_parts.push("Deprecation Warning: " + dep_msg);
+            }
+            if (['major', 'minor', 'patch', 'minor-major', 'patch-major'].includes(status)) {
+                alert_types.push("Outdated (" + status.charAt(0).toUpperCase() + status.slice(1) + ")");
+                details_parts.push("Outdated: " + status.toUpperCase() + " update available (Latest: " + r.latest + ")");
+            }
+            
+            const alert_type = alert_types.join(', ');
+            const details_str = details_parts.join(' | ');
+            
+            const tech_val = r.technology || "";
+            const tech_map = {
+                "npm": "Node.js / npm",
+                "pip": "Python / pip",
+                "nuget": ".NET / NuGet",
+                "php": "PHP / Composer",
+                "maven": "Java / Maven",
+                "go": "Go",
+                "rust": "Rust / Crates.io",
+                "ruby": "Ruby / RubyGems",
+                "gradle": "Java / Gradle",
+                "android": "Android / Gradle"
+            };
+            const ecosystem_name = tech_map[tech_val.toLowerCase()] || tech_val || "Software Development";
+            const curr_ver = r.installed ? r.installed : r.declared;
+            const latest_sm = r.latest_same_major || r.latest;
+            const latest_abs = r.latest_absolute || r.latest;
+            
+            const proj_path = r.project_path || "";
+            const proj_name = proj_path ? proj_path.split(/[\\/]/).pop() || "Project" : "Project";
+            const required_by_str = required_by.join(', ');
+            
+            copiarPromptRemediacion(name, ecosystem_name, curr_ver, latest_sm, latest_abs, alert_type, details_str, proj_name, proj_path, r.dep_type, required_by_str);
+        }
+        
         // Floating toolbar logic on scroll
         document.addEventListener('DOMContentLoaded', () => {
+            renderPackages();
             const toolbar = document.querySelector('.controls-toolbar');
             const placeholder = document.querySelector('.controls-placeholder');
             const pkgList = document.querySelector('.packages-list');
@@ -7522,11 +8063,8 @@ class HTMLReportTemplateProvider:
                        .replace(/'/g, '&#039;');
         }
         
-        function openRemediationModal(btn) {
-            const dataStr = btn.getAttribute('data-remediation');
-            if (!dataStr) return;
-            
-            const info = JSON.parse(dataStr);
+        function openRemediationModal(info) {
+            if (!info) return;
             
             document.getElementById('modal-filepath').textContent = info.display_path || (info.manifest_path + ':' + info.line_number);
             
@@ -7710,6 +8248,57 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
     def js_arg(val):
         return escape_html(escape_js_string(val))
 
+    # Helper: normalize OSV severity field to simple text level
+    def normalize_severity_to_text(severity_raw: str) -> str:
+        """Convert a CVSS vector string or plain text to critical/high/medium/low/unknown."""
+        if not severity_raw:
+            return "unknown"
+        s = severity_raw.lower()
+        # Plain text labels (already normalized, e.g. from database_specific.severity)
+        if s in ("critical", "high", "medium", "moderate", "low", "unknown"):
+            return "medium" if s == "moderate" else s
+        # Fallback: check if any known severity keywords appear as words
+        import re as _re
+        if _re.search(r'\bcritical\b', s):
+            return "critical"
+        if _re.search(r'\bhigh\b', s):
+            return "high"
+        if _re.search(r'\b(medium|moderate)\b', s):
+            return "medium"
+        if _re.search(r'\blow\b', s):
+            return "low"
+        # CVSS v3/v2 vector: parse C: (Confidentiality), I: (Integrity), A: (Availability) metrics
+        # Note: string is already lowercased, so metric values are h/l/n/m
+        # Use word-boundary-like anchors to avoid /VC: matching for /C:
+        def _metric(vector, key):
+            # Match /<exact_KEY>:<value> - key must be exact (e.g. /c: not /ac: or /vc:)
+            m = _re.search(r'/' + key.lower() + r'(?=[:/])([nhml])', vector)
+            if not m:
+                # Try pattern: /KEY:VALUE where KEY followed immediately by colon
+                m = _re.search(r'(?:^|/)' + key.lower() + r':([nhml])', vector)
+            return m.group(1) if m else 'n'
+        if 'cvss:3' in s or 'cvss:2' in s:
+            c = _metric(s, 'C'); i = _metric(s, 'I'); a = _metric(s, 'A')
+            sc = _metric(s, 'S')
+            if sc == 'c' and (c == 'h' or i == 'h'):
+                return "critical"
+            if c == 'h' or i == 'h' or a == 'h':
+                return "high"
+            if c == 'l' or i == 'l' or a == 'l':
+                return "medium"
+            return "low"
+        if 'cvss:4' in s:
+            # CVSS v4 metrics: VC (Vulnerable Confidentiality), VI, VA
+            vc = _metric(s, 'VC'); vi = _metric(s, 'VI'); va = _metric(s, 'VA')
+            if vc == 'h' and vi == 'h':
+                return "critical"
+            if vc == 'h' or vi == 'h' or va == 'h':
+                return "high"
+            if vc == 'l' or vi == 'l' or va == 'l':
+                return "medium"
+            return "low"
+        return "unknown"
+
     try:
         # Calculate summary statistics
         total = len(results)
@@ -7734,7 +8323,7 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
         
         for r in results:
             for v in r.get("vulnerabilities", []):
-                level = get_severity_level(v)
+                level = normalize_severity_to_text(v.get("severity", ""))
                 if level == "critical":
                     critical += 1
                 elif level == "high":
@@ -7859,33 +8448,31 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
         elif not show_project_globally:
             project_path_header_html = f'<div>Projects: <strong>Multiple ({len(unique_project_paths)})</strong></div>'
 
-        # Sort results for HTML display: packages with higher severity vulnerabilities first
-        sorted_results = list(results)
-        if vuls_enabled:
-            severity_order = {
-                "critical": 4,
-                "high": 3,
-                "medium": 2,
-                "low": 1,
-                "unknown": 0
-            }
-            sorted_results.sort(
-                key=lambda r: (
-                    -max(severity_order.get(get_severity_level(v), 0) for v in r.get("vulnerabilities", [])) if r.get("vulnerabilities") else 1,
-                    r["name"].lower()
-                )
-            )
+        # Extract unique vulnerabilities to global store and build compact JSON packages
+        vulnerability_store = {}
+        for r in results:
+            for v in r.get("vulnerabilities", []):
+                vid = v["id"]
+                if vid not in vulnerability_store:
+                    vulnerability_store[vid] = {
+                        "severity": normalize_severity_to_text(v.get("severity", "")),
+                        "summary": v.get("summary", ""),
+                        "details": v.get("details", "")
+                    }
+            for sv in r.get("suppressed_vulnerabilities", []):
+                vid = sv["id"]
+                if vid not in vulnerability_store:
+                    vulnerability_store[vid] = {
+                        "severity": normalize_severity_to_text(sv.get("severity", "")),
+                        "summary": sv.get("summary", ""),
+                        "details": sv.get("details", "")
+                    }
 
-        # Build Packages Cards List
-        package_cards_html = []
-        for i, r in enumerate(sorted_results):
+        json_packages = []
+        for r in results:
             name = r["name"]
             declared = r["declared"]
             installed = r["installed"]
-            latest = r["latest"]
-            status = r["status"]
-            is_deprecated = r["deprecated"]
-            error = r["error"]
             
             is_direct_install = False
             if declared:
@@ -7894,14 +8481,6 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                 else:
                     is_direct_install = check_semver_satisfies(installed, declared)
             
-            name_esc = escape_html(name)
-            declared_esc = escape_html(declared) if is_direct_install else ""
-            installed_esc = escape_html(installed)
-            latest_esc = escape_html(latest)
-            status_esc = escape_html(status)
-            error_esc = escape_html(error)
-            
-            # Type detection
             dep_type = "Transitive"
             if r.get("is_engine", False):
                 dep_type = "Engine"
@@ -7914,400 +8493,66 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             if r.get("required_by") and not r.get("is_engine", False) and not is_direct_install:
                 dep_type = "Transitive"
                 
-            dep_type_esc = escape_html(dep_type)
-            
-            project_badge = ""
-            if not show_project_globally and r.get("project_path"):
-                proj_path = r["project_path"]
-                tech_val = r.get("technology", "")
-                project_badge = f'<span class="badge badge-project" style="font-family: monospace; text-transform: none; margin-left: 4px;">{escape_html(proj_path)} [{escape_html(tech_val)}]</span>'
-                    
-            badges = []
-            
-            # Status Badge
-            if error:
-                badges.append('<span class="badge badge-error">Error</span>')
-            elif status == "up-to-date":
-                badges.append('<span class="badge badge-success">Up-to-date</span>')
-            elif status == "major":
-                badges.append('<span class="badge badge-error">Major Update</span>')
-            elif status == "minor":
-                badges.append('<span class="badge badge-warning">Minor Update</span>')
-            elif status == "patch":
-                badges.append('<span class="badge badge-info">Patch Update</span>')
-            elif status == "local":
-                badges.append('<span class="badge badge-info">Verify Local</span>')
-            elif status == "minor-major":
-                badges.append('<span class="badge badge-warning">Minor Update</span>')
-                badges.append('<span class="badge badge-error">Major Update</span>')
-            elif status == "patch-major":
-                badges.append('<span class="badge badge-info">Patch Update</span>')
-                badges.append('<span class="badge badge-error">Major Update</span>')
-                
-            if is_deprecated:
-                badges.append('<span class="badge badge-depr">Deprecated</span>')
-                
-            if r.get("missing_checksum"):
-                badges.append('<span class="badge badge-warning">No Checksum</span>')
-            elif r.get("weak_checksum"):
-                badges.append('<span class="badge badge-warning">Weak Checksum</span>')
-                
-            if r.get("mismatch_checksum"):
-                badges.append('<span class="badge badge-error">Checksum Mismatch</span>')
-                
-            # Vulnerabilities count badge
-            pkg_vulns = r.get("vulnerabilities", [])
-            pkg_suppressed_vulns = r.get("suppressed_vulnerabilities", [])
-            
-            severities_list = []
-            for v in pkg_vulns:
-                sev_lower = get_severity_level(v)
-                if sev_lower:
-                    severities_list.append(sev_lower)
-            data_severities = ",".join(severities_list)
-            
-            is_vulnerable = len(pkg_vulns) > 0
-            is_suppressed = len(pkg_suppressed_vulns) > 0
-            
-            if is_vulnerable:
-                # Count severities for this specific package
-                c_cnt = 0
-                h_cnt = 0
-                m_cnt = 0
-                l_cnt = 0
-                u_cnt = 0
-                for v in pkg_vulns:
-                    level = get_severity_level(v)
-                    if level == "critical":
-                        c_cnt += 1
-                    elif level == "high":
-                        h_cnt += 1
-                    elif level == "medium":
-                        m_cnt += 1
-                    elif level == "low":
-                        l_cnt += 1
-                    else:
-                        u_cnt += 1
-                
-                def get_class(cnt, base_class):
-                    return base_class if cnt > 0 else f"{base_class} muted"
-                
-                total_v = len(pkg_vulns)
-                badge_html = (
-                    f'<span class="badge badge-vuln-stats" title="{total_v} Vulnerabilities">'
-                    f'<span class="lbl-vuls">vuls {total_v}</span>'
-                    f'<span class="divider">|</span>'
-                    f'<span class="{get_class(c_cnt, "sev-c")}">C {c_cnt}</span>'
-                    f'<span class="divider">|</span>'
-                    f'<span class="{get_class(h_cnt, "sev-h")}">H {h_cnt}</span>'
-                    f'<span class="divider">|</span>'
-                    f'<span class="{get_class(m_cnt, "sev-m")}">M {m_cnt}</span>'
-                    f'<span class="divider">|</span>'
-                    f'<span class="{get_class(l_cnt, "sev-l")}">L {l_cnt}</span>'
-                    f'<span class="divider">|</span>'
-                    f'<span class="{get_class(u_cnt, "sev-u")}">U {u_cnt}</span>'
-                    f'</span>'
-                )
-                badges.append(badge_html)
-            if is_suppressed:
-                badges.append(f'<span class="badge badge-muted">{len(pkg_suppressed_vulns)} Suppressed</span>')
-                
-            # Vulnerability details html
-            vuln_details_html = []
-            if is_vulnerable:
-                vuln_details_html.append('<div class="section-title">Active Vulnerabilities</div>')
-                severity_order = {
-                    "critical": 4,
-                    "high": 3,
-                    "medium": 2,
-                    "low": 1,
-                    "unknown": 0
-                }
-                sorted_pkg_vulns = sorted(pkg_vulns, key=lambda v: severity_order.get(get_severity_level(v), 0), reverse=True)
-                for v in sorted_pkg_vulns:
-                    vid = v["id"]
-                    severity = v["severity"]
-                    summary = v["summary"]
-                    details = v.get("details", "")
-                    
-                    vid_esc = escape_html(vid)
-                    severity_esc = escape_html(severity)
-                    summary_esc = escape_html(summary)
-                    details_esc = escape_html(details)
-                    
-                    sev_lower = get_severity_level(v)
-                    sev_badge_class = f"sev-{escape_html(sev_lower)}"
-                    
-                    cvss_html = ""
-                    if severity.startswith("CVSS"):
-                        cvss_val = severity[5:].strip() if severity.startswith(("CVSS:", "CVSS ")) else severity
-                        cvss_val_esc = escape_html(cvss_val)
-                        cvss_html = f'<div class="vuln-cvss" style="font-size: 11px; color: var(--text-muted); margin-bottom: 4px; font-family: monospace;"><strong>CVSS:</strong> {cvss_val_esc}</div>'
-                        sev_badge_html = f'<span class="sev-badge {sev_badge_class}">{escape_html(sev_lower.upper())}</span>'
-                    else:
-                        sev_badge_html = f'<span class="sev-badge {sev_badge_class}">{severity_esc}</span>'
-                        
-                    vuln_details_html.append(f"""
-                    <div class="vuln-item">
-                        <div class="vuln-header">
-                            <span class="vuln-id">{vid_esc}</span>
-                        </div>
-                        {cvss_html}
-                        <div style="margin-top: 4px; margin-bottom: 8px;">
-                            {sev_badge_html}
-                        </div>
-                        <div class="vuln-summary">{summary_esc}</div>
-                        {f'<pre class="vuln-details">{details_esc}</pre>' if details else ''}
-                    </div>
-                    """)
-                    
-            # Suppressed vulnerabilities html
-            suppressed_details_html = []
-            if is_suppressed:
-                suppressed_details_html.append('<div class="section-title">Suppressed Vulnerabilities (Ignored)</div>')
-                for sv in pkg_suppressed_vulns:
-                    vid = sv["id"]
-                    summary = sv["summary"]
-                    reason = sv.get("suppressed_reason", "No reason provided")
-                    justification = sv.get("justification", "N/A")
-                    expires_at = sv.get("expires_at", "N/A")
-                    approved_by = sv.get("approved_by", "")
-                    
-                    vid_esc = escape_html(vid)
-                    summary_esc = escape_html(summary)
-                    reason_esc = escape_html(reason)
-                    justification_esc = escape_html(justification)
-                    expires_at_esc = escape_html(expires_at)
-                    approved_by_esc = escape_html(approved_by)
-                    
-                    approved_by_html = f'<div style="margin-top: 4px; font-size: 12.5px; padding: 0 4px; color: var(--text-muted);"><strong>Approved By:</strong> {approved_by_esc}</div>' if approved_by else ''
-                    
-                    suppressed_details_html.append(f"""
-                    <div class="suppressed-item">
-                        <div class="vuln-header">
-                            <span class="vuln-id">{vid_esc}</span>
-                            <span class="suppressed-label">Ignored</span>
-                        </div>
-                        <div class="vuln-summary">{summary_esc}</div>
-                        <div class="suppressed-reason"><strong>Reason:</strong> {reason_esc}</div>
-                        <div style="margin-top: 6px; font-size: 12.5px; padding: 0 4px; color: var(--text-muted);">
-                            <strong>Justification:</strong> {justification_esc}
-                        </div>
-                        <div style="margin-top: 4px; font-size: 12.5px; padding: 0 4px; color: var(--text-muted);">
-                            <strong>Expires At:</strong> {expires_at_esc}
-                        </div>
-                        {approved_by_html}
-                    </div>
-                    """)
-                    
-            # Required by details
-            required_by_html = ""
-            required_by = r.get("required_by", [])
-            if required_by and not is_direct_install:
-                required_by_esc = [escape_html(rb) for rb in required_by]
-                required_by_html = f"""
-                <div class="required-by-section">
-                    <strong>Required by:</strong> {', '.join(required_by_esc)}
-                </div>
-                """
-                
-            notes_warnings_html = ""
-            notes_warnings_list = []
-            if is_deprecated:
-                msg = is_deprecated if isinstance(is_deprecated, str) else "This package has been deprecated."
-                notes_warnings_list.append(f'<div class="note-warning-item"><span class="note-warning-icon">🚫</span> <div><strong>Deprecation Warning:</strong> {escape_html(msg)}</div></div>')
-            if error:
-                notes_warnings_list.append(f'<div class="note-warning-item"><span class="note-warning-icon">❌</span> <div><strong>Error:</strong> {error_esc}</div></div>')
-            if r.get("missing_checksum"):
-                notes_warnings_list.append('<div class="note-warning-item"><span class="note-warning-icon">⚠️</span> <div><strong>Security Warning:</strong> Missing integrity checksum in lockfile</div></div>')
-            elif r.get("weak_checksum"):
-                notes_warnings_list.append('<div class="note-warning-item"><span class="note-warning-icon">⚠️</span> <div><strong>Security Warning:</strong> Weak checksum (SHA-1) in lockfile</div></div>')
-            
-            if r.get("mismatch_checksum"):
-                notes_warnings_list.append('<div class="note-warning-item"><span class="note-warning-icon">❌</span> <div><strong>INTEGRITY MISMATCH:</strong> Lockfile checksum does not match official registry checksum!</div></div>')
-            
-            if notes_warnings_list:
-                notes_warnings_items = "\n".join(notes_warnings_list)
-                notes_warnings_html = f"""
-                <div class="notes-warnings-section">
-                    <div class="section-title-inline">
-                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
-                        Notes & Warnings
-                    </div>
-                    <div class="notes-warnings-body">
-                        {notes_warnings_items}
-                    </div>
-                </div>
-                """
-            
-            ai_button_html = ""
-            requires_attention = (status in ("major", "minor", "patch")) or is_deprecated or is_vulnerable
-            if requires_attention:
-                alert_types = []
-                details_parts = []
-                if is_vulnerable:
-                    alert_types.append("Vulnerability")
-                    vuln_strings = []
-                    for v in pkg_vulns:
-                        vuln_id = v.get("id", "Unknown ID")
-                        vuln_summary = v.get("summary", "")
-                        vuln_strings.append(f"{vuln_id}: {vuln_summary}")
-                    details_parts.append("Vulnerabilities: " + "; ".join(vuln_strings))
-                if is_deprecated:
-                    alert_types.append("Deprecation")
-                    dep_msg = is_deprecated if isinstance(is_deprecated, str) else "This package has been deprecated."
-                    details_parts.append(f"Deprecation Warning: {dep_msg}")
-                if status in ("major", "minor", "patch"):
-                    alert_types.append(f"Outdated ({status.capitalize()})")
-                    details_parts.append(f"Outdated: {status.upper()} update available (Latest: {latest})")
+            pkg_record = {
+                "name": name,
+                "declared": declared if is_direct_install else "",
+                "installed": installed,
+                "latest": r["latest"],
+                "latest_same_major": r.get("latest_same_major"),
+                "latest_absolute": r.get("latest_absolute"),
+                "status": r["status"],
+                "deprecated": r["deprecated"],
+                "error": r["error"],
+                "missing_checksum": r.get("missing_checksum", False),
+                "weak_checksum": r.get("weak_checksum", False),
+                "mismatch_checksum": r.get("mismatch_checksum", False),
+                "vulnerabilities": [v["id"] for v in r.get("vulnerabilities", [])],
+                "suppressed_vulnerabilities": [
+                    {
+                        "id": sv["id"],
+                        "suppressed_reason": sv.get("suppressed_reason", "No reason provided"),
+                        "justification": sv.get("justification", "N/A"),
+                        "expires_at": sv.get("expires_at", "N/A"),
+                        "approved_by": sv.get("approved_by", "")
+                    }
+                    for sv in r.get("suppressed_vulnerabilities", [])
+                ],
+                "required_by": r.get("required_by", []),
+                "is_engine": r.get("is_engine", False),
+                "technology": r.get("technology", ""),
+                "project_path": r.get("project_path", ""),
+                "dep_type": dep_type,
+                "remediation": r.get("remediation"),
+                "compare_url": r.get("compare_url"),
+                "releases_url": r.get("releases_url")
+            }
+            # Remove keys with None, False, empty list, or empty string to optimize JSON payload size
+            pkg_record = {k: v for k, v in pkg_record.items() if v is not None and v is not False and v != "" and v != []}
+            json_packages.append(pkg_record)
 
-                alert_type = ", ".join(alert_types)
-                details_str = " | ".join(details_parts)
-                
-                tech_val = r.get("technology", "")
-                tech_map = {
-                    "npm": "Node.js / npm",
-                    "pip": "Python / pip",
-                    "nuget": ".NET / NuGet",
-                    "php": "PHP / Composer",
-                    "maven": "Java / Maven",
-                    "go": "Go",
-                    "rust": "Rust / Crates.io",
-                    "ruby": "Ruby / RubyGems",
-                    "gradle": "Java / Gradle",
-                    "android": "Android / Gradle"
-                }
-                ecosystem_name = tech_map.get(tech_val.lower(), tech_val) if tech_val else "Software Development"
-                
-                curr_ver = installed if installed else declared
-                latest_sm = r.get("latest_same_major") or latest
-                latest_abs = r.get("latest_absolute") or latest
-                
-                proj_path = r.get("project_path") or os.getcwd()
-                abs_proj_path = os.path.abspath(proj_path)
-                proj_name = os.path.basename(abs_proj_path)
-                if not proj_name:
-                    proj_name = "Project"
-                
-                required_by_str = ", ".join(r.get("required_by", []))
-                
-                ai_button_html = f"""
-                <button class="btn-ai-prompt" onclick="copiarPromptRemediacion('{js_arg(name)}', '{js_arg(ecosystem_name)}', '{js_arg(curr_ver)}', '{js_arg(latest_sm)}', '{js_arg(latest_abs)}', '{js_arg(alert_type)}', '{js_arg(details_str)}', '{js_arg(proj_name)}', '{js_arg(abs_proj_path)}', '{js_arg(dep_type)}', '{js_arg(required_by_str)}'); event.stopPropagation();">📋 AI Prompt</button>
-                """
+        # Sort results for JSON display: packages with higher severity vulnerabilities first
+        if vuls_enabled:
+            severity_order = {
+                "critical": 4,
+                "high": 3,
+                "medium": 2,
+                "low": 1,
+                "unknown": 0
+            }
+            def get_pkg_max_severity(pkg):
+                vuln_ids = pkg.get("vulnerabilities", [])
+                sevs = [vulnerability_store[vid]["severity"] for vid in vuln_ids if vid in vulnerability_store]
+                if not sevs:
+                    return 1
+                return -max(severity_order.get(s.lower(), 0) for s in sevs)
+            json_packages.sort(key=lambda p: (get_pkg_max_severity(p), p["name"].lower()))
+        else:
+            json_packages.sort(key=lambda p: p["name"].lower())
 
-            remediation_button_html = ""
-            if r.get("remediation") and is_direct_install:
-                manifest_abs_path = r["remediation"]["manifest_path"]
-                base_dir = os.path.dirname(os.path.abspath(filepath)) if filepath else os.getcwd()
-                if not base_dir:
-                    base_dir = os.getcwd()
-                
-                try:
-                    manifest_rel_path = os.path.relpath(manifest_abs_path, base_dir)
-                except Exception:
-                    manifest_rel_path = manifest_abs_path
-                
-                if manifest_rel_path.startswith("..\\..") or manifest_rel_path.startswith("../.."):
-                    proj_p = r.get("project_path")
-                    if proj_p:
-                        try:
-                            manifest_rel_path = os.path.relpath(manifest_abs_path, proj_p)
-                            manifest_rel_path = os.path.join(os.path.basename(os.path.abspath(proj_p)), manifest_rel_path)
-                        except Exception:
-                            pass
-                
-                manifest_rel_path = manifest_rel_path.replace("\\", "/")
-                r["remediation"]["display_path"] = manifest_rel_path
-                
-                serialized_remediation = json.dumps(r["remediation"])
-                escaped_remediation = escape_html(serialized_remediation)
-                
-                remediation_button_html = f"""
-                <div class="remediation-section" style="margin-top: 12px; border-top: 1px solid var(--border-color); padding-top: 10px; margin-bottom: 12px;">
-                    <div style="font-size: 12px; font-weight: 700; color: var(--success); margin-bottom: 8px;">Remediation:</div>
-                    <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-                        <button class="btn-remediation" data-remediation="{escaped_remediation}" onclick="openRemediationModal(this); event.stopPropagation();">
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;">
-                                <path d="M12 20h9"></path>
-                                <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
-                            </svg>
-                            Show suggested change
-                        </button>
-                        {ai_button_html}
-                    </div>
-                </div>
-                """
-            elif ai_button_html:
-                remediation_button_html = f"""
-                <div class="remediation-section" style="margin-top: 12px; border-top: 1px solid var(--border-color); padding-top: 10px; margin-bottom: 12px;">
-                    <div style="font-size: 12px; font-weight: 700; color: var(--success); margin-bottom: 8px;">Remediation Support:</div>
-                    {ai_button_html}
-                </div>
-                """
-            
-            changelog_html = ""
-            if status == "major":
-                compare_url = r.get("compare_url")
-                releases_url = r.get("releases_url")
-                buttons = []
-                if compare_url:
-                    buttons.append(f'<a href="{escape_html(compare_url)}" target="_blank" class="changelog-btn">Compare Diff</a>')
-                if releases_url:
-                    buttons.append(f'<a href="{escape_html(releases_url)}" target="_blank" class="changelog-btn">Release Notes</a>')
-                if buttons:
-                    buttons_str = "\n".join(buttons)
-                    changelog_html = f"""
-                    <div class="changelog-section" style="margin-top: 12px; border-top: 1px solid var(--border-color); padding-top: 10px; margin-bottom: 12px;">
-                        <div style="font-size: 12px; font-weight: 700; color: var(--warning); margin-bottom: 8px;">Analysis & Migration Links:</div>
-                        {buttons_str}
-                    </div>
-                    """
+        escaped_packages_json = json.dumps(json_packages).replace("<", "\\u003c").replace(">", "\\u003e")
+        escaped_vulns_json = json.dumps(vulnerability_store).replace("<", "\\u003c").replace(">", "\\u003e")
 
-            package_cards_html.append(f"""
-            <div class="package-card" 
-                 data-name="{name_esc}" 
-                 data-status="{status_esc}" 
-                 data-vulnerable="{"true" if is_vulnerable else "false"}" 
-                 data-severities="{escape_html(data_severities)}"
-                 data-suppressed="{"true" if is_suppressed else "false"}"
-                 data-deprecated="{"true" if is_deprecated else "false"}"
-                 data-error="{"true" if error else "false"}"
-                 data-deptype="{dep_type_esc.lower()}"
-                 id="pkg-{i}">
-                <div class="card-header" onclick="toggleDetails({i})">
-                    <div class="header-left">
-                        <div class="pkg-title">
-                            <span class="pkg-name">{name_esc}</span>
-                            <span class="pkg-type-badge">{dep_type_esc}</span>{project_badge}
-                        </div>
-                        <div class="pkg-badges">
-                            {" ".join(badges)}
-                        </div>
-                    </div>
-                    <div class="header-right">
-                        <div class="pkg-versions">
-                            {f'<span class="version-item"><span class="label">Declared:</span> {declared_esc}</span>' if declared_esc else ''}
-                            <span class="version-item"><span class="label">Installed:</span> {installed_esc if installed_esc else declared_esc}</span>
-                            <span class="version-item"><span class="label">Latest:</span> {latest_esc}</span>
-                        </div>
-                        <svg class="chevron" id="chevron-{i}" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <polyline points="6 9 12 15 18 9"></polyline>
-                        </svg>
-                    </div>
-                </div>
-                <div class="card-details" id="detail-{i}">
-                    {required_by_html}
-                    {notes_warnings_html}
-                    {changelog_html}
-                    {remediation_button_html}
-                    {"".join(vuln_details_html)}
-                    {"".join(suppressed_details_html)}
-                </div>
-            </div>
-            """)
-
-        # HTML Master Template
-                # HTML Master Template rendering
+        # HTML Master Template rendering
         template_str = HTMLReportTemplateProvider.get_template()
         template = string.Template(template_str)
         
@@ -8327,7 +8572,11 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             "scan_date": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             "project_title": project_title,
             "svg_chart": svg_chart_html,
-            "package_cards": "".join(package_cards_html)
+            "packages_json_data": escaped_packages_json,
+            "vulns_json_data": escaped_vulns_json,
+            "show_project_globally": json.dumps(show_project_globally),
+            "unique_project_paths": json.dumps(unique_project_paths),
+            "vuls_enabled": json.dumps(vuls_enabled)
         }
         
         html_content = template.safe_substitute(mapping)
