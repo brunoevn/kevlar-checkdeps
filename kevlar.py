@@ -6587,20 +6587,68 @@ class HTMLReportTemplateProvider:
         .header-right {
             display: flex;
             align-items: center;
-            gap: 25px;
+            gap: 20px;
         }
         
         .pkg-versions {
             display: flex;
             flex-direction: column;
-            gap: 4px;
-            font-size: 13px;
-            text-align: right;
+            align-items: flex-end;
+            gap: 6px;
+            font-family: 'Outfit', sans-serif;
         }
         
-        .pkg-versions .label {
-            color: var(--text-muted);
+        .version-installed {
+            font-size: 13px;
+            color: var(--text-main);
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        
+        .version-installed .label {
             font-size: 11px;
+            color: var(--text-muted);
+            font-weight: 400;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .version-chips {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 4px;
+        }
+        
+        .v-chip {
+            font-size: 11px;
+            padding: 3px 8px;
+            border-radius: 6px;
+            font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            transition: all 0.2s ease;
+        }
+        
+        .v-chip-ok {
+            background-color: rgba(16, 185, 129, 0.1);
+            border: 1px solid rgba(16, 185, 129, 0.2);
+            color: #34d399;
+        }
+        
+        .v-chip-safe {
+            background-color: rgba(14, 165, 233, 0.1);
+            border: 1px solid rgba(14, 165, 233, 0.2);
+            color: #38bdf8;
+        }
+        
+        .v-chip-major {
+            background-color: rgba(245, 158, 11, 0.1);
+            border: 1px solid rgba(245, 158, 11, 0.2);
+            color: #fbbf24;
         }
         
         .chevron {
@@ -7558,11 +7606,55 @@ class HTMLReportTemplateProvider:
                                 '</div>' +
                             '</div>' +
                             '<div class="header-right">' +
-                                '<div class="pkg-versions">' +
-                                    (declared_esc ? '<span class="version-item"><span class="label">Declared:</span> ' + declared_esc + '</span>' : '') +
-                                    '<span class="version-item"><span class="label">Installed:</span> ' + (installed_esc ? installed_esc : declared_esc) + '</span>' +
-                                    '<span class="version-item"><span class="label">Latest:</span> ' + latest_esc + '</span>' +
-                                '</div>' +
+                                (function() {
+                                    const installed = r.installed;
+                                    const latest_sm = r.latest_same_major || installed;
+                                    const latest_abs = r.latest_absolute || installed;
+                                    
+                                    let declared_html = '';
+                                    if (declared_esc) {
+                                        declared_html = '<div class="version-installed" style="margin-bottom: 2px;">' +
+                                            '<span class="label">Declared:</span>' +
+                                            '<span>' + declared_esc + '</span>' +
+                                        '</div>';
+                                    }
+                                    
+                                    let versions_html = '<div class="pkg-versions">' +
+                                        declared_html +
+                                        '<div class="version-installed">' +
+                                            '<span class="label">Installed:</span>' +
+                                            '<span>v' + escapeHtml(installed) + '</span>' +
+                                        '</div>' +
+                                        '<div class="version-chips">';
+                                    
+                                    if (status === 'up-to-date' || status === 'local') {
+                                        versions_html += 
+                                            '<span class="v-chip v-chip-ok">' +
+                                                '<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 3px;"><polyline points="20 6 9 17 4 12"></polyline></svg>' +
+                                                'Up to date' +
+                                            '</span>';
+                                    } else {
+                                        // Safe update available (minor or patch)
+                                        if ((status.includes('minor') || status.includes('patch')) && latest_sm !== installed) {
+                                            versions_html += 
+                                                '<span class="v-chip v-chip-safe" title="Safe update within the same major version">' +
+                                                    '<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 3px;"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>' +
+                                                    'Safe: v' + escapeHtml(latest_sm) +
+                                                '</span>';
+                                        }
+                                        // Major update available (requires upgrade to new major)
+                                        if (status.includes('major') && latest_abs !== installed) {
+                                            versions_html += 
+                                                '<span class="v-chip v-chip-major" title="Major update with potential breaking changes">' +
+                                                    '<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 3px;"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path></svg>' +
+                                                    'Major: v' + escapeHtml(latest_abs) +
+                                                '</span>';
+                                        }
+                                    }
+                                    
+                                    versions_html += '</div></div>';
+                                    return versions_html;
+                                })() +
                                 '<svg class="chevron" id="chevron-' + i + '" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
                                     '<polyline points="6 9 12 15 18 9"></polyline>' +
                                     '</svg>' +
