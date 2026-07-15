@@ -4857,83 +4857,75 @@ def parse_libs_versions_toml(filepath):
         return dependencies
         
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            lines = f.readlines()
+        with open(filepath, "rb") as f:
+            data = tomllib.load(f)
             
         versions = {}
-        in_versions = False
-        in_libraries = False
-        
-        for line in lines:
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-                
-            if stripped.startswith("[versions]"):
-                in_versions = True
-                in_libraries = False
-                continue
-            elif stripped.startswith("[libraries]"):
-                in_libraries = True
-                in_versions = False
-                continue
-            elif stripped.startswith("["):
-                in_versions = False
-                in_libraries = False
-                continue
-                
-            if in_versions:
-                if "=" in stripped:
-                    parts = stripped.split("=", 1)
-                    var_name = parts[0].strip().strip('"').strip("'")
-                    var_val = parts[1].strip().strip('"').strip("'")
-                    versions[var_name] = var_val
-            elif in_libraries:
-                if "=" in stripped:
-                    parts = stripped.split("=", 1)
-                    _alias = parts[0].strip().strip('"').strip("'")
-                    val = parts[1].strip()
-                    
-                    # Case 1: Simple string "group:name:version"
-                    if val.startswith('"') or val.startswith("'"):
-                        val_str = val.strip('"').strip("'")
-                        m = val_str.split(":")
-                        if len(m) >= 3:
-                            group = m[0].strip()
-                            name = m[1].strip()
-                            ver = m[2].strip()
-                            dependencies[f"{group}:{name}"] = ver
-                    # Case 2: Inline table { ... }
-                    elif val.startswith("{") and val.endswith("}"):
-                        group = ""
-                        name = ""
-                        ver = ""
+        raw_versions = data.get("versions", {})
+        if isinstance(raw_versions, dict):
+            for k, v in raw_versions.items():
+                if isinstance(v, str):
+                    versions[k] = v
+                elif isinstance(v, dict):
+                    for key in ("require", "prefer", "strictly"):
+                        if key in v:
+                            versions[k] = v[key]
+                            break
+                    else:
+                        versions[k] = "*"
                         
-                        module_match = re.search(r'module\s*=\s*["\']([^"\']+)["\']', val)
-                        group_match = re.search(r'group\s*=\s*["\']([^"\']+)["\']', val)
-                        name_match = re.search(r'name\s*=\s*["\']([^"\']+)["\']', val)
-                        version_match = re.search(r'version\s*=\s*["\']([^"\']+)["\']', val)
-                        ref_match = re.search(r'version\.ref\s*=\s*["\']([^"\']+)["\']', val)
-                        
-                        if module_match:
-                            mod = module_match.group(1).split(":")
-                            if len(mod) >= 2:
-                                group = mod[0].strip()
-                                name = mod[1].strip()
-                        else:
-                            if group_match:
-                                group = group_match.group(1).strip()
-                            if name_match:
-                                name = name_match.group(1).strip()
-                                
-                        if version_match:
-                            ver = version_match.group(1).strip()
-                        elif ref_match:
-                            ref = ref_match.group(1).strip()
-                            ver = versions.get(ref, "*")
+        libraries = data.get("libraries", {})
+        if isinstance(libraries, dict):
+            for alias, val in libraries.items():
+                group = ""
+                name = ""
+                ver = "*"
+                
+                if isinstance(val, str):
+                    parts = val.split(":")
+                    if len(parts) >= 2:
+                        group = parts[0].strip()
+                        name = parts[1].strip()
+                        ver = parts[2].strip() if len(parts) > 2 else "*"
+                elif isinstance(val, dict):
+                    if "module" in val:
+                        module_val = val["module"]
+                        if isinstance(module_val, str):
+                            m_parts = module_val.split(":")
+                            if len(m_parts) >= 2:
+                                group = m_parts[0].strip()
+                                name = m_parts[1].strip()
+                    else:
+                        g_val = val.get("group")
+                        n_val = val.get("name")
+                        if isinstance(g_val, str):
+                            group = g_val.strip()
+                        if isinstance(n_val, str):
+                            name = n_val.strip()
                             
-                        if group and name:
-                            dependencies[f"{group}:{name}"] = ver if ver else "*"
+                    # Extract version
+                    ver_val = val.get("version")
+                    if isinstance(ver_val, str):
+                        ver = ver_val
+                    elif isinstance(ver_val, dict):
+                        if "ref" in ver_val:
+                            ref_name = ver_val["ref"]
+                            ref_val = versions.get(ref_name, "*")
+                            ver = ref_val
+                        else:
+                            for key in ("require", "prefer", "strictly"):
+                                if key in ver_val:
+                                    ver = ver_val[key]
+                                    break
+                                    
+                    if ver == "*":
+                        v_ref = val.get("versionRef")
+                        if isinstance(v_ref, str):
+                            ver = versions.get(v_ref, "*")
+                            
+                if group and name:
+                    dependencies[f"{group}:{name}"] = ver if ver else "*"
+                    
     except Exception as e:
         print(f"{COLOR_YELLOW}{ICON_WARN} Warning reading libs.versions.toml: {e}{COLOR_RESET}")
         

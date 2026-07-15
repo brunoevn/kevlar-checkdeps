@@ -1302,10 +1302,13 @@ class TestKevlar(unittest.TestCase):
         content = (
             "[versions]\n"
             "groovy = \"3.0.5\"\n"
+            "junit = { require = \"4.13.2\" }\n"
             "\n"
             "[libraries]\n"
             "groovy-core = { module = \"org.codehaus.groovy:groovy\", version.ref = \"groovy\" }\n"
             "groovy-json = \"org.codehaus.groovy:groovy-json:3.0.5\"\n"
+            "junit-api = { group = \"junit\", name = \"junit\", version.ref = \"junit\" }\n"
+            "mock-lib = { group = \"org.mock\", name = \"mock\", version = { require = \"1.2.3\" } }\n"
         )
         with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".toml") as tmp:
             tmp.write(content)
@@ -1314,6 +1317,8 @@ class TestKevlar(unittest.TestCase):
             resolved = kevlar.parse_libs_versions_toml(tmp_path)
             self.assertEqual(resolved.get("org.codehaus.groovy:groovy"), "3.0.5")
             self.assertEqual(resolved.get("org.codehaus.groovy:groovy-json"), "3.0.5")
+            self.assertEqual(resolved.get("junit:junit"), "4.13.2")
+            self.assertEqual(resolved.get("org.mock:mock"), "1.2.3")
         finally:
             os.remove(tmp_path)
 
