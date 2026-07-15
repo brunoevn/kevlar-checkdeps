@@ -44,7 +44,7 @@ class SafeWriter:
 sys.stdout = SafeWriter(sys.stdout)
 sys.stderr = SafeWriter(sys.stderr)
 
-VERSION = "1.9.4"
+VERSION = "1.9.5"
 
 # External APIs Configuration
 URL_NPM_REGISTRY = "https://registry.npmjs.org/"
@@ -1194,20 +1194,88 @@ def find_npm_files(base_path):
             
     return (pkg_path if os.path.exists(pkg_path) else None, lock_path)
 
+def format_yarn_berry_checksum(checksum_val):
+    """Formats a Yarn Berry checksum to Subresource Integrity (SRI) format if possible."""
+    # Remove cache version prefix, e.g. "10c0/" or "8/" or "10/"
+    if "/" in checksum_val:
+        checksum_val = checksum_val.split("/")[-1]
+    
+    # Check for sha512:, sha256:, or sha1: prefixes
+    algo = None
+    hash_str = checksum_val
+    if checksum_val.startswith("sha512:"):
+        algo = "sha512"
+        hash_str = checksum_val[7:]
+    elif checksum_val.startswith("sha256:"):
+        algo = "sha256"
+        hash_str = checksum_val[7:]
+    elif checksum_val.startswith("sha1:"):
+        algo = "sha1"
+        hash_str = checksum_val[5:]
+    elif len(checksum_val) == 128 and all(c in string.hexdigits for c in checksum_val):
+        algo = "sha512"
+    elif len(checksum_val) == 64 and all(c in string.hexdigits for c in checksum_val):
+        algo = "sha256"
+    elif len(checksum_val) == 40 and all(c in string.hexdigits for c in checksum_val):
+        algo = "sha1"
+        
+    if algo and all(c in string.hexdigits for c in hash_str):
+        try:
+            raw_bytes = codecs.decode(hash_str.strip(), 'hex')
+            b64_bytes = base64.b64encode(raw_bytes)
+            return f"{algo}-{b64_bytes.decode('utf-8')}"
+        except Exception:
+            pass
+            
+    # Fallback to replacing colon with hyphen if it's already in sha512: or sha1: form
+    if checksum_val.startswith("sha512:"):
+        return checksum_val.replace("sha512:", "sha512-", 1)
+    if checksum_val.startswith("sha256:"):
+        return checksum_val.replace("sha256:", "sha256-", 1)
+    if checksum_val.startswith("sha1:"):
+        return checksum_val.replace("sha1:", "sha1-", 1)
+        
+    return checksum_val
+
 def parse_yarn_lock(filepath):
     """Parses yarn.lock to extract resolved versions and their parent relations.
+    Supports both Yarn Classic (v1) and Yarn Berry (v2, v3, v4).
     Returns:
         tuple: (resolved, parents, integrity) where integrity is (name, version) -> integrity_str
     """
     resolved = {}
     parents = {}
     integrity_dict = {}
+    
+    def extract_pkg_name(part):
+        if not part:
+            return ""
+        if part.startswith("@"):
+            # Scoped package, name starts with @. The separator is the next @
+            parts = part[1:].split("@", 1)
+            if len(parts) == 2:
+                name = "@" + parts[0]
+            else:
+                name = part
+        else:
+            # Non-scoped package, separator is the first @
+            parts = part.split("@", 1)
+            if len(parts) == 2:
+                name = parts[0]
+            else:
+                name = part
+        
+        if name.startswith("npm:"):
+            name = name[4:]
+        return name
+
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             current_names = []
             current_version = None
             current_integrity = None
             in_dependencies = False
+            dep_indent = None
             
             for line in f:
                 stripped = line.strip()
@@ -1216,17 +1284,27 @@ def parse_yarn_lock(filepath):
                 
                 indent_len = len(line) - len(line.lstrip())
                 
+                # Check if we are at the top level (new package definition block)
                 if indent_len == 0:
-                    if current_names and current_version:
+                    # Save the previous package block's integrity info if valid
+                    if current_names and current_version and current_integrity:
                         for name in current_names:
-                            if current_integrity:
-                                integrity_dict[(name, current_version)] = current_integrity
+                            integrity_dict[(name, current_version)] = current_integrity
+                    
+                    # Reset package block state
                     in_dependencies = False
+                    dep_indent = None
                     current_names = []
                     current_version = None
                     current_integrity = None
+                    
+                    # If this is metadata or doesn't end with a colon, skip
+                    if not line.rstrip().endswith(":") or "__metadata:" in line:
+                        continue
+                    
                     header = stripped.rstrip(":")
                     
+                    # Parse the package specifier(s) in header, split by comma respecting quotes
                     parts = []
                     current_part = []
                     in_quotes = False
@@ -1243,53 +1321,54 @@ def parse_yarn_lock(filepath):
                     
                     for part in parts:
                         part = part.strip('"')
-                        if "@" in part:
-                            if part.startswith("@"):
-                                name_part = part[1:]
-                                if "@" in name_part:
-                                    pkg_name = "@" + name_part.rsplit("@", 1)[0]
-                                else:
-                                    pkg_name = part
-                            else:
-                                pkg_name = part.rsplit("@", 1)[0]
-                        else:
-                            pkg_name = part
-                        
-                        if pkg_name.startswith("npm:"):
-                            pkg_name = pkg_name[4:]
-                        current_names.append(pkg_name)
-                        
+                        pkg_name = extract_pkg_name(part)
+                        if pkg_name:
+                            current_names.append(pkg_name)
+                            
                 elif indent_len > 0:
-                    if stripped.startswith("version ") or stripped.startswith("version:"):
-                        ver_val = stripped.split(" ", 1)[-1] if " " in stripped else stripped.split(":", 1)[-1]
-                        ver_val = ver_val.strip().strip('"').strip(':').strip()
-                        current_version = ver_val
-                        for name in current_names:
-                            resolved.setdefault(name, set()).add(ver_val)
-                    elif stripped.startswith("integrity ") or stripped.startswith("integrity:"):
-                        integrity_val = stripped.split(" ", 1)[-1] if " " in stripped else stripped.split(":", 1)[-1]
-                        integrity_val = integrity_val.strip().strip('"').strip(':').strip()
-                        current_integrity = integrity_val
-                    elif stripped.startswith("dependencies:") or stripped.startswith("optionalDependencies:") or stripped.startswith("peerDependencies:"):
-                        in_dependencies = True
-                    elif in_dependencies and indent_len >= 4:
-                        dep_line = stripped
-                        if ":" in dep_line:
-                            dep_name = dep_line.split(":", 1)[0].strip().strip('"')
+                    # Manage exiting out of dependencies block based on relative indentation
+                    if in_dependencies and dep_indent is not None and indent_len <= dep_indent:
+                        in_dependencies = False
+                        dep_indent = None
+                    
+                    if in_dependencies:
+                        # Parsing a dependency line
+                        if ":" in stripped:
+                            dep_name = stripped.split(":", 1)[0].strip().strip('"')
                         else:
-                            dep_name = dep_line.split(" ", 1)[0].strip().strip('"')
+                            dep_name = stripped.split(" ", 1)[0].strip().strip('"')
                         if dep_name:
                             for name in current_names:
                                 parents.setdefault(dep_name, set()).add(name)
-                    
-                    if indent_len == 2 and not (stripped.startswith("dependencies:") or stripped.startswith("optionalDependencies:") or stripped.startswith("peerDependencies:")):
-                        in_dependencies = False
-                        
-            if current_names and current_version:
+                    else:
+                        # Parsing properties of the current package
+                        if stripped.startswith("version ") or stripped.startswith("version:"):
+                            ver_val = stripped.split(" ", 1)[-1] if " " in stripped else stripped.split(":", 1)[-1]
+                            ver_val = ver_val.strip().strip('"').strip(':').strip()
+                            current_version = ver_val
+                            for name in current_names:
+                                resolved.setdefault(name, set()).add(ver_val)
+                                
+                        elif stripped.startswith("integrity ") or stripped.startswith("integrity:"):
+                            integrity_val = stripped.split(" ", 1)[-1] if " " in stripped else stripped.split(":", 1)[-1]
+                            integrity_val = integrity_val.strip().strip('"').strip(':').strip()
+                            current_integrity = integrity_val
+                            
+                        elif stripped.startswith("checksum:") or stripped.startswith("checksum "):
+                            checksum_val = stripped.split(" ", 1)[-1] if " " in stripped else stripped.split(":", 1)[-1]
+                            checksum_val = checksum_val.strip().strip('"').strip(':').strip()
+                            current_integrity = format_yarn_berry_checksum(checksum_val)
+                            
+                        elif any(stripped.startswith(k) for k in ("dependencies:", "optionalDependencies:", "peerDependencies:", "dependencies ", "optionalDependencies ", "peerDependencies ")):
+                            if not stripped.rstrip().endswith("{}"):
+                                in_dependencies = True
+                                dep_indent = indent_len
+                                
+            # Save the last package block's integrity info if valid
+            if current_names and current_version and current_integrity:
                 for name in current_names:
-                    if current_integrity:
-                        integrity_dict[(name, current_version)] = current_integrity
-
+                    integrity_dict[(name, current_version)] = current_integrity
+                    
         parents_clean = {k: list(v) for k, v in parents.items()}
         resolved_clean = {k: list(v) for k, v in resolved.items()}
         return resolved_clean, parents_clean, integrity_dict
@@ -1996,6 +2075,7 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
             })
         
         severity_order = {
+            "malicious": 5,
             "critical": 4,
             "high": 3,
             "medium": 2,
@@ -4980,12 +5060,25 @@ def validate_configuration_drift(results):
         decl_str = str(declared).strip()
         inst_str = str(installed).strip()
         
-        # Skip checking if declared constraint is a git URL or local path
-        if (decl_str.startswith(("git+", "git:", "http:", "https:", "ssh:", "file:")) 
+        # Skip checking if declared constraint is a git URL, local path, workspace, patch, catalog reference, etc.
+        if (decl_str.startswith(("git+", "git:", "http:", "https:", "ssh:", "file:", "workspace:", "patch:", "portal:", "link:", "catalog:")) 
             or "github:" in decl_str.lower() 
             or decl_str.startswith((".", "/"))):
             continue
             
+        # Strip Yarn Berry npm: prefix from the declared constraint
+        # e.g., npm:esbuild-wasm@^0.23.0 -> ^0.23.0
+        if decl_str.startswith("npm:"):
+            rest = decl_str[4:]
+            if rest.startswith("@"):
+                parts = rest[1:].split("@", 1)
+                if len(parts) == 2:
+                    decl_str = parts[1]
+            else:
+                parts = rest.split("@", 1)
+                if len(parts) == 2:
+                    decl_str = parts[1]
+
         # Ensure we can extract a valid semantic version from installed version
         if parse_semver(inst_str) == (0, 0, 0, 0, 0, ''):
             continue
@@ -5221,6 +5314,7 @@ def print_results_table(results, pkg_data, show_all, vuls_enabled=False):
         vuls_to_print = []
         suppressed_to_print = []
         severity_order = {
+            "malicious": 5,
             "critical": 4,
             "high": 3,
             "medium": 2,
@@ -5256,14 +5350,17 @@ def print_results_table(results, pkg_data, show_all, vuls_enabled=False):
                     # Highlight severity
                     sev_color = COLOR_GRAY
                     level = get_severity_level(vuln)
-                    if level == "critical" or level == "high":
+                    if level == "malicious":
+                        sev_color = COLOR_RED + COLOR_BOLD
+                    elif level == "critical" or level == "high":
                         sev_color = COLOR_RED
                     elif level == "medium":
                         sev_color = COLOR_YELLOW
                     elif level == "low":
                         sev_color = COLOR_CYAN
                         
-                    print(f"    - {COLOR_BOLD}{vid}{COLOR_RESET} [{sev_color}{severity}{COLOR_RESET}]: {summary}")
+                    display_severity = "MALICIOUS CODE" if level == "malicious" else severity
+                    print(f"    - {COLOR_BOLD}{vid}{COLOR_RESET} [{sev_color}{display_severity}{COLOR_RESET}]: {summary}")
                     
         if suppressed_to_print:
             print(f"\n{COLOR_BOLD}{COLOR_GRAY}{ICON_INFO} Suppressed Vulnerabilities (Ignored):{COLOR_RESET}")
@@ -5301,10 +5398,13 @@ def print_summary(results, elapsed_time, vuls_enabled=False):
         total_vulns = sum(len(r.get("vulnerabilities", [])) for r in results)
         vuln_pkg_count = sum(1 for r in results if r.get("vulnerabilities"))
         suppressed_vulns = sum(len(r.get("suppressed_vulnerabilities", [])) for r in results)
+        malicious_count = sum(1 for r in results for v in r.get("vulnerabilities", []) if get_severity_level(v) == "malicious")
         if total_vulns > 0:
             print(f"  Sec Vulnerabilities: {COLOR_RED}{COLOR_BOLD}{total_vulns}{COLOR_RESET} (in {vuln_pkg_count} packages)")
         else:
             print(f"  Sec Vulnerabilities: {COLOR_GREEN}0{COLOR_RESET}")
+        if malicious_count > 0:
+            print(f"  Malicious Code:      {COLOR_RED}{COLOR_BOLD}{malicious_count}{COLOR_RESET}")
         if suppressed_vulns > 0:
             print(f"  Suppressed Alerts:   {COLOR_GRAY}{suppressed_vulns}{COLOR_RESET}")
     print()
@@ -5419,7 +5519,7 @@ def generate_sarif_run(results):
             
             # Severity level mapping for SARIF:
             # critical/high -> error, medium -> warning, low/unknown -> note
-            if severity in ("critical", "high"):
+            if severity in ("malicious", "critical", "high"):
                 sarif_level = "error"
             elif severity == "medium":
                 sarif_level = "warning"
@@ -5678,6 +5778,7 @@ def export_markdown_report(results, pkg_data, filepath, vuls_enabled=False):
             if vuls_enabled:
                 vuls_list_total = []
                 severity_order = {
+                    "malicious": 5,
                     "critical": 4,
                     "high": 3,
                     "medium": 2,
@@ -5703,7 +5804,9 @@ def export_markdown_report(results, pkg_data, filepath, vuls_enabled=False):
                         parent_suffix = f" (via {', '.join(required_by)})" if required_by else ""
                         f.write(f"### `{name}@{ver}`{parent_suffix} ({len(v_list)} vulnerabilities)\n\n")
                         for vuln in v_list:
-                            f.write(f"- **{vuln['id']}** [{get_severity_level(vuln).upper()} - {vuln['severity']}]: {vuln['summary']}\n")
+                            level = get_severity_level(vuln)
+                            display_severity = "MALICIOUS CODE" if level == "malicious" else f"{level.upper()} - {vuln['severity']}"
+                            f.write(f"- **{vuln['id']}** [{display_severity}]: {vuln['summary']}\n")
                             if vuln.get("details"):
                                 details_escaped = vuln['details'].replace('\n', '\n> ')
                                 f.write(f"  > {details_escaped}\n\n")
@@ -6435,6 +6538,7 @@ class HTMLReportTemplateProvider:
             border-radius: 50%;
             display: inline-block;
         }
+        .mal-dot { background-color: #b91c1c; border: 1px solid #f87171; box-shadow: 0 0 6px #ef4444; }
         .crit-dot { background-color: var(--error); }
         .high-dot { background-color: #f97316; }
         .med-dot { background-color: var(--warning); }
@@ -6580,6 +6684,7 @@ class HTMLReportTemplateProvider:
             display: inline-flex;
             align-items: center;
         }
+        .sev-pill.sev-mal { background-color: rgba(127, 29, 29, 0.4); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.5); }
         .sev-pill.sev-c { background-color: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
         .sev-pill.sev-h { background-color: rgba(245, 158, 11, 0.2); color: #fb923c; border: 1px solid rgba(245, 158, 11, 0.3); }
         .sev-pill.sev-m { background-color: rgba(234, 179, 8, 0.2); color: #facc15; border: 1px solid rgba(234, 179, 8, 0.3); }
@@ -6728,6 +6833,7 @@ class HTMLReportTemplateProvider:
             display: inline-block;
         }
         
+        .sev-malicious { background-color: #7f1d1d; color: #fee2e2; border: 1px solid #ef4444; font-weight: 800; }
         .sev-critical { background-color: #ef4444; color: white; }
         .sev-high { background-color: #f97316; color: white; }
         .sev-medium { background-color: #eab308; color: black; }
@@ -7170,6 +7276,14 @@ class HTMLReportTemplateProvider:
                     </button>
                     <div class="filter-dropdown" id="dropdown-vulnerable">
                         <div class="dropdown-row">
+                            <label><input type="checkbox" value="malicious" checked onchange="filterPackages()"> <span class="dot mal-dot"></span> Malicious Code</label>
+                            <span class="row-actions">
+                                <span class="action-btn" onclick="selectOnly(event, 'malicious')">only</span>
+                                <span class="action-separator">/</span>
+                                <span class="action-btn" onclick="selectAll(event)">all</span>
+                            </span>
+                        </div>
+                        <div class="dropdown-row">
                             <label><input type="checkbox" value="critical" checked onchange="filterPackages()"> <span class="dot crit-dot"></span> Critical</label>
                             <span class="row-actions">
                                 <span class="action-btn" onclick="selectOnly(event, 'critical')">only</span>
@@ -7379,12 +7493,13 @@ class HTMLReportTemplateProvider:
                 const data_severities = severities_list.join(',');
                 
                 if (is_vulnerable) {
-                    let c_cnt = 0, h_cnt = 0, m_cnt = 0, l_cnt = 0, u_cnt = 0;
+                    let mal_cnt = 0, c_cnt = 0, h_cnt = 0, m_cnt = 0, l_cnt = 0, u_cnt = 0;
                     pkg_vulns.forEach(vid => {
                         const v = KEVLAR_VULNERABILITY_STORE[vid];
                         if (v) {
-                            const level = getSeverityLevel(v.severity);
-                            if (level === "critical") c_cnt++;
+                            const level = getSeverityLevel(v.severity || (v.id && v.id.startsWith("MAL-") ? "malicious" : ""));
+                            if (level === "malicious") mal_cnt++;
+                            else if (level === "critical") c_cnt++;
                             else if (level === "high") h_cnt++;
                             else if (level === "medium") m_cnt++;
                             else if (level === "low") l_cnt++;
@@ -7401,6 +7516,7 @@ class HTMLReportTemplateProvider:
                     badges.push(badge_html);
                     
                     let pills = [];
+                    if (mal_cnt > 0) pills.push('<span class="sev-pill sev-mal" title="Malicious Code">☠️ ' + mal_cnt + '</span>');
                     if (c_cnt > 0) pills.push('<span class="sev-pill sev-c">' + c_cnt + ' C</span>');
                     if (h_cnt > 0) pills.push('<span class="sev-pill sev-h">' + h_cnt + ' H</span>');
                     if (m_cnt > 0) pills.push('<span class="sev-pill sev-m">' + m_cnt + ' M</span>');
@@ -7421,6 +7537,7 @@ class HTMLReportTemplateProvider:
                     vuln_details_html += '<div class="section-title">Active Vulnerabilities</div>';
                     
                     const severity_order = {
+                        "malicious": 5,
                         "critical": 4,
                         "high": 3,
                         "medium": 2,
@@ -7431,8 +7548,8 @@ class HTMLReportTemplateProvider:
                     const sorted_vulns = [...pkg_vulns].sort((a_id, b_id) => {
                         const a = KEVLAR_VULNERABILITY_STORE[a_id];
                         const b = KEVLAR_VULNERABILITY_STORE[b_id];
-                        const a_sev = a ? getSeverityLevel(a.severity) : "unknown";
-                        const b_sev = b ? getSeverityLevel(b.severity) : "unknown";
+                        const a_sev = a ? getSeverityLevel(a.severity || (a_id.startsWith("MAL-") ? "malicious" : "")) : "unknown";
+                        const b_sev = b ? getSeverityLevel(b.severity || (b_id.startsWith("MAL-") ? "malicious" : "")) : "unknown";
                         return (severity_order[b_sev] || 0) - (severity_order[a_sev] || 0);
                     });
                     
@@ -7449,12 +7566,13 @@ class HTMLReportTemplateProvider:
                         const summary_esc = escapeHtml(summary);
                         const details_esc = escapeHtml(details);
                         
-                        const sev_lower = getSeverityLevel(severity);
+                        const sev_lower = getSeverityLevel(severity || (vid.startsWith("MAL-") ? "malicious" : ""));
                         const sev_badge_class = 'sev-' + escapeHtml(sev_lower);
                         
                         let cvss_html = '';
                         // severity is now always a normalized text label (critical/high/medium/low/unknown)
-                        const sev_badge_html = '<span class="sev-badge ' + sev_badge_class + '">' + escapeHtml((sev_lower || 'unknown').toUpperCase()) + '</span>';
+                        const label_text = sev_lower === "malicious" ? "☠️ MALICIOUS CODE" : (sev_lower || 'unknown').toUpperCase();
+                        const sev_badge_html = '<span class="sev-badge ' + sev_badge_class + '">' + escapeHtml(label_text) + '</span>';
                         
                         vuln_details_html += 
                             '<div class="vuln-item">' +
@@ -7696,6 +7814,7 @@ class HTMLReportTemplateProvider:
         function getSeverityLevel(severity) {
             if (!severity) return 'unknown';
             const s = severity.toLowerCase();
+            if (s.includes('malicious')) return 'malicious';
             if (s.includes('critical')) return 'critical';
             if (s.includes('high')) return 'high';
             if (s.includes('medium')) return 'medium';
@@ -8263,13 +8382,19 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
         return escape_html(escape_js_string(val))
 
     # Helper: normalize OSV severity field to simple text level
-    def normalize_severity_to_text(severity_raw: str) -> str:
-        """Convert a CVSS vector string or plain text to critical/high/medium/low/unknown."""
+    def normalize_severity_to_text(vuln: dict) -> str:
+        """Convert a CVSS vector string or plain text to malicious/critical/high/medium/low/unknown."""
+        if not vuln:
+            return "unknown"
+        vuln_id = vuln.get("id", "")
+        if vuln_id and vuln_id.startswith("MAL-"):
+            return "malicious"
+        severity_raw = vuln.get("severity", "")
         if not severity_raw:
             return "unknown"
         s = severity_raw.lower()
         # Plain text labels (already normalized, e.g. from database_specific.severity)
-        if s in ("critical", "high", "medium", "moderate", "low", "unknown"):
+        if s in ("malicious", "critical", "high", "medium", "moderate", "low", "unknown"):
             return "medium" if s == "moderate" else s
         # Fallback: check if any known severity keywords appear as words
         import re as _re
@@ -8329,6 +8454,7 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             suppressed_vulns = sum(len(r.get("suppressed_vulnerabilities", [])) for r in results)
             
         # Count severities for SVG Chart
+        malicious = 0
         critical = 0
         high = 0
         medium = 0
@@ -8337,8 +8463,10 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
         
         for r in results:
             for v in r.get("vulnerabilities", []):
-                level = normalize_severity_to_text(v.get("severity", ""))
-                if level == "critical":
+                level = normalize_severity_to_text(v)
+                if level == "malicious":
+                    malicious += 1
+                elif level == "critical":
                     critical += 1
                 elif level == "high":
                     high += 1
@@ -8349,9 +8477,10 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                 else:
                     unknown += 1
                     
-        max_count = max(critical, high, medium, low, unknown, 1)
+        max_count = max(malicious, critical, high, medium, low, unknown, 1)
         max_h = 130
         
+        mal_h = int((malicious / max_count) * max_h)
         crit_h = int((critical / max_count) * max_h)
         high_h = int((high / max_count) * max_h)
         med_h = int((medium / max_count) * max_h)
@@ -8359,12 +8488,14 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
         unkn_h = int((unknown / max_count) * max_h)
         
         base_y = 180
+        mal_y = base_y - mal_h
         crit_y = base_y - crit_h
         high_y = base_y - high_h
         med_y = base_y - med_h
         low_y = base_y - low_h
         unkn_y = base_y - unkn_h
         
+        mal_val_y = mal_y - 8 if malicious > 0 else base_y - 8
         crit_val_y = crit_y - 8 if critical > 0 else base_y - 8
         high_val_y = high_y - 8 if high > 0 else base_y - 8
         med_val_y = med_y - 8 if medium > 0 else base_y - 8
@@ -8375,52 +8506,64 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
         svg_chart = f"""
         <svg viewBox="0 0 500 220" width="100%" height="220" style="background: #111827; border-radius: 12px; border: 1px solid #374151; padding: 15px; box-sizing: border-box;">
             <!-- Grid lines -->
-            <line x1="50" y1="50" x2="450" y2="50" stroke="#374151" stroke-dasharray="3" />
-            <line x1="50" y1="115" x2="450" y2="115" stroke="#374151" stroke-dasharray="3" />
-            <line x1="50" y1="180" x2="450" y2="180" stroke="#4b5563" />
+            <line x1="30" y1="50" x2="470" y2="50" stroke="#374151" stroke-dasharray="3" />
+            <line x1="30" y1="115" x2="470" y2="115" stroke="#374151" stroke-dasharray="3" />
+            <line x1="30" y1="180" x2="470" y2="180" stroke="#4b5563" />
+            
+            <!-- MALICIOUS -->
+            <rect x="45" y="{mal_y}" width="40" height="{mal_h}" fill="url(#grad-mal)" rx="4" ry="4">
+                <animate attributeName="height" from="0" to="{mal_h}" dur="0.6s" fill="freeze" />
+                <animate attributeName="y" from="180" to="{mal_y}" dur="0.6s" fill="freeze" />
+            </rect>
+            <text x="65" y="{mal_val_y}" fill="#ef4444" font-size="10" text-anchor="middle" font-weight="bold" font-family="sans-serif">☠️ {malicious}</text>
+            <text x="65" y="198" fill="#fca5a5" font-size="9" text-anchor="middle" font-family="sans-serif" font-weight="bold">MALICIOUS</text>
             
             <!-- CRITICAL -->
-            <rect x="75" y="{crit_y}" width="40" height="{crit_h}" fill="url(#grad-crit)" rx="4" ry="4">
+            <rect x="115" y="{crit_y}" width="40" height="{crit_h}" fill="url(#grad-crit)" rx="4" ry="4">
                 <animate attributeName="height" from="0" to="{crit_h}" dur="0.6s" fill="freeze" />
                 <animate attributeName="y" from="180" to="{crit_y}" dur="0.6s" fill="freeze" />
             </rect>
-            <text x="95" y="{crit_val_y}" fill="#ef4444" font-size="11" text-anchor="middle" font-weight="bold" font-family="sans-serif">{critical}</text>
-            <text x="95" y="198" fill="#9ca3af" font-size="10" text-anchor="middle" font-family="sans-serif">CRITICAL</text>
+            <text x="135" y="{crit_val_y}" fill="#ef4444" font-size="10" text-anchor="middle" font-weight="bold" font-family="sans-serif">{critical}</text>
+            <text x="135" y="198" fill="#9ca3af" font-size="9" text-anchor="middle" font-family="sans-serif">CRITICAL</text>
             
             <!-- HIGH -->
-            <rect x="155" y="{high_y}" width="40" height="{high_h}" fill="url(#grad-high)" rx="4" ry="4">
+            <rect x="185" y="{high_y}" width="40" height="{high_h}" fill="url(#grad-high)" rx="4" ry="4">
                 <animate attributeName="height" from="0" to="{high_h}" dur="0.6s" fill="freeze" />
                 <animate attributeName="y" from="180" to="{high_y}" dur="0.6s" fill="freeze" />
             </rect>
-            <text x="175" y="{high_val_y}" fill="#f97316" font-size="11" text-anchor="middle" font-weight="bold" font-family="sans-serif">{high}</text>
-            <text x="175" y="198" fill="#9ca3af" font-size="10" text-anchor="middle" font-family="sans-serif">HIGH</text>
+            <text x="205" y="{high_val_y}" fill="#f97316" font-size="10" text-anchor="middle" font-weight="bold" font-family="sans-serif">{high}</text>
+            <text x="205" y="198" fill="#9ca3af" font-size="9" text-anchor="middle" font-family="sans-serif">HIGH</text>
             
             <!-- MEDIUM -->
-            <rect x="235" y="{med_y}" width="40" height="{med_h}" fill="url(#grad-med)" rx="4" ry="4">
+            <rect x="255" y="{med_y}" width="40" height="{med_h}" fill="url(#grad-med)" rx="4" ry="4">
                 <animate attributeName="height" from="0" to="{med_h}" dur="0.6s" fill="freeze" />
                 <animate attributeName="y" from="180" to="{med_y}" dur="0.6s" fill="freeze" />
             </rect>
-            <text x="255" y="{med_val_y}" fill="#eab308" font-size="11" text-anchor="middle" font-weight="bold" font-family="sans-serif">{medium}</text>
-            <text x="255" y="198" fill="#9ca3af" font-size="10" text-anchor="middle" font-family="sans-serif">MEDIUM</text>
+            <text x="275" y="{med_val_y}" fill="#eab308" font-size="10" text-anchor="middle" font-weight="bold" font-family="sans-serif">{medium}</text>
+            <text x="275" y="198" fill="#9ca3af" font-size="9" text-anchor="middle" font-family="sans-serif">MEDIUM</text>
             
             <!-- LOW -->
-            <rect x="315" y="{low_y}" width="40" height="{low_h}" fill="url(#grad-low)" rx="4" ry="4">
+            <rect x="325" y="{low_y}" width="40" height="{low_h}" fill="url(#grad-low)" rx="4" ry="4">
                 <animate attributeName="height" from="0" to="{low_h}" dur="0.6s" fill="freeze" />
                 <animate attributeName="y" from="180" to="{low_y}" dur="0.6s" fill="freeze" />
             </rect>
-            <text x="335" y="{low_val_y}" fill="#0ea5e9" font-size="11" text-anchor="middle" font-weight="bold" font-family="sans-serif">{low}</text>
-            <text x="335" y="198" fill="#9ca3af" font-size="10" text-anchor="middle" font-family="sans-serif">LOW</text>
+            <text x="345" y="{low_val_y}" fill="#0ea5e9" font-size="10" text-anchor="middle" font-weight="bold" font-family="sans-serif">{low}</text>
+            <text x="345" y="198" fill="#9ca3af" font-size="9" text-anchor="middle" font-family="sans-serif">LOW</text>
             
             <!-- UNKNOWN -->
             <rect x="395" y="{unkn_y}" width="40" height="{unkn_h}" fill="url(#grad-unkn)" rx="4" ry="4">
                 <animate attributeName="height" from="0" to="{unkn_h}" dur="0.6s" fill="freeze" />
                 <animate attributeName="y" from="180" to="{unkn_y}" dur="0.6s" fill="freeze" />
             </rect>
-            <text x="415" y="{unkn_val_y}" fill="#9ca3af" font-size="11" text-anchor="middle" font-weight="bold" font-family="sans-serif">{unknown}</text>
-            <text x="415" y="198" fill="#9ca3af" font-size="10" text-anchor="middle" font-family="sans-serif">UNKNOWN</text>
+            <text x="415" y="{unkn_val_y}" fill="#9ca3af" font-size="10" text-anchor="middle" font-weight="bold" font-family="sans-serif">{unknown}</text>
+            <text x="415" y="198" fill="#9ca3af" font-size="9" text-anchor="middle" font-family="sans-serif">UNKNOWN</text>
             
             <!-- Gradients Definitions -->
             <defs>
+                <linearGradient id="grad-mal" x1="0%" y1="0%" x2="0%" y2="100%">
+                    <stop offset="0%" stop-color="#fca5a5" />
+                    <stop offset="100%" stop-color="#7f1d1d" />
+                </linearGradient>
                 <linearGradient id="grad-crit" x1="0%" y1="0%" x2="0%" y2="100%">
                     <stop offset="0%" stop-color="#f87171" />
                     <stop offset="100%" stop-color="#991b1b" />
@@ -8469,7 +8612,7 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                 vid = v["id"]
                 if vid not in vulnerability_store:
                     vulnerability_store[vid] = {
-                        "severity": normalize_severity_to_text(v.get("severity", "")),
+                        "severity": normalize_severity_to_text(v),
                         "summary": v.get("summary", ""),
                         "details": v.get("details", "")
                     }
@@ -8477,7 +8620,7 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                 vid = sv["id"]
                 if vid not in vulnerability_store:
                     vulnerability_store[vid] = {
-                        "severity": normalize_severity_to_text(sv.get("severity", "")),
+                        "severity": normalize_severity_to_text(sv),
                         "summary": sv.get("summary", ""),
                         "details": sv.get("details", "")
                     }
@@ -8823,7 +8966,10 @@ def calculate_cvss4_score_approx(vector_str):
         return None
 
 def get_severity_level(vuln):
-    """Determines the severity level (critical, high, medium, low, unknown) of a vulnerability."""
+    """Determines the severity level (malicious, critical, high, medium, low, unknown) of a vulnerability."""
+    vuln_id = vuln.get("id", "")
+    if vuln_id and vuln_id.startswith("MAL-"):
+        return "malicious"
     severity = vuln.get("severity", "UNKNOWN")
     sev_upper = severity.upper()
     

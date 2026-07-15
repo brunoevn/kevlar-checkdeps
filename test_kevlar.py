@@ -108,6 +108,9 @@ class TestKevlar(unittest.TestCase):
         
         vuln_v4 = {"severity": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"}
         self.assertEqual(kevlar.get_severity_level(vuln_v4), "critical")
+
+        vuln_malicious = {"id": "MAL-2025-1234", "severity": "UNKNOWN"}
+        self.assertEqual(kevlar.get_severity_level(vuln_malicious), "malicious")
         
     def test_clean_repo_url(self):
         self.assertEqual(kevlar.clean_repo_url("git+https://github.com/foo/bar.git"), "https://github.com/foo/bar")
@@ -608,6 +611,30 @@ class TestKevlar(unittest.TestCase):
                 "installed": "N/A",
                 "status": "up-to-date",
                 "error": None
+            },
+            # 6. Workspace package - should be skipped
+            {
+                "name": "workspace-pkg",
+                "declared": "workspace:^",
+                "installed": "0.0.0-use.local",
+                "status": "up-to-date",
+                "error": None
+            },
+            # 7. Yarn Berry npm: aliased package - should be parsed and matched correctly
+            {
+                "name": "npm-alias-pkg",
+                "declared": "npm:esbuild-wasm@^0.23.0",
+                "installed": "0.23.0",
+                "status": "up-to-date",
+                "error": None
+            },
+            # 8. Catalog reference - should be skipped
+            {
+                "name": "catalog-pkg",
+                "declared": "catalog:",
+                "installed": "5.9.2",
+                "status": "up-to-date",
+                "error": None
             }
         ]
         
@@ -631,6 +658,15 @@ class TestKevlar(unittest.TestCase):
         
         # Verify missing-inst: no change
         self.assertEqual(results[4]["status"], "up-to-date")
+
+        # Verify workspace-pkg: no change
+        self.assertEqual(results[5]["status"], "up-to-date")
+
+        # Verify npm-alias-pkg: no change
+        self.assertEqual(results[6]["status"], "up-to-date")
+
+        # Verify catalog-pkg: no change
+        self.assertEqual(results[7]["status"], "up-to-date")
 
     def test_npm_transitive_same_name_no_drift(self):
         results = [
@@ -863,6 +899,45 @@ class TestKevlar(unittest.TestCase):
             self.assertIn("direct-dep", parents.get("transitive-dep", []))
             self.assertIn("transitive-dep", parents.get("opt-dep", []))
             self.assertIn("opt-dep", parents.get("peer-dep", []))
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def test_parse_yarn_lock_berry(self):
+        import tempfile
+        content = (
+            "__metadata:\n"
+            "  version: 8\n"
+            "  cacheKey: 10\n"
+            "\n"
+            "\"ansi-regex@npm:^5.0.1\":\n"
+            "  version: 5.0.1\n"
+            "  resolution: \"ansi-regex@npm:5.0.1\"\n"
+            "  checksum: 10/303a270be7b275215c0e43cf2bf114a7\n"
+            "\n"
+            "\"@babel/core@npm:^7.12.3\":\n"
+            "  version: 7.12.3\n"
+            "  resolution: \"@babel/core@npm:7.12.3\"\n"
+            "  dependencies:\n"
+            "    \"@babel/code-frame\": \"npm:^7.10.4\"\n"
+            "  checksum: sha512:47b864a7ef14cf86c8d234771234a75a0b777a88523c14c56e3039d48b67f67747b864a7ef14cf86c8d234771234a75a0b777a88523c14c56e3039d48b67f677\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".lock", encoding="utf-8") as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        try:
+            resolved, parents, integrity = kevlar.parse_yarn_lock(tmp_path)
+            self.assertEqual(resolved.get("ansi-regex"), ["5.0.1"])
+            self.assertEqual(resolved.get("@babel/core"), ["7.12.3"])
+            
+            self.assertIn("@babel/core", parents.get("@babel/code-frame", []))
+            
+            # Check checksum conversions:
+            # 10/303a270be7b275215c0e43cf2bf114a7 -> hex is 32 chars (md5/other?), stays as is since it is not standard length for sha1/sha256/sha512
+            self.assertEqual(integrity.get(("ansi-regex", "5.0.1")), "303a270be7b275215c0e43cf2bf114a7")
+            # For sha512:47b8... (128 hex chars), converted to base64 with sha512- prefix
+            # 47b864a7ef14cf86c8d234771234a45a0b777a88523c14c56e3039d48b67f67747b864a7ef14cf86c8d234771234a75a0b777a88523c14c56e3039d48b67f677 hex -> base64 is R7hkp+8Uz4bI0jR3EjSkWgt3eohSPBTFbjCZ1ItnZ3xHuGSl7xTPhsjSNHcSxKR6C3eohSPBTFbjCZ1ItnZ3xw==
+            self.assertEqual(integrity.get(("@babel/core", "7.12.3")), "sha512-R7hkp+8Uz4bI0jR3EjSnWgt3eohSPBTFbjA51Itn9ndHuGSn7xTPhsjSNHcSNKdaC3d6iFI8FMVuMDnUi2f2dw==")
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
