@@ -55,8 +55,8 @@ Designed with a modular and extensible architecture, it supports checking direct
 
 ## Installation & Requirements
 
-- **Python**: Version 3.6 or higher.
-- **Zero Dependencies**: The script relies **only on Python standard libraries** (`urllib.request`, `concurrent.futures`, `json`, `argparse`, `sys`, `re`, `unicodedata`, `xml.etree.ElementTree`). No `pip install` is required!
+- **Python**: Version 3.11 or higher.
+- **Zero Dependencies**: The script relies **only on Python standard libraries** (`tomllib`, `urllib.request`, `concurrent.futures`, `json`, `argparse`, `sys`, `re`, `unicodedata`, `xml.etree.ElementTree`). No `pip install` is required!
 
 To start, simply download/clone the workspace and run the script:
 ```powershell

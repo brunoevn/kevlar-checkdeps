@@ -4359,74 +4359,39 @@ def parse_cargo_toml(filepath):
     return dependencies
 
 def parse_cargo_lock(filepath):
-    """Parses Cargo.lock to extract all resolved package names, versions, and build parent tree."""
+    """Parses Cargo.lock to extract all resolved package names, versions, and build parent tree.
+    Supports Cargo Lockfile v4 using tomllib.
+    """
     resolved = {}
     parents = {}
     if not filepath or not os.path.exists(filepath):
         return resolved, parents
         
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            lines = f.readlines()
+        with open(filepath, "rb") as f:
+            data = tomllib.load(f)
             
-        current_pkg = None
-        current_version = None
-        in_deps = False
-        pkg_deps = []
-        pkg_definitions = []
-        
-        for line in lines:
-            line = line.strip()
-            if line == "[[package]]":
-                if current_pkg:
-                    pkg_definitions.append({
-                        "name": current_pkg,
-                        "version": current_version,
-                        "deps": pkg_deps
-                    })
-                current_pkg = None
-                current_version = None
-                pkg_deps = []
-                in_deps = False
-                continue
-                
-            if line.startswith("name ="):
-                current_pkg = line.split("=")[1].replace('"', '').strip()
-            elif line.startswith("version ="):
-                current_version = line.split("=")[1].replace('"', '').strip()
-            elif line.startswith("dependencies ="):
-                if "[" in line and "]" in line:
-                    dep_str = line.split("=")[1].strip(" []\"")
-                    if dep_str:
-                        pkg_deps = [d.strip().split()[0].replace('"', '') for d in dep_str.split(",")]
-                elif "[" in line:
-                    in_deps = True
-            elif in_deps:
-                if line == "]":
-                    in_deps = False
-                else:
-                    dep_name = line.strip(",\" ")
-                    if dep_name:
-                        pkg_deps.append(dep_name.split()[0].replace('"', ''))
-                        
-        if current_pkg:
-            pkg_definitions.append({
-                "name": current_pkg,
-                "version": current_version,
-                "deps": pkg_deps
-            })
-            
-        for pkg in pkg_definitions:
-            name = pkg["name"]
-            version = pkg["version"]
-            if name and version:
+        packages = data.get("package", [])
+        if isinstance(packages, list):
+            for pkg in packages:
+                if not isinstance(pkg, dict):
+                    continue
+                name = pkg.get("name")
+                version = pkg.get("version")
+                if not name or not version:
+                    continue
+                    
                 resolved.setdefault(name, set()).add(version)
-            
-            for dep in pkg["deps"]:
-                if dep not in parents:
-                    parents[dep] = set()
-                parents[dep].add(name)
                 
+                deps = pkg.get("dependencies", [])
+                if isinstance(deps, list):
+                    for dep in deps:
+                        if not isinstance(dep, str):
+                            continue
+                        dep_name = dep.split()[0] if dep else ""
+                        if dep_name:
+                            parents.setdefault(dep_name, set()).add(name)
+                            
     except Exception as e:
         print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Cargo.lock: {e}{COLOR_RESET}")
         

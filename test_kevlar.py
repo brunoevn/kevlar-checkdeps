@@ -1230,11 +1230,13 @@ class TestKevlar(unittest.TestCase):
     def test_parse_cargo_lock(self):
         import tempfile
         content = (
+            "version = 4\n"
+            "\n"
             "[[package]]\n"
             "name = \"serde\"\n"
             "version = \"1.0.130\"\n"
             "dependencies = [\n"
-            " \"serde_derive\",\n"
+            " \"serde_derive 1.0.130\",\n"
             "]\n"
             "\n"
             "[[package]]\n"
