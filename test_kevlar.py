@@ -133,10 +133,36 @@ class TestKevlar(unittest.TestCase):
         try:
             deps, parents = kevlar.parse_requirements_txt(temp_file)
             self.assertEqual(deps.get("requests"), "==2.25.1")
-            self.assertEqual(deps.get("django"), ">=2.0")
+            self.assertEqual(deps.get("django"), ">=2.0,<3.0")
             self.assertEqual(deps.get("gunicorn"), "==1!20.0.4")
             self.assertNotIn("-r", deps)
             self.assertEqual(parents.get("django"), ["web-framework"])
+        finally:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+
+    def test_requirements_txt_pep508_and_markers(self):
+        temp_file = "scratch_pep508_test.txt"
+        content = (
+            "requests @ https://github.com/psf/requests/archive/refs/tags/v2.26.0.tar.gz\n"
+            "urllib3[brotli]>=1.26.0; python_version >= '3.0'\n"
+            "legacy-lib==0.1.0; python_version < '2.0'\n"
+            "platform-specific==1.0.0; sys_platform == 'nonexistent-os'\n"
+            "matching-platform==1.0.0; sys_platform == '" + sys.platform + "'\n"
+        )
+        with open(temp_file, "w", encoding="utf-8") as f:
+            f.write(content)
+            
+        try:
+            deps, parents = kevlar.parse_requirements_txt(temp_file)
+            # URL dependency
+            self.assertEqual(deps.get("requests"), "@ https://github.com/psf/requests/archive/refs/tags/v2.26.0.tar.gz")
+            # Marker matching current environment should be present
+            self.assertEqual(deps.get("urllib3"), ">=1.26.0")
+            self.assertEqual(deps.get("matching-platform"), "==1.0.0")
+            # Marker not matching current environment should be absent
+            self.assertNotIn("legacy-lib", deps)
+            self.assertNotIn("platform-specific", deps)
         finally:
             if os.path.exists(temp_file):
                 os.remove(temp_file)
@@ -326,6 +352,36 @@ class TestKevlar(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             kevlar.parse_secure_xml("<root>Some long text</root>", max_expanded_size=10)
         self.assertIn("Expanded data size limit exceeded", str(ctx.exception))
+
+    def test_secure_xml_namespaces(self):
+        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
+        <pom:project xmlns:pom="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <pom:modelVersion>4.0.0</pom:modelVersion>
+            <pom:groupId>com.example</pom:groupId>
+            <pom:artifactId>my-app</pom:artifactId>
+            <pom:dependencies>
+                <pom:dependency pom:scope="compile">
+                    <pom:groupId>junit</pom:groupId>
+                    <pom:artifactId>junit</pom:artifactId>
+                </pom:dependency>
+            </pom:dependencies>
+        </pom:project>
+        """
+        root = kevlar.parse_secure_xml(xml_content)
+        self.assertIsNotNone(root)
+        self.assertEqual(root.tag, "{http://maven.apache.org/POM/4.0.0}project")
+        
+        # Test finding elements
+        model_version = root.find("{http://maven.apache.org/POM/4.0.0}modelVersion")
+        self.assertIsNotNone(model_version)
+        self.assertEqual(model_version.text, "4.0.0")
+        
+        # Test attributes
+        dependencies = root.find("{http://maven.apache.org/POM/4.0.0}dependencies")
+        self.assertIsNotNone(dependencies)
+        dep = dependencies.find("{http://maven.apache.org/POM/4.0.0}dependency")
+        self.assertIsNotNone(dep)
+        self.assertEqual(dep.attrib.get("{http://maven.apache.org/POM/4.0.0}scope"), "compile")
 
     def test_security_sanitize_error_message(self):
         import urllib.error
@@ -569,6 +625,27 @@ class TestKevlar(unittest.TestCase):
         self.assertTrue(kevlar.check_semver_satisfies("2.5.0", ">=1.2.3,<=2.0.0 || >=2.4.0,<=3.0.0"))
         self.assertFalse(kevlar.check_semver_satisfies("2.1.0", ">=1.2.3,<=2.0.0 || >=2.4.0,<=3.0.0"))
         self.assertTrue(kevlar.check_semver_satisfies("3.0.0", ">=1.2.3,<=2.0.0 || >=2.4.0,<=3.0.0"))
+
+        # Caret operator tests
+        self.assertTrue(kevlar.check_semver_satisfies("0.5.0", "^0"))
+        self.assertTrue(kevlar.check_semver_satisfies("0.5.0", "^0.x"))
+        self.assertTrue(kevlar.check_semver_satisfies("0.5.0", "^0.*"))
+        self.assertTrue(kevlar.check_semver_satisfies("0.2.7", "^0.2"))
+        self.assertFalse(kevlar.check_semver_satisfies("0.5.0", "^0.2"))
+        self.assertFalse(kevlar.check_semver_satisfies("0.0.3", "^0.0.x"))
+        self.assertFalse(kevlar.check_semver_satisfies("0.0.5", "^0.0.x"))
+        self.assertTrue(kevlar.check_semver_satisfies("0.0.3", "^0.0.3"))
+        self.assertFalse(kevlar.check_semver_satisfies("0.0.5", "^0.0.3"))
+        self.assertTrue(kevlar.check_semver_satisfies("1.2.7", "^1.2.3"))
+        self.assertFalse(kevlar.check_semver_satisfies("2.0.0", "^1.2.3"))
+
+        # Tilde operator tests
+        self.assertTrue(kevlar.check_semver_satisfies("1.2.7", "~1.2"))
+        self.assertFalse(kevlar.check_semver_satisfies("1.3.0", "~1.2"))
+        self.assertTrue(kevlar.check_semver_satisfies("1.2.7", "~1.2.3"))
+        self.assertFalse(kevlar.check_semver_satisfies("1.3.0", "~1.2.3"))
+        self.assertTrue(kevlar.check_semver_satisfies("1.8.0", "~1"))
+        self.assertFalse(kevlar.check_semver_satisfies("2.0.0", "~1"))
 
     def test_configuration_drift_validation(self):
         results = [
@@ -1110,6 +1187,49 @@ class TestKevlar(unittest.TestCase):
         finally:
             os.remove(tmp_path)
 
+    def test_parse_pyproject_toml(self):
+        import tempfile
+        toml_content = (
+            "[project]\n"
+            "name = \"my-project\"\n"
+            "dependencies = [\n"
+            "    \"requests>=2.28.0; python_version < '3.8'\",\n"
+            "    \"flask[async] >= 2.0.0\",\n"
+            "]\n"
+            "[project.optional-dependencies]\n"
+            "test = [\"pytest>=7.0.0\", \"mock\"]\n"
+            "\n"
+            "[tool.poetry.dependencies]\n"
+            "python = \"^3.9\"\n"
+            "urllib3 = \"^1.26.0\"\n"
+            "toml = { version = \"^0.10.2\", extras = [\"test\"] }\n"
+            "git-dep = { git = \"https://github.com/foo/bar.git\" }\n"
+            "\n"
+            "[tool.poetry.group.dev.dependencies]\n"
+            "black = \"^22.3.0\"\n"
+            "\n"
+            "[tool.pdm.dev-dependencies]\n"
+            "pdm-group = [\"mypy>=0.950\", \"tox\"]\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".toml") as tmp:
+            tmp.write(toml_content)
+            tmp_path = tmp.name
+        try:
+            deps = kevlar.parse_pyproject_toml(tmp_path)
+            self.assertEqual(deps.get("requests"), ">=2.28.0")
+            self.assertEqual(deps.get("flask"), ">=2.0.0")
+            self.assertEqual(deps.get("pytest"), ">=7.0.0")
+            self.assertEqual(deps.get("mock"), "*")
+            self.assertNotIn("python", deps)
+            self.assertEqual(deps.get("urllib3"), "^1.26.0")
+            self.assertEqual(deps.get("toml"), "^0.10.2")
+            self.assertEqual(deps.get("git-dep"), "*")
+            self.assertEqual(deps.get("black"), "^22.3.0")
+            self.assertEqual(deps.get("mypy"), ">=0.950")
+            self.assertEqual(deps.get("tox"), "*")
+        finally:
+            os.remove(tmp_path)
+
     def test_match_line_for_dependency(self):
         # npm / php
         self.assertTrue(kevlar.match_line_for_dependency('  "lodash": "^4.17.21"', 'lodash', 'npm'))
@@ -1169,9 +1289,21 @@ class TestKevlar(unittest.TestCase):
         content = (
             "module github.com/test/mod\n"
             "go 1.18\n"
+            "\n"
             "require (\n"
             "    github.com/gin-gonic/gin v1.7.7\n"
             "    golang.org/x/crypto v0.0.0-20220315160706-3147a52a75dd // indirect\n"
+            ")\n"
+            "\n"
+            "require github.com/google/uuid v1.4.0 // indirect\n"
+            "require github.com/original/mod v1.0.0\n"
+            "require github.com/local/mod v2.0.0\n"
+            "require github.com/replaced/block v3.0.0\n"
+            "\n"
+            "replace github.com/original/mod => github.com/fork/mod v1.1.0\n"
+            "replace github.com/local/mod => ./local/path\n"
+            "replace (\n"
+            "    github.com/replaced/block v3.0.0 => github.com/fork/block v3.1.0\n"
             ")\n"
         )
         with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".mod") as tmp:
@@ -1181,17 +1313,173 @@ class TestKevlar(unittest.TestCase):
             resolved, indirects = kevlar.parse_go_mod(tmp_path)
             self.assertEqual(resolved.get("github.com/gin-gonic/gin"), "v1.7.7")
             self.assertEqual(indirects.get("golang.org/x/crypto"), "v0.0.0-20220315160706-3147a52a75dd")
+            self.assertEqual(indirects.get("github.com/google/uuid"), "v1.4.0")
+            self.assertEqual(resolved.get("github.com/fork/mod"), "v1.1.0")
+            self.assertNotIn("github.com/original/mod", resolved)
+            self.assertEqual(resolved.get("github.com/fork/block"), "v3.1.0")
+            self.assertNotIn("github.com/replaced/block", resolved)
+            self.assertEqual(resolved.get("github.com/local/mod"), "v2.0.0")
+        finally:
+            os.remove(tmp_path)
+
+    def test_parse_go_mod_edge_cases(self):
+        import tempfile
+        content = (
+            "module example.com/my-module\n"
+            "go 1.21\n"
+            "toolchain go1.21.3\n"
+            "\n"
+            "// Comment before require block\n"
+            "require (\n"
+            "    example.com/pseudo-pkg v0.0.0-20230101000000-abcdef123456 // indirect\n"
+            "    example.com/specific-replaced-pkg v1.0.0\n"
+            ")\n"
+            "\n"
+            "exclude example.com/excluded-pkg v2.0.0\n"
+            "\n"
+            "replace example.com/specific-replaced-pkg v1.0.0 => example.com/specific-replaced-pkg v1.0.1\n"
+            "replace (\n"
+            "    example.com/another-replaced-pkg => example.com/another-fork v2.0.0-rc1\n"
+            ")\n"
+            "require example.com/another-replaced-pkg v1.5.0\n"
+            "require (\n"
+            "    // Empty require block test\n"
+            ")\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".mod") as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        try:
+            resolved, indirects = kevlar.parse_go_mod(tmp_path)
+            self.assertEqual(indirects.get("example.com/pseudo-pkg"), "v0.0.0-20230101000000-abcdef123456")
+            self.assertEqual(resolved.get("example.com/specific-replaced-pkg"), "v1.0.1")
+            self.assertEqual(resolved.get("example.com/another-fork"), "v2.0.0-rc1")
+            self.assertNotIn("example.com/another-replaced-pkg", resolved)
+        finally:
+            os.remove(tmp_path)
+
+    def test_parser_advanced_edge_cases(self):
+        import tempfile
+        import json
+        
+        # 1. Yarn Multi-specifiers and Scoped Packages
+        yarn_content = (
+            "\"@babel/core@npm:^7.12.3, @babel/core@npm:^7.12.9\":\n"
+            "  version: 7.12.9\n"
+            "  dependencies:\n"
+            "    \"@babel/code-frame\": \"npm:^7.10.4\"\n"
+            "\n"
+            "lodash@^4.17.20, lodash@^4.17.21:\n"
+            "  version \"4.17.21\"\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".lock", encoding="utf-8") as tmp:
+            tmp.write(yarn_content)
+            tmp_path = tmp.name
+        try:
+            resolved, parents, integrity = kevlar.parse_yarn_lock(tmp_path)
+            self.assertEqual(resolved.get("@babel/core"), ["7.12.9"])
+            self.assertEqual(resolved.get("lodash"), ["4.17.21"])
+            self.assertIn("@babel/core", parents.get("@babel/code-frame", []))
+        finally:
+            os.remove(tmp_path)
+            
+        # 2. PNPM Peer Dependency Brackets
+        pnpm_content = (
+            "lockfileVersion: '6.0'\n"
+            "packages:\n"
+            "  /foo@1.0.0(bar@2.0.0)(baz@3.0.0):\n"
+            "    resolution: {integrity: sha512-abc}\n"
+            "    dependencies:\n"
+            "      bar: 2.0.0\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".yaml", encoding="utf-8") as tmp:
+            tmp.write(pnpm_content)
+            tmp_path = tmp.name
+        try:
+            resolved, parents, integrity = kevlar.parse_pnpm_lock(tmp_path)
+            self.assertEqual(resolved.get("foo"), ["1.0.0"])
+        finally:
+            os.remove(tmp_path)
+
+        # 3. Gemfile.lock Multiple Sections (GEM, GIT, PATH)
+        gemfile_content = (
+            "GIT\n"
+            "  remote: https://github.com/rails/rails.git\n"
+            "  revision: 1234abcd\n"
+            "  specs:\n"
+            "    rails (6.1.4)\n"
+            "      activesupport (= 6.1.4)\n"
+            "\n"
+            "GEM\n"
+            "  remote: https://rubygems.org/\n"
+            "  specs:\n"
+            "    activesupport (6.1.4)\n"
+            "    json (2.5.1)\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".lock") as tmp:
+            tmp.write(gemfile_content)
+            tmp_path = tmp.name
+        try:
+            resolved, parents = kevlar.parse_gemfile_lock(tmp_path)
+            self.assertEqual(resolved.get("rails"), "6.1.4")
+            self.assertEqual(resolved.get("activesupport"), "6.1.4")
+            self.assertEqual(resolved.get("json"), "2.5.1")
+            self.assertIn("rails", parents.get("activesupport", []))
+        finally:
+            os.remove(tmp_path)
+
+        # 4. Gradle Lockfile Multi-Configurations
+        gradle_content = (
+            "# Gradle lockfile\n"
+            "org.slf4j:slf4j-api:1.7.30=compileClasspath,runtimeClasspath\n"
+            "org.apache.commons:commons-lang3:3.12.0=annotationProcessor,compileClasspath,runtimeClasspath\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".lockfile") as tmp:
+            tmp.write(gradle_content)
+            tmp_path = tmp.name
+        try:
+            resolved = kevlar.parse_gradle_lockfile(tmp_path)
+            self.assertEqual(resolved.get("org.slf4j:slf4j-api"), "1.7.30")
+            self.assertEqual(resolved.get("org.apache.commons:commons-lang3"), "3.12.0")
+        finally:
+            os.remove(tmp_path)
+
+        # 5. Composer lock skipping platform requirements
+        composer_data = {
+            "packages": [
+                {
+                    "name": "guzzlehttp/guzzle",
+                    "version": "v7.4.1",
+                    "require": {
+                        "php": "^7.2.5 || ^8.0",
+                        "ext-json": "*",
+                        "psr/http-client": "^1.0"
+                    }
+                }
+            ]
+        }
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json") as tmp:
+            json.dump(composer_data, tmp)
+            tmp_path = tmp.name
+        try:
+            resolved, parents = kevlar.parse_composer_lock(tmp_path)
+            self.assertEqual(resolved.get("guzzlehttp/guzzle"), ["7.4.1"])
+            self.assertIn("guzzlehttp/guzzle", parents.get("psr/http-client", []))
+            self.assertNotIn("php", parents)
+            self.assertNotIn("ext-json", parents)
         finally:
             os.remove(tmp_path)
 
     def test_parse_cargo_lock(self):
         import tempfile
         content = (
+            "version = 4\n"
+            "\n"
             "[[package]]\n"
             "name = \"serde\"\n"
             "version = \"1.0.130\"\n"
             "dependencies = [\n"
-            " \"serde_derive\",\n"
+            " \"serde_derive 1.0.130\",\n"
             "]\n"
             "\n"
             "[[package]]\n"
@@ -1257,10 +1545,13 @@ class TestKevlar(unittest.TestCase):
         content = (
             "[versions]\n"
             "groovy = \"3.0.5\"\n"
+            "junit = { require = \"4.13.2\" }\n"
             "\n"
             "[libraries]\n"
             "groovy-core = { module = \"org.codehaus.groovy:groovy\", version.ref = \"groovy\" }\n"
             "groovy-json = \"org.codehaus.groovy:groovy-json:3.0.5\"\n"
+            "junit-api = { group = \"junit\", name = \"junit\", version.ref = \"junit\" }\n"
+            "mock-lib = { group = \"org.mock\", name = \"mock\", version = { require = \"1.2.3\" } }\n"
         )
         with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".toml") as tmp:
             tmp.write(content)
@@ -1269,6 +1560,8 @@ class TestKevlar(unittest.TestCase):
             resolved = kevlar.parse_libs_versions_toml(tmp_path)
             self.assertEqual(resolved.get("org.codehaus.groovy:groovy"), "3.0.5")
             self.assertEqual(resolved.get("org.codehaus.groovy:groovy-json"), "3.0.5")
+            self.assertEqual(resolved.get("junit:junit"), "4.13.2")
+            self.assertEqual(resolved.get("org.mock:mock"), "1.2.3")
         finally:
             os.remove(tmp_path)
 
@@ -1393,7 +1686,9 @@ class TestKevlar(unittest.TestCase):
             
             kevlar.populate_remediation_recommendations(results_for_remed, temp_dir)
             
-            remed = results_for_remed[0].get("remediation")
+            remed_dict = results_for_remed[0].get("remediation")
+            self.assertIsNotNone(remed_dict)
+            remed = remed_dict["major"] or remed_dict["safe"]
             self.assertIsNotNone(remed)
             self.assertEqual(os.path.basename(remed["manifest_path"]), "package.json")
             has_custom_engine = any("my-custom-engine" in item["html"] for item in remed["current_code"])
@@ -1918,6 +2213,65 @@ class TestKevlar(unittest.TestCase):
         self.assertEqual(res[0]["latest"], "Local")
         self.assertEqual(res[0]["status"], "local")
         self.assertIsNone(res[0]["error"])
+
+    def test_generate_remediation_diff_cpm_fallback(self):
+        import tempfile
+        import shutil
+        
+        temp_dir = tempfile.mkdtemp()
+        try:
+            # 1. Project file reference without inline version (CPM active)
+            csproj_content = '<PackageReference Include="System.Text.Json" />\n'
+            csproj_path = os.path.join(temp_dir, "test.csproj")
+            with open(csproj_path, "w", encoding="utf-8") as f:
+                f.write(csproj_content)
+                
+            diff = kevlar.generate_remediation_diff(
+                csproj_path, 
+                line_index=1, 
+                declared_ver="8.0.0", 
+                latest_ver="10.0.10", 
+                tech="nuget", 
+                package_name="System.Text.Json"
+            )
+            self.assertIsNone(diff)
+            
+            # 2. Project file reference with inline version
+            csproj_with_ver = '<PackageReference Include="System.Text.Json" Version="8.0.0" />\n'
+            csproj_path_ver = os.path.join(temp_dir, "test_ver.csproj")
+            with open(csproj_path_ver, "w", encoding="utf-8") as f:
+                f.write(csproj_with_ver)
+                
+            diff_ver = kevlar.generate_remediation_diff(
+                csproj_path_ver, 
+                line_index=1, 
+                declared_ver="8.0.0", 
+                latest_ver="10.0.10", 
+                tech="nuget", 
+                package_name="System.Text.Json"
+            )
+            self.assertIsNotNone(diff_ver)
+            self.assertIn('<span class="diff-add-chunk">10.0.10</span>', diff_ver["suggested_code"][0]["html"])
+            self.assertIn("System.Text.Json", diff_ver["suggested_code"][0]["html"])
+            
+            # 3. Test find_manifest_files parent resolution for nuget props file
+            sub_dir = os.path.join(temp_dir, "src", "Project")
+            os.makedirs(sub_dir, exist_ok=True)
+            
+            sub_csproj = os.path.join(sub_dir, "test.csproj")
+            with open(sub_csproj, "w", encoding="utf-8") as f:
+                f.write(csproj_content)
+                
+            props_path = os.path.join(temp_dir, "Directory.Packages.props")
+            with open(props_path, "w", encoding="utf-8") as f:
+                f.write('<PackageVersion Include="System.Text.Json" Version="8.0.0" />\n')
+                
+            manifests = kevlar.find_manifest_files(sub_dir, "nuget")
+            self.assertIn(props_path, [os.path.abspath(m) for m in manifests])
+            self.assertIn(sub_csproj, [os.path.abspath(m) for m in manifests])
+            
+        finally:
+            shutil.rmtree(temp_dir)
 
 if __name__ == "__main__":
     unittest.main()

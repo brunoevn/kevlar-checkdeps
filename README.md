@@ -12,14 +12,14 @@ Designed with a modular and extensible architecture, it supports checking direct
 
 - **Multi-Ecosystem Support**: Audits:
   - **Node.js (`npm`) & Engines**: supporting `package.json` (including `peerDependencies` and `optionalDependencies`), `package-lock.json`, Yarn `yarn.lock` (supporting both Yarn Classic v1 and Yarn Berry v2/v3/v4 modern formats with checksum normalization), and pnpm `pnpm-lock.yaml` (supporting lockfile v5, v6, and v9). Audits declared Node.js version constraints (`engines.node`, `.nvmrc`, `.node-version`) against EOL and maintenance schedules fetched dynamically from official sources.
-  - **Python (`pip`)**: supporting `requirements.txt`, Poetry `poetry.lock` + `pyproject.toml`, Pipenv `Pipfile.lock`, and PDM `pdm.lock`.
+  - **Python (`pip`)**: supporting `requirements.txt` (with PEP 508 environment markers and direct `@` URLs), Poetry `poetry.lock` + `pyproject.toml`, Pipenv `Pipfile.lock`, and PDM `pdm.lock`.
   - **.NET (`nuget`)**: supporting C# `.csproj`, VB.NET `.vbproj`, F# `.fsproj`, Solution files (`.sln`), and Central Package Management (`Directory.Packages.props`).
   - **PHP (`php`)**: supporting `composer.json` and `composer.lock`.
   - **Java (`maven`)**: supporting multi-module `<modules>`, centralized `<dependencyManagement>`, and recursive parent POM properties/dependency inheritance.
   - **Java/Kotlin (`gradle`)**: supporting `build.gradle`, `build.gradle.kts`, `gradle.lockfile`, and Version Catalogs `libs.versions.toml`.
   - **Android (`android`)**: prioritizing Google's Maven Registry for Android libraries.
-  - **Go (`go`)**: supporting `go.mod`.
-  - **Rust (`rust`)**: supporting `Cargo.toml` and `Cargo.lock`.
+  - **Go (`go`)**: supporting `go.mod` (including module `replace` directives to accurately resolve local or overridden dependencies).
+  - **Rust (`rust`)**: supporting `Cargo.toml` and `Cargo.lock` (including native v4 lockfile formats).
   - **Ruby (`ruby`)**: supporting `Gemfile` and `Gemfile.lock`.
 - **Outdated Package Detection**: Compares installed versions against the latest versions in registries, classifying updates into `Major`, `Minor`, and `Patch` increments, as well as composite status like `Minor/Major` and `Patch/Major` when both a safe same-major update and a major version update are available.
 - **Configuration Drift Validation**: Automatically detects installed packages that violate declared semver constraint ranges, flagging them with an `error` status and detailed troubleshoot diagnostics. Supports Yarn Berry workspace dependencies (`workspace:`), alias overrides (`npm:`), patch protocols (`patch:`, `portal:`, `link:`), and central catalogs (`catalog:`), ignoring local-only/configuration protocols to eliminate false positives.
@@ -49,14 +49,16 @@ Designed with a modular and extensible architecture, it supports checking direct
   - **Dependency Scope/Type Filtering**: Filter packages dynamically by their scope (e.g., *Direct*, *Dev*, *Transitive*, *Engine*) using the **Scope** dropdown filter.
   - **Quick "only / all" Hover Controls**: Instantly isolate sub-filters or check all back on hover.
   - **Auto-closing & Smart Resetting**: Auto-closes menus when clicking outside and resets checkboxes when switching to *All* or *Clean*.
-  - **Interactive AI Remediation Prompt Helper**: Clipboard copy button (`📋 AI Prompt`) that dynamically generates high-fidelity remediation prompts (specifying same-major vs absolute updates, project scopes, transitive relations, and cleanup tasks) to easily direct LLMs.
+  - **Multi-Stage Remediation Diffs & AI Prompts**:
+    - **Visual Diff Previews**: Generates standard unified diff format views directly in the HTML report for both same-major (safe) and absolute latest (major) version upgrades.
+    - **AI Prompt Helper**: Copy-to-clipboard button (`📋 AI Prompt`) that generates context-rich LLM prompts with same-major/major suggestion details, project scopes, transitive relations, and cleanup instructions.
 
 ---
 
 ## Installation & Requirements
 
-- **Python**: Version 3.6 or higher.
-- **Zero Dependencies**: The script relies **only on Python standard libraries** (`urllib.request`, `concurrent.futures`, `json`, `argparse`, `sys`, `re`, `unicodedata`, `xml.etree.ElementTree`). No `pip install` is required!
+- **Python**: Version 3.11 or higher.
+- **Zero Dependencies**: The script relies **only on Python standard libraries** (`tomllib`, `urllib.request`, `concurrent.futures`, `json`, `argparse`, `sys`, `re`, `unicodedata`, `xml.etree.ElementTree`). No `pip install` is required!
 
 To start, simply download/clone the workspace and run the script:
 ```powershell
@@ -285,7 +287,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
 
       - name: Run Dependency Checker
         run: |
@@ -307,7 +309,7 @@ stages:
 
 dependency_scan:
   stage: test
-  image: python:3.10-slim
+  image: python:3.11-slim
   script:
     # Run audit, failing if there is at least 1 critical or 3 high vulnerabilities
     - python kevlar.py --tech nuget --path ./ --all --vuls --fail-on-vulns "critical:1,high:3" --output report.json

@@ -17,6 +17,7 @@ import urllib.request
 import urllib.error
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 import time
 from datetime import datetime, date
 import xml.etree.ElementTree as ET
@@ -26,6 +27,7 @@ import xml.parsers.expat
 import traceback
 import unicodedata
 import ctypes
+import tomllib
 
 # Safe terminal output wrapping to prevent UnicodeEncodeError on Windows
 class SafeWriter:
@@ -44,7 +46,10 @@ class SafeWriter:
 sys.stdout = SafeWriter(sys.stdout)
 sys.stderr = SafeWriter(sys.stderr)
 
-VERSION = "1.9.5"
+# Global lock to protect concurrent console writes (sys.stdout, sys.stderr, print)
+console_lock = threading.Lock()
+
+VERSION = "1.10.0"
 
 # External APIs Configuration
 URL_NPM_REGISTRY = "https://registry.npmjs.org/"
@@ -205,12 +210,24 @@ class SecureXMLBuilder:
         self.depth += 1
         if self.depth > self.max_depth:
             raise ValueError(f"XML parsing rejected: Node depth exceeds limit of {self.max_depth}")
-        self.total_size += len(name)
+        
+        if "}" in name and not name.startswith("{"):
+            name = "{" + name
+
+        processed_attrs = {}
         for k, v in attrs.items():
+            if "}" in k and not k.startswith("{"):
+                k = "{" + k
+            processed_attrs[k] = v
+
+        self.total_size += len(name)
+        for k, v in processed_attrs.items():
             self.total_size += len(k) + len(v)
+
         if self.total_size > self.max_expanded_size:
             raise ValueError("XML parsing rejected: Expanded data size limit exceeded")
-        element = ET.Element(name, attrs)
+
+        element = ET.Element(name, processed_attrs)
         if not self.stack:
             self.root = element
         else:
@@ -219,6 +236,8 @@ class SecureXMLBuilder:
 
     def end_element(self, name):
         self.depth -= 1
+        if "}" in name and not name.startswith("{"):
+            name = "{" + name
         if self.stack:
             self.stack.pop()
 
@@ -249,7 +268,7 @@ def parse_secure_xml(content, max_depth=15, max_expanded_size=10*1024*1024):
 
     content_bytes = content_str.encode("utf-8")
 
-    parser = xml.parsers.expat.ParserCreate(encoding="utf-8")
+    parser = xml.parsers.expat.ParserCreate(encoding="utf-8", namespace_separator="}")
     parser.StartElementHandler = builder.start_element
     parser.EndElementHandler = builder.end_element
     parser.CharacterDataHandler = builder.char_data
@@ -626,7 +645,7 @@ def satisfy_term(version_str, term):
         
         _, v_maj, v_min, v_pat, _, _ = parse_semver(version_str)
         
-        if ver_part.endswith(".x") or ver_part.endswith(".*"):
+        if (ver_part.endswith(".x") or ver_part.endswith(".*")) and op not in ("^", "~"):
             parts = ver_part.split(".")
             try:
                 if len(parts) == 2:
@@ -667,14 +686,47 @@ def satisfy_term(version_str, term):
                 return False
             if t_maj > 0:
                 return v_maj == t_maj
-            elif t_min > 0:
-                return v_maj == 0 and v_min == t_min
-            else:
+            
+            # Zero series caret evaluation
+            clean_ver = ver_part.strip().lower()
+            if clean_ver.startswith("v"):
+                clean_ver = clean_ver[1:]
+            if "+" in clean_ver:
+                clean_ver = clean_ver.split("+", 1)[0]
+            if "-" in clean_ver:
+                clean_ver = clean_ver.split("-", 1)[0]
+                
+            parts = [p.strip() for p in clean_ver.split(".") if p.strip()]
+            
+            is_wildcard_minor = (len(parts) >= 2 and parts[1] in ("x", "*"))
+            is_only_major_zero = (len(parts) == 1 and parts[0] == "0")
+            if is_only_major_zero or is_wildcard_minor:
+                return v_maj == 0
+                
+            is_wildcard_patch = (len(parts) >= 3 and parts[0] == "0" and parts[1] == "0" and parts[2] in ("x", "*"))
+            if is_wildcard_patch:
                 return v_maj == 0 and v_min == 0 and v_pat == t_pat
+                
+            if t_min > 0:
+                return v_maj == 0 and v_min == t_min
+                
+            return v_maj == 0 and v_min == 0 and v_pat == t_pat
+            
         elif op == "~":
-            parts_count = len(ver_part.split("."))
             if compare_versions(version_str, ver_part) < 0:
                 return False
+                
+            clean_ver = ver_part.strip().lower()
+            if clean_ver.startswith("v"):
+                clean_ver = clean_ver[1:]
+            if "+" in clean_ver:
+                clean_ver = clean_ver.split("+", 1)[0]
+            if "-" in clean_ver:
+                clean_ver = clean_ver.split("-", 1)[0]
+                
+            parts = [p.strip() for p in clean_ver.split(".") if p.strip() and p.strip() not in ("x", "*")]
+            parts_count = len(parts)
+            
             if parts_count >= 2:
                 return v_maj == t_maj and v_min == t_min
             else:
@@ -723,8 +775,9 @@ def _check_all_targets_unified(targets, check_func, label, max_workers):
         futures = {executor.submit(check_func, t): t for t in targets}
         for future in as_completed(futures):
             completed += 1
-            sys.stdout.write(f"\r{label}: {completed}/{total}... ")
-            sys.stdout.flush()
+            with console_lock:
+                sys.stdout.write(f"\r{label}: {completed}/{total}... ")
+                sys.stdout.flush()
             try:
                 res = future.result()
                 if isinstance(res, list):
@@ -736,11 +789,12 @@ def _check_all_targets_unified(targets, check_func, label, max_workers):
                 name = target_pkg.get("name", "unknown")
                 sanitized_msg = _sanitize_error_message(e, name)
                 
-                if DEBUG_MODE:
-                    print(f"\n{COLOR_RED}{ICON_ERROR} Error checking {name}: {e}{COLOR_RESET}")
-                    traceback.print_exc(file=sys.stdout)
-                else:
-                    print(f"\n{COLOR_RED}{ICON_ERROR} Error checking {name}: {sanitized_msg}{COLOR_RESET}")
+                with console_lock:
+                    if DEBUG_MODE:
+                        print(f"\n{COLOR_RED}{ICON_ERROR} Error checking {name}: {e}{COLOR_RESET}")
+                        traceback.print_exc(file=sys.stdout)
+                    else:
+                        print(f"\n{COLOR_RED}{ICON_ERROR} Error checking {name}: {sanitized_msg}{COLOR_RESET}")
                     
                 installed = target_pkg.get("installed", [])
                 versions_to_check = installed if installed else [target_pkg.get("declared")]
@@ -755,8 +809,9 @@ def _check_all_targets_unified(targets, check_func, label, max_workers):
                         "error": sanitized_msg
                     })
             
-    sys.stdout.write("\r\033[K")
-    sys.stdout.flush()
+    with console_lock:
+        sys.stdout.write("\r\033[K")
+        sys.stdout.flush()
     return results
 
 def _is_major_version_eol(major_version: str, schedule: dict, today_date: date) -> bool:
@@ -2454,8 +2509,229 @@ def run_npm_checker(args):
 # PIP Checker Logic
 # ==============================================================================
 
+def parse_version_to_tuple_marker(v_str):
+    """Parses a version string into a tuple of integers for environment marker comparison."""
+    v_str = re.sub(r'^[^\d]+', '', v_str)
+    parts = []
+    for part in v_str.split('.'):
+        m = re.match(r'^(\d+)', part)
+        if m:
+            parts.append(int(m.group(1)))
+        else:
+            parts.append(0)
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts)
+
+def compare_versions_marker(left, op, right):
+    """Compares two version strings based on the given operator for environment markers."""
+    left_t = parse_version_to_tuple_marker(str(left))
+    right_t = parse_version_to_tuple_marker(str(right))
+    
+    max_len = max(len(left_t), len(right_t))
+    left_t += (0,) * (max_len - len(left_t))
+    right_t += (0,) * (max_len - len(right_t))
+    
+    if op == '==' or op == '===':
+        return left_t == right_t
+    elif op == '!=':
+        return left_t != right_t
+    elif op == '<':
+        return left_t < right_t
+    elif op == '<=':
+        return left_t <= right_t
+    elif op == '>':
+        return left_t > right_t
+    elif op == '>=':
+        return left_t >= right_t
+    elif op == '~=':
+        if left_t < right_t:
+            return False
+        right_orig_parts = [int(p) for p in re.findall(r'\d+', str(right))]
+        if len(right_orig_parts) > 1:
+            upper_bound = list(right_t)
+            idx = len(right_orig_parts) - 2
+            if idx >= 0:
+                upper_bound[idx] += 1
+                for i in range(idx + 1, len(upper_bound)):
+                    upper_bound[i] = 0
+                return left_t < tuple(upper_bound)
+            else:
+                return left_t[0] == right_t[0]
+        else:
+            return left_t[0] == right_t[0]
+    return False
+
+def tokenize_marker(marker_str):
+    """Tokenizes a PEP 508 environment marker string."""
+    token_re = re.compile(
+        r'\s*('
+        r'\bnot\s+in\b|\bin\b|'
+        r'==|!=|<=|>=|<|>|===|~=|'
+        r'\band\b|\bor\b|\bnot\b|'
+        r'\(|\)|'
+        r'"[^"]*"|\'[^\']*\'|'
+        r'[a-zA-Z_][a-zA-Z0-9_]*'
+        r')\s*'
+    )
+    tokens = []
+    pos = 0
+    while pos < len(marker_str):
+        match = token_re.match(marker_str, pos)
+        if not match:
+            char = marker_str[pos]
+            if char.isspace():
+                pos += 1
+                continue
+            raise ValueError(f"Unexpected character in marker: {char} at position {pos}")
+        token = match.group(1)
+        tokens.append(token)
+        pos = match.end()
+    return tokens
+
+def parse_and_evaluate_marker(marker_str, env):
+    """Parses and evaluates a PEP 508 environment marker expression."""
+    tokens = tokenize_marker(marker_str)
+    if not tokens:
+        return True
+        
+    idx = [0]
+    
+    def peek():
+        if idx[0] < len(tokens):
+            return tokens[idx[0]]
+        return None
+        
+    def consume():
+        val = peek()
+        if val is not None:
+            idx[0] += 1
+        return val
+        
+    def parse_or():
+        left = parse_and()
+        while peek() == 'or':
+            consume()
+            right = parse_and()
+            left = left or right
+        return left
+        
+    def parse_and():
+        left = parse_not()
+        while peek() == 'and':
+            consume()
+            right = parse_not()
+            left = left and right
+        return left
+        
+    def parse_not():
+        if peek() == 'not':
+            consume()
+            val = parse_not()
+            return not val
+        return parse_comparison()
+        
+    def parse_comparison():
+        left_val, left_name = parse_primary()
+        op = peek()
+        if op in ('==', '!=', '<=', '>=', '<', '>', '===', '~=', 'in', 'not in'):
+            consume()
+            right_val, right_name = parse_primary()
+            return evaluate_comparison_op(left_val, left_name, op, right_val, right_name)
+        return bool(left_val)
+        
+    def parse_primary():
+        token = consume()
+        if token == '(':
+            val = parse_or()
+            if consume() != ')':
+                raise ValueError("Unmatched parenthesis in marker expression")
+            return (val, None)
+        if token is None:
+            raise ValueError("Unexpected end of expression")
+        if (token.startswith('"') and token.endswith('"')) or (token.startswith("'") and token.endswith("'")):
+            return (token[1:-1], None)
+        if token in env:
+            return (env[token], token)
+        return (token, None)
+        
+    result = parse_or()
+    if idx[0] < len(tokens):
+        raise ValueError(f"Trailing tokens in marker expression: {tokens[idx[0]:]}")
+    return result
+
+def evaluate_comparison_op(left_val, left_name, op, right_val, right_name):
+    """Evaluates a single comparison operation for markers."""
+    is_version = (
+        left_name in ('python_version', 'python_full_version', 'implementation_version', 'platform_version') or
+        right_name in ('python_version', 'python_full_version', 'implementation_version', 'platform_version')
+    )
+    
+    if op in ('in', 'not in'):
+        left_str = str(left_val)
+        right_str = str(right_val)
+        if op == 'in':
+            return left_str in right_str
+        else:
+            return left_str not in right_str
+            
+    if is_version and op in ('==', '!=', '<', '<=', '>', '>=', '~='):
+        return compare_versions_marker(left_val, op, right_val)
+        
+    left_str = str(left_val)
+    right_str = str(right_val)
+    if op == '==':
+        return left_str == right_str
+    elif op == '!=':
+        return left_str != right_str
+    elif op == '<':
+        return left_str < right_str
+    elif op == '<=':
+        return left_str <= right_str
+    elif op == '>':
+        return left_str > right_str
+    elif op == '>=':
+        return left_str >= right_str
+    elif op == '===':
+        return left_str == right_str
+        
+    return False
+
+def get_env_markers():
+    """Builds environment markers dictionary for the current interpreter."""
+    import platform
+    py_version_tuple = platform.python_version_tuple()
+    python_version = f"{py_version_tuple[0]}.{py_version_tuple[1]}"
+    python_full_version = platform.python_version()
+    
+    impl_ver = ""
+    if hasattr(sys, "implementation") and hasattr(sys.implementation, "version"):
+        v = sys.implementation.version
+        impl_ver = f"{v.major}.{v.minor}.{v.micro}"
+        if v.releaselevel != "final":
+            impl_ver += f"{v.releaselevel}{v.serial}"
+            
+    impl_name = ""
+    if hasattr(sys, "implementation") and hasattr(sys.implementation, "name"):
+        impl_name = sys.implementation.name
+        
+    return {
+        "os_name": os.name,
+        "sys_platform": sys.platform,
+        "platform_machine": platform.machine(),
+        "platform_python_implementation": platform.python_implementation(),
+        "platform_release": platform.release(),
+        "platform_system": platform.system(),
+        "platform_version": platform.version(),
+        "python_version": python_version,
+        "python_full_version": python_full_version,
+        "implementation_name": impl_name,
+        "implementation_version": impl_ver,
+        "extra": "",
+    }
+
 def parse_requirements_txt(filepath):
-    """Parses requirements.txt to extract dependencies and parent traces."""
+    """Parses requirements.txt to extract dependencies and parent traces, supporting PEP 508."""
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             lines = f.readlines()
@@ -2464,12 +2740,21 @@ def parse_requirements_txt(filepath):
         parents = {}
         
         last_pkg = None
-        pkg_re = re.compile(
-            r'^\s*([A-Za-z0-9_.-]+(?:\[[A-Za-z0-9_,.-]+\])?)\s*'
-            r'(?:(==|>=|<=|~=|!=|>|<|=)\s*([A-Za-z0-9_.!+*-]+)(?:\s*,\s*.*)?)?'
-        )
         
+        # Preprocess lines to merge continuation lines (ending with \)
+        merged_lines = []
+        continuation = ""
         for line in lines:
+            stripped = line.strip()
+            if stripped.endswith('\\'):
+                continuation += stripped[:-1].rstrip() + " "
+            else:
+                merged_lines.append(continuation + line)
+                continuation = ""
+        if continuation:
+            merged_lines.append(continuation)
+            
+        for line in merged_lines:
             stripped = line.strip()
             if not stripped:
                 continue
@@ -2497,26 +2782,55 @@ def parse_requirements_txt(filepath):
             if stripped_line.startswith("-"):
                 continue
                 
-            match = pkg_re.match(stripped_line)
-            if match:
-                pkg_name = match.group(1)
-                if "[" in pkg_name:
-                    pkg_name = pkg_name.split("[")[0]
-                    
-                op = match.group(2)
-                ver = match.group(3)
+            # Separate the requirement from the environment marker (separated by semicolon)
+            if ";" in stripped_line:
+                parts = stripped_line.split(";", 1)
+                req_part = parts[0].strip()
+                marker_part = parts[1].strip()
+            else:
+                req_part = stripped_line
+                marker_part = None
                 
-                version_spec = f"{op}{ver}" if op and ver else ""
-                dependencies[pkg_name] = version_spec or "*"
-                last_pkg = pkg_name
+            # Parse package name, optional extras, and specifier/URL
+            match = re.match(
+                r'^\s*([A-Za-z0-9_.-]+)(?:\s*\[\s*([A-Za-z0-9_,.-]+)\s*\])?\s*(.*)$',
+                req_part
+            )
+            if not match:
+                continue
                 
-                if comment.startswith("via"):
-                    parent_part = comment[3:].strip()
-                    for p in parent_part.split(","):
-                        p_clean = p.strip()
-                        if p_clean:
-                            parents.setdefault(pkg_name, set()).add(p_clean)
-                            
+            pkg_name = match.group(1)
+            extras = match.group(2)
+            rest = match.group(3).strip()
+            
+            # Evaluate markers if present
+            if marker_part:
+                try:
+                    env = get_env_markers()
+                    if not parse_and_evaluate_marker(marker_part, env):
+                        continue
+                except Exception as e:
+                    print(f"{COLOR_YELLOW}{ICON_WARN} Warning evaluating marker '{marker_part}': {e}{COLOR_RESET}")
+            
+            # Extract version specification or URL
+            if rest.startswith("@"):
+                url_part = rest[1:].strip()
+                version_spec = f"@ {url_part}"
+            elif rest:
+                version_spec = re.sub(r'([><=^~!]+)\s+', r'\1', rest)
+            else:
+                version_spec = "*"
+                
+            dependencies[pkg_name] = version_spec
+            last_pkg = pkg_name
+            
+            if comment.startswith("via"):
+                parent_part = comment[3:].strip()
+                for p in parent_part.split(","):
+                    p_clean = p.strip()
+                    if p_clean:
+                        parents.setdefault(pkg_name, set()).add(p_clean)
+                        
         return dependencies, {k: list(v) for k, v in parents.items()}
     except Exception as e:
         print(f"{COLOR_RED}{ICON_ERROR} Error reading requirements.txt: {e}{COLOR_RESET}")
@@ -2806,6 +3120,31 @@ def parse_pipfile_lock(filepath):
         print(f"{COLOR_YELLOW}{ICON_WARN} Warning reading Pipfile.lock: {e}{COLOR_RESET}")
         return {}, {}
 
+def parse_pep508(dep_string):
+    """Parses a PEP 508 dependency string.
+    Returns:
+        tuple: (package_name, version_specifier) or (None, None)
+    """
+    if not isinstance(dep_string, str):
+        return None, None
+    req_part = dep_string.split(';', 1)[0].strip()
+    if not req_part:
+        return None, None
+    match = re.match(r'^([a-zA-Z0-9\-_\.]+)(.*)$', req_part)
+    if not match:
+        return None, None
+    name = match.group(1)
+    rest = match.group(2).strip()
+    if rest.startswith('['):
+        extra_match = re.match(r'^\[[^\]]*\](.*)$', rest)
+        if extra_match:
+            rest = extra_match.group(1).strip()
+    if rest.startswith('(') and rest.endswith(')'):
+        rest = rest[1:-1].strip()
+    rest = re.sub(r'([><=^~!]+)\s+', r'\1', rest)
+    version_spec = rest if rest else "*"
+    return name, version_spec
+
 def parse_pyproject_toml(filepath):
     """Parses pyproject.toml to extract direct dependencies.
     Returns:
@@ -2813,52 +3152,110 @@ def parse_pyproject_toml(filepath):
     """
     dependencies = {}
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            lines = f.readlines()
+        with open(filepath, "rb") as f:
+            data = tomllib.load(f)
             
-        in_poetry_deps = False
-        in_pep621_deps = False
-        
-        for line in lines:
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
+        def process_poetry_deps(deps_dict):
+            if not isinstance(deps_dict, dict):
+                return
+            for k, v in deps_dict.items():
+                if k.lower() == "python":
+                    continue
+                if isinstance(v, str):
+                    dependencies[k] = v
+                elif isinstance(v, dict):
+                    ver = v.get("version")
+                    dependencies[k] = ver if isinstance(ver, str) else "*"
+
+        # 1. PEP 621 dependencies
+        project = data.get("project", {})
+        if isinstance(project, dict):
+            proj_deps = project.get("dependencies")
+            if isinstance(proj_deps, list):
+                for dep in proj_deps:
+                    name, spec = parse_pep508(dep)
+                    if name:
+                        dependencies[name] = spec
+            opt_deps = project.get("optional-dependencies")
+            if isinstance(opt_deps, dict):
+                for group_list in opt_deps.values():
+                    if isinstance(group_list, list):
+                        for dep in group_list:
+                            name, spec = parse_pep508(dep)
+                            if name:
+                                dependencies[name] = spec
+            elif isinstance(opt_deps, list):
+                for group_item in opt_deps:
+                    if isinstance(group_item, dict):
+                        for group_list in group_item.values():
+                            if isinstance(group_list, list):
+                                for dep in group_list:
+                                    name, spec = parse_pep508(dep)
+                                    if name:
+                                        dependencies[name] = spec
+
+        # 2. Poetry
+        tool = data.get("tool", {})
+        if isinstance(tool, dict):
+            poetry = tool.get("poetry", {})
+            if isinstance(poetry, dict):
+                process_poetry_deps(poetry.get("dependencies"))
                 
-            if stripped.startswith("[tool.poetry.dependencies]"):
-                in_poetry_deps = True
-                in_pep621_deps = False
-                continue
-            elif stripped.startswith("dependencies = ["):
-                in_pep621_deps = True
-                in_poetry_deps = False
-                continue
-            elif stripped.startswith("["):
-                in_poetry_deps = False
-                in_pep621_deps = False
-                
-            if in_poetry_deps:
-                if "=" in stripped:
-                    name = stripped.split("=", 1)[0].strip().strip('"').strip("'")
-                    val = stripped.split("=", 1)[1].strip()
-                    if name != "python":
-                        if val.startswith("{"):
-                            ver_match = re.search(r'version\s*=\s*["\']([^"\']+)["\']', val)
-                            version = ver_match.group(1) if ver_match else "*"
-                        else:
-                            version = val.strip('"').strip("'")
-                        dependencies[name] = version
-            elif in_pep621_deps:
-                if stripped == "]":
-                    in_pep621_deps = False
-                else:
-                    item = stripped.rstrip(",").strip().strip('"').strip("'")
-                    if item:
-                        match = re.match(r'^([a-zA-Z0-9\-_.]+)(.*)$', item)
-                        if match:
-                            name = match.group(1)
-                            spec = match.group(2).strip()
-                            dependencies[name] = spec if spec else "*"
+                group = poetry.get("group", {})
+                if isinstance(group, dict):
+                    for group_table in group.values():
+                        if isinstance(group_table, dict):
+                            process_poetry_deps(group_table.get("dependencies"))
                             
+                process_poetry_deps(poetry.get("dev-dependencies"))
+
+            # 3. PDM
+            pdm = tool.get("pdm", {})
+            if isinstance(pdm, dict):
+                pdm_dev = pdm.get("dev-dependencies")
+                if isinstance(pdm_dev, list):
+                    for dep in pdm_dev:
+                        name, spec = parse_pep508(dep)
+                        if name:
+                            dependencies[name] = spec
+                elif isinstance(pdm_dev, dict):
+                    for k, v in pdm_dev.items():
+                        if isinstance(v, list):
+                            for dep in v:
+                                name, spec = parse_pep508(dep)
+                                if name:
+                                    dependencies[name] = spec
+                        else:
+                            if k.lower() == "python":
+                                continue
+                            if isinstance(v, str):
+                                dependencies[k] = v
+                            elif isinstance(v, dict):
+                                ver = v.get("version")
+                                dependencies[k] = ver if isinstance(ver, str) else "*"
+                                
+                pdm_deps = pdm.get("dependencies")
+                if isinstance(pdm_deps, list):
+                    for dep in pdm_deps:
+                        name, spec = parse_pep508(dep)
+                        if name:
+                            dependencies[name] = spec
+                elif isinstance(pdm_deps, dict):
+                    for k, v in pdm_deps.items():
+                        if isinstance(v, list):
+                            for dep in v:
+                                name, spec = parse_pep508(dep)
+                                if name:
+                                    dependencies[name] = spec
+                        else:
+                            if k.lower() == "python":
+                                continue
+                            if isinstance(v, str):
+                                dependencies[k] = v
+                            elif isinstance(v, dict):
+                                ver = v.get("version")
+                                dependencies[k] = ver if isinstance(ver, str) else "*"
+                                
         return dependencies
     except Exception as e:
         print(f"{COLOR_YELLOW}{ICON_WARN} Warning reading pyproject.toml: {e}{COLOR_RESET}")
@@ -3997,51 +4394,93 @@ def escape_go_module(name):
     return escaped
 
 def parse_go_mod(filepath):
-    """Parses go.mod for direct and indirect dependencies."""
+    """Parses go.mod for direct and indirect dependencies with replace support."""
     dependencies = {}
     devDependencies = {}
+    
+    if not filepath or not os.path.exists(filepath):
+        return dependencies, devDependencies
+        
+    raw_reqs = []
+    replacements = {}
+    replacements_ver = {}
     
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             lines = f.readlines()
             
         in_require_block = False
-        single_req_pat = re.compile(r'^\s*require\s+([^\s]+)\s+([^\s]+)(?:\s+//\s*(indirect))?\s*$')
-        block_req_pat = re.compile(r'^\s*([^\s]+)\s+([^\s]+)(?:\s+//\s*(indirect))?\s*$')
         
         for line in lines:
-            line_strip = line.strip()
-            if not line_strip or line_strip.startswith("//"):
+            line_clean = line.strip()
+            if not line_clean or line_clean.startswith("//"):
                 continue
                 
-            if line_strip == "require (":
+            is_indirect = False
+            if "//" in line_clean:
+                parts = line_clean.split("//", 1)
+                line_content = parts[0].strip()
+                comment = parts[1].strip()
+                if "indirect" in comment.split():
+                    is_indirect = True
+            else:
+                line_content = line_clean
+                
+            if not line_content:
+                continue
+                
+            if line_content.startswith("require") and line_content.endswith("("):
                 in_require_block = True
                 continue
-            elif line_strip == ")":
+            elif in_require_block and line_content == ")":
                 in_require_block = False
                 continue
                 
+            if "=>" in line_content:
+                left, right = line_content.split("=>", 1)
+                left_parts = left.strip().split()
+                if left_parts and left_parts[0] == "replace":
+                    left_parts = left_parts[1:]
+                    
+                right_parts = right.strip().split()
+                if len(right_parts) == 2 and left_parts:
+                    new_path = right_parts[0]
+                    new_version = right_parts[1]
+                    if not (new_path.startswith('.') or new_path.startswith('/') or new_path.startswith('\\')):
+                        if len(left_parts) == 1:
+                            replacements[left_parts[0]] = (new_path, new_version)
+                        elif len(left_parts) == 2:
+                            replacements_ver[(left_parts[0], left_parts[1])] = (new_path, new_version)
+                continue
+                
             if in_require_block:
-                m = block_req_pat.match(line_strip)
-                if m:
-                    pkg = m.group(1)
-                    ver = m.group(2)
-                    is_indirect = m.group(3) == "indirect"
-                    if is_indirect:
-                        devDependencies[pkg] = ver
-                    else:
-                        dependencies[pkg] = ver
+                req_parts = line_content.split()
+                if len(req_parts) >= 2:
+                    pkg = req_parts[0]
+                    ver = req_parts[1]
+                    raw_reqs.append((pkg, ver, is_indirect))
             else:
-                m = single_req_pat.match(line_strip)
-                if m:
-                    pkg = m.group(1)
-                    ver = m.group(2)
-                    is_indirect = m.group(3) == "indirect"
-                    if is_indirect:
-                        devDependencies[pkg] = ver
-                    else:
-                        dependencies[pkg] = ver
+                if line_content.startswith("require"):
+                    req_parts = line_content.split()
+                    if len(req_parts) >= 3:
+                        pkg = req_parts[1]
+                        ver = req_parts[2]
+                        raw_reqs.append((pkg, ver, is_indirect))
                         
+        for pkg, ver, is_indir in raw_reqs:
+            final_pkg = pkg
+            final_ver = ver
+            
+            if (pkg, ver) in replacements_ver:
+                final_pkg, final_ver = replacements_ver[(pkg, ver)]
+            elif pkg in replacements:
+                final_pkg, final_ver = replacements[pkg]
+                
+            if is_indir:
+                devDependencies[final_pkg] = final_ver
+            else:
+                dependencies[final_pkg] = final_ver
+                
     except Exception as e:
         print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing go.mod: {e}{COLOR_RESET}")
         
@@ -4275,74 +4714,39 @@ def parse_cargo_toml(filepath):
     return dependencies
 
 def parse_cargo_lock(filepath):
-    """Parses Cargo.lock to extract all resolved package names, versions, and build parent tree."""
+    """Parses Cargo.lock to extract all resolved package names, versions, and build parent tree.
+    Supports Cargo Lockfile v4 using tomllib.
+    """
     resolved = {}
     parents = {}
     if not filepath or not os.path.exists(filepath):
         return resolved, parents
         
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            lines = f.readlines()
+        with open(filepath, "rb") as f:
+            data = tomllib.load(f)
             
-        current_pkg = None
-        current_version = None
-        in_deps = False
-        pkg_deps = []
-        pkg_definitions = []
-        
-        for line in lines:
-            line = line.strip()
-            if line == "[[package]]":
-                if current_pkg:
-                    pkg_definitions.append({
-                        "name": current_pkg,
-                        "version": current_version,
-                        "deps": pkg_deps
-                    })
-                current_pkg = None
-                current_version = None
-                pkg_deps = []
-                in_deps = False
-                continue
-                
-            if line.startswith("name ="):
-                current_pkg = line.split("=")[1].replace('"', '').strip()
-            elif line.startswith("version ="):
-                current_version = line.split("=")[1].replace('"', '').strip()
-            elif line.startswith("dependencies ="):
-                if "[" in line and "]" in line:
-                    dep_str = line.split("=")[1].strip(" []\"")
-                    if dep_str:
-                        pkg_deps = [d.strip().split()[0].replace('"', '') for d in dep_str.split(",")]
-                elif "[" in line:
-                    in_deps = True
-            elif in_deps:
-                if line == "]":
-                    in_deps = False
-                else:
-                    dep_name = line.strip(",\" ")
-                    if dep_name:
-                        pkg_deps.append(dep_name.split()[0].replace('"', ''))
-                        
-        if current_pkg:
-            pkg_definitions.append({
-                "name": current_pkg,
-                "version": current_version,
-                "deps": pkg_deps
-            })
-            
-        for pkg in pkg_definitions:
-            name = pkg["name"]
-            version = pkg["version"]
-            if name and version:
+        packages = data.get("package", [])
+        if isinstance(packages, list):
+            for pkg in packages:
+                if not isinstance(pkg, dict):
+                    continue
+                name = pkg.get("name")
+                version = pkg.get("version")
+                if not name or not version:
+                    continue
+                    
                 resolved.setdefault(name, set()).add(version)
-            
-            for dep in pkg["deps"]:
-                if dep not in parents:
-                    parents[dep] = set()
-                parents[dep].add(name)
                 
+                deps = pkg.get("dependencies", [])
+                if isinstance(deps, list):
+                    for dep in deps:
+                        if not isinstance(dep, str):
+                            continue
+                        dep_name = dep.split()[0] if dep else ""
+                        if dep_name:
+                            parents.setdefault(dep_name, set()).add(name)
+                            
     except Exception as e:
         print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Cargo.lock: {e}{COLOR_RESET}")
         
@@ -4808,83 +5212,75 @@ def parse_libs_versions_toml(filepath):
         return dependencies
         
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            lines = f.readlines()
+        with open(filepath, "rb") as f:
+            data = tomllib.load(f)
             
         versions = {}
-        in_versions = False
-        in_libraries = False
-        
-        for line in lines:
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-                
-            if stripped.startswith("[versions]"):
-                in_versions = True
-                in_libraries = False
-                continue
-            elif stripped.startswith("[libraries]"):
-                in_libraries = True
-                in_versions = False
-                continue
-            elif stripped.startswith("["):
-                in_versions = False
-                in_libraries = False
-                continue
-                
-            if in_versions:
-                if "=" in stripped:
-                    parts = stripped.split("=", 1)
-                    var_name = parts[0].strip().strip('"').strip("'")
-                    var_val = parts[1].strip().strip('"').strip("'")
-                    versions[var_name] = var_val
-            elif in_libraries:
-                if "=" in stripped:
-                    parts = stripped.split("=", 1)
-                    _alias = parts[0].strip().strip('"').strip("'")
-                    val = parts[1].strip()
-                    
-                    # Case 1: Simple string "group:name:version"
-                    if val.startswith('"') or val.startswith("'"):
-                        val_str = val.strip('"').strip("'")
-                        m = val_str.split(":")
-                        if len(m) >= 3:
-                            group = m[0].strip()
-                            name = m[1].strip()
-                            ver = m[2].strip()
-                            dependencies[f"{group}:{name}"] = ver
-                    # Case 2: Inline table { ... }
-                    elif val.startswith("{") and val.endswith("}"):
-                        group = ""
-                        name = ""
-                        ver = ""
+        raw_versions = data.get("versions", {})
+        if isinstance(raw_versions, dict):
+            for k, v in raw_versions.items():
+                if isinstance(v, str):
+                    versions[k] = v
+                elif isinstance(v, dict):
+                    for key in ("require", "prefer", "strictly"):
+                        if key in v:
+                            versions[k] = v[key]
+                            break
+                    else:
+                        versions[k] = "*"
                         
-                        module_match = re.search(r'module\s*=\s*["\']([^"\']+)["\']', val)
-                        group_match = re.search(r'group\s*=\s*["\']([^"\']+)["\']', val)
-                        name_match = re.search(r'name\s*=\s*["\']([^"\']+)["\']', val)
-                        version_match = re.search(r'version\s*=\s*["\']([^"\']+)["\']', val)
-                        ref_match = re.search(r'version\.ref\s*=\s*["\']([^"\']+)["\']', val)
-                        
-                        if module_match:
-                            mod = module_match.group(1).split(":")
-                            if len(mod) >= 2:
-                                group = mod[0].strip()
-                                name = mod[1].strip()
-                        else:
-                            if group_match:
-                                group = group_match.group(1).strip()
-                            if name_match:
-                                name = name_match.group(1).strip()
-                                
-                        if version_match:
-                            ver = version_match.group(1).strip()
-                        elif ref_match:
-                            ref = ref_match.group(1).strip()
-                            ver = versions.get(ref, "*")
+        libraries = data.get("libraries", {})
+        if isinstance(libraries, dict):
+            for alias, val in libraries.items():
+                group = ""
+                name = ""
+                ver = "*"
+                
+                if isinstance(val, str):
+                    parts = val.split(":")
+                    if len(parts) >= 2:
+                        group = parts[0].strip()
+                        name = parts[1].strip()
+                        ver = parts[2].strip() if len(parts) > 2 else "*"
+                elif isinstance(val, dict):
+                    if "module" in val:
+                        module_val = val["module"]
+                        if isinstance(module_val, str):
+                            m_parts = module_val.split(":")
+                            if len(m_parts) >= 2:
+                                group = m_parts[0].strip()
+                                name = m_parts[1].strip()
+                    else:
+                        g_val = val.get("group")
+                        n_val = val.get("name")
+                        if isinstance(g_val, str):
+                            group = g_val.strip()
+                        if isinstance(n_val, str):
+                            name = n_val.strip()
                             
-                        if group and name:
-                            dependencies[f"{group}:{name}"] = ver if ver else "*"
+                    # Extract version
+                    ver_val = val.get("version")
+                    if isinstance(ver_val, str):
+                        ver = ver_val
+                    elif isinstance(ver_val, dict):
+                        if "ref" in ver_val:
+                            ref_name = ver_val["ref"]
+                            ref_val = versions.get(ref_name, "*")
+                            ver = ref_val
+                        else:
+                            for key in ("require", "prefer", "strictly"):
+                                if key in ver_val:
+                                    ver = ver_val[key]
+                                    break
+                                    
+                    if ver == "*":
+                        v_ref = val.get("versionRef")
+                        if isinstance(v_ref, str):
+                            ver = versions.get(v_ref, "*")
+                            
+                if group and name:
+                    dependencies[f"{group}:{name}"] = ver if ver else "*"
+                    
     except Exception as e:
         print(f"{COLOR_YELLOW}{ICON_WARN} Warning reading libs.versions.toml: {e}{COLOR_RESET}")
         
@@ -5061,7 +5457,7 @@ def validate_configuration_drift(results):
         inst_str = str(installed).strip()
         
         # Skip checking if declared constraint is a git URL, local path, workspace, patch, catalog reference, etc.
-        if (decl_str.startswith(("git+", "git:", "http:", "https:", "ssh:", "file:", "workspace:", "patch:", "portal:", "link:", "catalog:")) 
+        if (decl_str.startswith(("@", "git+", "git:", "http:", "https:", "ssh:", "file:", "workspace:", "patch:", "portal:", "link:", "catalog:")) 
             or "github:" in decl_str.lower() 
             or decl_str.startswith((".", "/"))):
             continue
@@ -5965,9 +6361,23 @@ def find_manifest_files(project_path, technology):
                 else:
                     if file == pattern:
                         manifest_files.append(os.path.join(root, file))
+                        
+    if technology == "nuget":
+        curr = os.path.abspath(project_path)
+        if os.path.isfile(curr):
+            curr = os.path.dirname(curr)
+        for _ in range(10):
+            props_file = os.path.join(curr, "Directory.Packages.props")
+            if os.path.exists(props_file) and props_file not in manifest_files:
+                manifest_files.append(props_file)
+            parent = os.path.dirname(curr)
+            if parent == curr:
+                break
+            curr = parent
+            
     return manifest_files
 
-def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ver, tech):
+def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ver, tech, package_name=None):
     """Generates remediation diff showing current vs suggested change."""
     try:
         with open(manifest_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -6014,6 +6424,12 @@ def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ve
                     target_text = quoted_vals[-1]
                     
     if line_idx_to_change is None:
+        return None
+
+    if target_text and package_name and target_text.lower().strip() == package_name.lower().strip():
+        target_text = None
+
+    if not target_text:
         return None
         
     match_prefix = ""
@@ -6098,15 +6514,11 @@ def populate_remediation_recommendations(results, default_project_path):
     for r in results:
         r["remediation"] = None
         
-        is_outdated = r.get("status") in ("major", "minor", "patch")
+        is_outdated = r.get("status") in ("major", "minor", "patch", "minor-major", "patch-major")
         has_vulns = bool(r.get("vulnerabilities"))
         is_depr = bool(r.get("deprecated"))
         
         if not (is_outdated or has_vulns or is_depr):
-            continue
-            
-        latest_ver = r.get("latest_absolute") or r.get("latest")
-        if not latest_ver:
             continue
             
         project_path = r.get("project_path") or default_project_path
@@ -6116,30 +6528,35 @@ def populate_remediation_recommendations(results, default_project_path):
             
         name = r.get("name")
         declared = r.get("declared")
+        installed = r.get("installed")
         
-        # 1. Handle Special Case for engine
+        # Resolve clean installed version string
+        clean_installed = installed[0] if (isinstance(installed, list) and installed) else installed
+        
+        latest_sm = r.get("latest_same_major")
+        latest_abs = r.get("latest_absolute") or r.get("latest")
+        
+        # If latest_same_major is identical to installed, there's no safe update.
+        if latest_sm == clean_installed:
+            latest_sm = None
+        # If latest_absolute is identical to latest_same_major, we don't need a separate major remediation.
+        if latest_abs == latest_sm:
+            latest_abs = None
+            
+        remediation_safe = None
+        remediation_major = None
+        
+        manifest_files = []
         if r.get("is_engine", False):
             package_json_path = os.path.join(project_path, "package.json")
             if os.path.exists(package_json_path):
-                try:
-                    with open(package_json_path, "r", encoding="utf-8", errors="ignore") as f:
-                        lines = f.readlines()
-                    for idx, line in enumerate(lines):
-                        if f'"{name}"' in line or '"engines"' in line:
-                            diff = generate_remediation_diff(package_json_path, idx + 1, declared, latest_ver, tech)
-                            if diff:
-                                r["remediation"] = diff
-                                break
-                except Exception:
-                    pass
-            continue
+                manifest_files = [package_json_path]
+        else:
+            manifest_files = find_manifest_files(project_path, tech)
             
-        # 2. General dependency matching
-        manifest_files = find_manifest_files(project_path, tech)
         if not manifest_files:
             continue
             
-        found = False
         for manifest_path in manifest_files:
             try:
                 with open(manifest_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -6147,15 +6564,40 @@ def populate_remediation_recommendations(results, default_project_path):
             except Exception:
                 continue
                 
+            found_line_idx = None
             for idx, line in enumerate(lines):
-                if match_line_for_dependency(line, name, tech):
-                    diff = generate_remediation_diff(manifest_path, idx + 1, declared, latest_ver, tech)
-                    if diff:
-                        r["remediation"] = diff
-                        found = True
-                        break
-            if found:
-                break
+                if r.get("is_engine", False):
+                    matched = f'"{name}"' in line or '"engines"' in line
+                else:
+                    matched = match_line_for_dependency(line, name, tech)
+                if matched:
+                    found_line_idx = idx + 1
+                    break
+                    
+            if found_line_idx is not None:
+                # Try to generate diffs for this manifest file
+                temp_safe = None
+                temp_major = None
+                if latest_sm:
+                    temp_safe = generate_remediation_diff(
+                        manifest_path, found_line_idx, declared, latest_sm, tech, name
+                    )
+                if latest_abs:
+                    temp_major = generate_remediation_diff(
+                        manifest_path, found_line_idx, declared, latest_abs, tech, name
+                    )
+                
+                # If we succeeded in generating at least one valid diff, we stop searching
+                if temp_safe or temp_major:
+                    remediation_safe = temp_safe
+                    remediation_major = temp_major
+                    break
+                
+        if remediation_safe or remediation_major:
+            r["remediation"] = {
+                "safe": remediation_safe,
+                "major": remediation_major
+            }
 
 class HTMLReportTemplateProvider:
     @staticmethod
@@ -7043,6 +7485,37 @@ class HTMLReportTemplateProvider:
             flex-grow: 1;
         }
         
+        .modal-tabs {
+            display: none;
+            gap: 8px;
+            margin-bottom: 20px;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 1px;
+        }
+        
+        .modal-tab {
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            padding: 8px 16px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 600;
+            border-radius: 6px 6px 0 0;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s ease;
+        }
+        
+        .modal-tab:hover {
+            color: var(--text-main);
+            background-color: var(--card-hover);
+        }
+        
+        .modal-tab.active {
+            color: var(--primary);
+            border-bottom-color: var(--primary);
+        }
+        
         .modal-info-bar {
             display: flex;
             align-items: center;
@@ -7678,7 +8151,8 @@ class HTMLReportTemplateProvider:
                 }
                 
                 let remediation_button_html = '';
-                if (r.remediation && is_direct) {
+                const has_remediation = r.remediation && (r.remediation.safe || r.remediation.major);
+                if (has_remediation && is_direct) {
                     remediation_button_html = 
                         '<div class="remediation-section">' +
                             '<div style="font-size: 12px; font-weight: 700; color: var(--success); margin-bottom: 8px;">Remediation:</div>' +
@@ -8196,14 +8670,14 @@ class HTMLReportTemplateProvider:
                        .replace(/'/g, '&#039;');
         }
         
-        function openRemediationModal(info) {
-            if (!info) return;
-            
-            document.getElementById('modal-filepath').textContent = info.display_path || (info.manifest_path + ':' + info.line_number);
+        let activeRemediationInfo = null;
+
+        function renderDiff(diff) {
+            if (!diff) return;
             
             const currentContainer = document.getElementById('modal-current-code');
             currentContainer.innerHTML = '';
-            info.current_code.forEach(line => {
+            diff.current_code.forEach(line => {
                 const lineDiv = document.createElement('div');
                 lineDiv.className = 'diff-line' + (line.is_changed ? ' removed' : '');
                 
@@ -8222,7 +8696,7 @@ class HTMLReportTemplateProvider:
             
             const suggestedContainer = document.getElementById('modal-suggested-code');
             suggestedContainer.innerHTML = '';
-            info.suggested_code.forEach(line => {
+            diff.suggested_code.forEach(line => {
                 const lineDiv = document.createElement('div');
                 lineDiv.className = 'diff-line' + (line.is_changed ? ' added' : '');
                 
@@ -8238,7 +8712,70 @@ class HTMLReportTemplateProvider:
                 lineDiv.appendChild(contentSpan);
                 suggestedContainer.appendChild(lineDiv);
             });
+        }
+
+        function switchRemediationTab(type) {
+            if (!activeRemediationInfo) return;
             
+            const safeTab = document.getElementById('tab-safe');
+            const majorTab = document.getElementById('tab-major');
+            
+            if (type === 'safe') {
+                safeTab.classList.add('active');
+                majorTab.classList.remove('active');
+                renderDiff(activeRemediationInfo.safe);
+            } else {
+                majorTab.classList.add('active');
+                safeTab.classList.remove('active');
+                renderDiff(activeRemediationInfo.major);
+            }
+        }
+
+        function openRemediationModal(info) {
+            if (!info) return;
+            
+            activeRemediationInfo = info;
+            
+            const firstValid = info.safe || info.major;
+            document.getElementById('modal-filepath').textContent = firstValid.display_path || (firstValid.manifest_path + ':' + firstValid.line_number);
+            
+            const tabsContainer = document.getElementById('modal-tabs-container');
+            const safeTab = document.getElementById('tab-safe');
+            const majorTab = document.getElementById('tab-major');
+            
+            if (info.safe && info.major) {
+                tabsContainer.style.display = 'flex';
+                safeTab.style.display = 'block';
+                majorTab.style.display = 'block';
+                switchRemediationTab('safe');
+            } else {
+                tabsContainer.style.display = 'none';
+                if (info.safe) {
+                    renderDiff(info.safe);
+                } else if (info.major) {
+                    renderDiff(info.major);
+                }
+            }
+            
+            // Synchronize scrolling between current and suggested code views
+            const leftScroll = document.getElementById('modal-current-code');
+            const rightScroll = document.getElementById('modal-suggested-code');
+            if (leftScroll && rightScroll) {
+                leftScroll.scrollLeft = 0;
+                leftScroll.scrollTop = 0;
+                rightScroll.scrollLeft = 0;
+                rightScroll.scrollTop = 0;
+                
+                leftScroll.onscroll = function() {
+                    rightScroll.scrollLeft = leftScroll.scrollLeft;
+                    rightScroll.scrollTop = leftScroll.scrollTop;
+                };
+                rightScroll.onscroll = function() {
+                    leftScroll.scrollLeft = rightScroll.scrollLeft;
+                    leftScroll.scrollTop = rightScroll.scrollTop;
+                };
+            }
+
             document.getElementById('remediation-modal').style.display = 'flex';
             document.getElementById('modal-backdrop').style.display = 'block';
             
@@ -8346,6 +8883,12 @@ $${tasksIntro}
                     <polyline points="14 2 14 8 20 8"></polyline>
                 </svg>
                 <span id="modal-filepath"></span>
+            </div>
+            
+            <!-- Tabs container -->
+            <div id="modal-tabs-container" class="modal-tabs" style="display: none;">
+                <button id="tab-safe" class="modal-tab" onclick="switchRemediationTab('safe')">Safe Update</button>
+                <button id="tab-major" class="modal-tab" onclick="switchRemediationTab('major')">Major Upgrade</button>
             </div>
             
             <div class="modal-diff-container">
