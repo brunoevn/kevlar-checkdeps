@@ -7855,13 +7855,21 @@ class HTMLReportTemplateProvider:
                     <div class="stat-val">${total}</div>
                     <div class="stat-lbl">Checked</div>
                 </div>
-                <div class="stat-card warning">
-                    <div class="stat-val">${outdated}</div>
-                    <div class="stat-lbl">Outdated</div>
-                </div>
                 <div class="stat-card error">
                     <div class="stat-val">${total_vulns}</div>
                     <div class="stat-lbl">Vulnerable</div>
+                </div>
+                <div class="stat-card error" style="background-color: rgba(239, 68, 68, 0.05);">
+                    <div class="stat-val">${errors}</div>
+                    <div class="stat-lbl">Errors</div>
+                </div>
+                <div class="stat-card success">
+                    <div class="stat-val">${up_to_date}</div>
+                    <div class="stat-lbl">Up-to-date</div>
+                </div>
+                <div class="stat-card warning">
+                    <div class="stat-val">${outdated}</div>
+                    <div class="stat-lbl">Outdated</div>
                 </div>
                 <div class="stat-card depr">
                     <div class="stat-val">${deprecated}</div>
@@ -7870,14 +7878,6 @@ class HTMLReportTemplateProvider:
                 <div class="stat-card muted">
                     <div class="stat-val">${suppressed_vulns}</div>
                     <div class="stat-lbl">Suppressed</div>
-                </div>
-                <div class="stat-card success">
-                    <div class="stat-val">${up_to_date}</div>
-                    <div class="stat-lbl">Up-to-date</div>
-                </div>
-                <div class="stat-card error" style="background-color: rgba(239, 68, 68, 0.05);">
-                    <div class="stat-val">${errors}</div>
-                    <div class="stat-lbl">Errors</div>
                 </div>
             </div>
             
