@@ -4885,12 +4885,22 @@ def check_go_package(target):
     results = []
     
     try:
-        escaped_name = escape_go_module(name)
-        url = f"{URL_GO_PROXY}{escaped_name}/@v/list"
+        candidate_name = name
+        resp_data = None
         
-        req = urllib.request.Request(url)
-        with safe_urlopen(req, timeout=10) as response:
-            resp_data = response.read().decode("utf-8")
+        while True:
+            try:
+                escaped_name = escape_go_module(candidate_name)
+                url = f"{URL_GO_PROXY}{escaped_name}/@v/list"
+                req = urllib.request.Request(url)
+                with safe_urlopen(req, timeout=10) as response:
+                    resp_data = response.read().decode("utf-8")
+                break
+            except urllib.error.HTTPError as err:
+                if err.code == 404 and "/" in candidate_name:
+                    candidate_name = candidate_name.rsplit("/", 1)[0]
+                else:
+                    raise err
             
         versions_list = [v.strip() for v in resp_data.split("\n") if v.strip()]
         
@@ -10657,6 +10667,8 @@ Examples:
         if "technology" not in r:
             r["technology"] = args.tech if args.tech != "auto" else r.get("technology")
             
+    sys.stdout.write(f"{COLOR_GRAY}{ICON_INFO} Processing results and generating report table...{COLOR_RESET}\n")
+    sys.stdout.flush()
     populate_remediation_recommendations(results, args.path)
     validate_configuration_drift(results)
     apply_vulnerability_suppressions(results, args.suppress, project_path=args.path)
