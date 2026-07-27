@@ -5033,6 +5033,85 @@ def resolve_go_parent_graph(direct_deps, max_workers=10):
         
     return parents
 
+def parse_go_sum(filepath):
+    """Parses go.sum file into dict mapping (module, version) -> h1_hash."""
+    checksums = {}
+    if not filepath or not os.path.exists(filepath):
+        return checksums
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                line_clean = line.strip()
+                if not line_clean or line_clean.startswith("//"):
+                    continue
+                parts = line_clean.split()
+                if len(parts) >= 3:
+                    mod_name = parts[0]
+                    ver_str = parts[1]
+                    hash_str = parts[2]
+                    if not ver_str.endswith("/go.mod") and hash_str.startswith("h1:"):
+                        checksums[(mod_name, ver_str)] = hash_str
+    except Exception as e:
+        print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing go.sum: {e}{COLOR_RESET}")
+    return checksums
+
+def verify_go_checksums(results, go_sum_path, max_workers=10):
+    """Verifies local go.sum entries against sum.golang.org Checksum Database."""
+    has_sum_file = os.path.exists(go_sum_path) if (go_sum_path and os.path.exists(go_sum_path)) else False
+    local_checksums = parse_go_sum(go_sum_path) if has_sum_file else {}
+    
+    if not has_sum_file:
+        for r in results:
+            if r.get("status") != "local":
+                r["missing_checksum"] = True
+        return
+
+    items_to_verify = []
+    for r in results:
+        if r.get("status") == "local":
+            continue
+        name = r["name"]
+        installed = r.get("installed") or r.get("declared")
+        if isinstance(installed, list):
+            installed = installed[0] if installed else None
+        
+        if not installed:
+            continue
+            
+        key = (name, installed)
+        if key not in local_checksums:
+            r["missing_checksum"] = True
+        else:
+            items_to_verify.append((r, name, installed, local_checksums[key]))
+
+    def _verify_single(item):
+        r, name, ver, local_hash = item
+        try:
+            esc = escape_go_module(name)
+            url = f"https://sum.golang.org/lookup/{esc}@{ver}"
+            req = urllib.request.Request(url)
+            with safe_urlopen(req, timeout=6) as response:
+                resp_text = response.read().decode("utf-8")
+            
+            official_hash = None
+            prefix = f"{name} {ver} h1:"
+            for line in resp_text.splitlines():
+                if line.startswith(prefix):
+                    official_hash = line.split(prefix, 1)[1].strip()
+                    break
+                    
+            if official_hash and (f"h1:{official_hash}" != local_hash and official_hash != local_hash):
+                r["mismatch_checksum"] = True
+            elif official_hash:
+                r["checksum_verified"] = True
+        except Exception:
+            pass
+
+    if items_to_verify:
+        print(f"{COLOR_GRAY}{ICON_INFO} Verifying go.sum checksums against sum.golang.org...{COLOR_RESET}")
+        with ThreadPoolExecutor(max_workers=min(max_workers, 15)) as executor:
+            executor.map(_verify_single, items_to_verify)
+
 def run_go_checker(args):
     """Main orchestrator for Go Modules checker with workspace (go.work) and local replace support."""
     manifests = []
@@ -5167,6 +5246,19 @@ def run_go_checker(args):
         elif r["name"] in direct_keys:
             r["dep_type"] = "Direct"
             r["required_by"] = []
+
+    # Verify go.sum checksums against sum.golang.org
+    sum_file = None
+    if os.path.isdir(args.path):
+        cand_sum = os.path.join(args.path, "go.sum")
+        if os.path.exists(cand_sum):
+            sum_file = cand_sum
+    elif os.path.isfile(args.path):
+        cand_sum = os.path.join(os.path.dirname(args.path), "go.sum")
+        if os.path.exists(cand_sum):
+            sum_file = cand_sum
+
+    verify_go_checksums(results, sum_file, getattr(args, "concurrent", 10))
         
     elapsed = time.time() - start_time
     

@@ -2348,6 +2348,48 @@ class TestKevlar(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_parse_go_sum_and_verify_checksums(self):
+        import tempfile
+        import shutil
+        from unittest.mock import patch
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            sum_content = (
+                "github.com/fatih/color v1.19.0 h1:Zp3PiM21/9Ld6FzSKyL5c/BULoe/ONr9KlbYVOfG8+w=\n"
+                "github.com/fatih/color v1.19.0/go.mod h1:zNk67I0ZUT1bEGsSGyCZYZNrHuTkJJB+r6Q9VuMi0LE=\n"
+            )
+            sum_path = os.path.join(temp_dir, "go.sum")
+            with open(sum_path, "w", encoding="utf-8") as f:
+                f.write(sum_content)
+
+            parsed = kevlar.parse_go_sum(sum_path)
+            self.assertIn(("github.com/fatih/color", "v1.19.0"), parsed)
+            self.assertEqual(parsed[("github.com/fatih/color", "v1.19.0")], "h1:Zp3PiM21/9Ld6FzSKyL5c/BULoe/ONr9KlbYVOfG8+w=")
+
+            results = [{
+                "name": "github.com/fatih/color",
+                "installed": "v1.19.0",
+                "declared": "v1.19.0"
+            }, {
+                "name": "github.com/missing/pkg",
+                "installed": "v1.0.0",
+                "declared": "v1.0.0"
+            }]
+
+            with patch("urllib.request.urlopen") as mock_urlopen:
+                import io
+                mock_urlopen.return_value.__enter__.return_value.read.return_value = (
+                    b"51441162\n"
+                    b"github.com/fatih/color v1.19.0 h1:Zp3PiM21/9Ld6FzSKyL5c/BULoe/ONr9KlbYVOfG8+w=\n"
+                )
+                kevlar.verify_go_checksums(results, sum_path, max_workers=1)
+
+            self.assertTrue(results[0].get("checksum_verified"))
+            self.assertTrue(results[1].get("missing_checksum"))
+        finally:
+            shutil.rmtree(temp_dir)
+
     def test_generate_remediation_diff_cpm_fallback(self):
         import tempfile
         import shutil
