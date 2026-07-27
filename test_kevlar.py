@@ -1310,7 +1310,7 @@ class TestKevlar(unittest.TestCase):
             tmp.write(content)
             tmp_path = tmp.name
         try:
-            resolved, indirects = kevlar.parse_go_mod(tmp_path)
+            resolved, indirects, *_ = kevlar.parse_go_mod(tmp_path)
             self.assertEqual(resolved.get("github.com/gin-gonic/gin"), "v1.7.7")
             self.assertEqual(indirects.get("golang.org/x/crypto"), "v0.0.0-20220315160706-3147a52a75dd")
             self.assertEqual(indirects.get("github.com/google/uuid"), "v1.4.0")
@@ -1350,7 +1350,7 @@ class TestKevlar(unittest.TestCase):
             tmp.write(content)
             tmp_path = tmp.name
         try:
-            resolved, indirects = kevlar.parse_go_mod(tmp_path)
+            resolved, indirects, *_ = kevlar.parse_go_mod(tmp_path)
             self.assertEqual(indirects.get("example.com/pseudo-pkg"), "v0.0.0-20230101000000-abcdef123456")
             self.assertEqual(resolved.get("example.com/specific-replaced-pkg"), "v1.0.1")
             self.assertEqual(resolved.get("example.com/another-fork"), "v2.0.0-rc1")
@@ -2213,6 +2213,182 @@ class TestKevlar(unittest.TestCase):
         self.assertEqual(res[0]["latest"], "Local")
         self.assertEqual(res[0]["status"], "local")
         self.assertIsNone(res[0]["error"])
+
+    def test_pseudo_version_and_none_latest_up_to_date(self):
+        # 1. Test classify_update with pseudo-versions and matching/clean versions
+        self.assertEqual(kevlar.classify_update("v0.0.0-20260525132238-948f4557a654", "0.0.0-20260525132238-948f4557a654"), "up-to-date")
+        self.assertEqual(kevlar.classify_update("0.0.0-20260525132238-948f4557a654", "0.0.0"), "up-to-date")
+        self.assertEqual(kevlar.classify_update("v1.2.3", "1.2.3"), "up-to-date")
+        
+        # 2. Test determine_update_type when latest_absolute is None, 0.0.0, or matches installed pseudo-version
+        self.assertEqual(kevlar.determine_update_type("v0.0.0-20260525132238-948f4557a654", None, None), "up-to-date")
+        self.assertEqual(kevlar.determine_update_type("v0.0.0-20260525132238-948f4557a654", "0.0.0", "0.0.0"), "up-to-date")
+        self.assertEqual(kevlar.determine_update_type("v0.0.0-20260525132238-948f4557a654", "v0.0.0-20260525132238-948f4557a654", "v0.0.0-20260525132238-948f4557a654"), "up-to-date")
+        
+    @patch("urllib.request.urlopen")
+    def test_check_go_package_pseudo_version_status(self, mock_urlopen):
+        import io
+        # Mock empty list returned by Go proxy
+        mock_urlopen.return_value.__enter__.return_value.read.return_value = b""
+        
+        target = {
+            "name": "github.com/charmbracelet/ultraviolet",
+            "declared": "v0.0.0-20260525132238-948f4557a654",
+            "installed": ["v0.0.0-20260525132238-948f4557a654"]
+        }
+        res = kevlar.check_go_package(target)
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0]["status"], "up-to-date")
+        self.assertIsNone(res[0]["latest"])
+        self.assertIsNone(res[0]["latest_absolute"])
+
+    def test_parse_go_mod_advanced_directives(self):
+        import tempfile
+        import shutil
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            go_mod_content = (
+                "module github.com/test/project\n\n"
+                "go 1.24\n\n"
+                "require (\n"
+                "    github.com/gin-gonic/gin v1.9.1\n"
+                "    github.com/sirupsen/logrus v1.9.0 // indirect\n"
+                ")\n\n"
+                "replace github.com/gin-gonic/gin => ../local-gin\n\n"
+                "exclude (\n"
+                "    github.com/sirupsen/logrus v1.9.1\n"
+                ")\n\n"
+                "retract v1.0.0\n\n"
+                "tool golang.org/x/tools/cmd/stringer\n"
+            )
+            mod_path = os.path.join(temp_dir, "go.mod")
+            with open(mod_path, "w", encoding="utf-8") as f:
+                f.write(go_mod_content)
+
+            deps, dev_deps, local_reps, ex_vers, ret_vers = kevlar.parse_go_mod(mod_path)
+            self.assertIn("github.com/gin-gonic/gin", deps)
+            self.assertIn("github.com/sirupsen/logrus", dev_deps)
+            self.assertIn("golang.org/x/tools/cmd/stringer", dev_deps)
+            self.assertEqual(local_reps.get("github.com/gin-gonic/gin"), "../local-gin")
+            self.assertIn("v1.9.1", ex_vers.get("github.com/sirupsen/logrus", set()))
+            self.assertIn("v1.0.0", ret_vers.get("_global", set()))
+
+            # Test go.work workspace parsing
+            go_work_content = (
+                "go 1.24\n\n"
+                "use (\n"
+                "    .\n"
+                ")\n"
+            )
+            work_path = os.path.join(temp_dir, "go.work")
+            with open(work_path, "w", encoding="utf-8") as f:
+                f.write(go_work_content)
+
+            modules = kevlar.parse_go_work(work_path)
+            self.assertEqual(len(modules), 1)
+            self.assertEqual(os.path.abspath(mod_path), os.path.abspath(modules[0]))
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_excluded_version_vulnerability_fix_warning(self):
+        import tempfile
+        import shutil
+        from unittest.mock import patch
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            go_mod_content = (
+                "module github.com/test/excluded-vuln\n\n"
+                "go 1.22\n\n"
+                "require (\n"
+                "    github.com/vulnerable/pkg v1.0.0\n"
+                ")\n\n"
+                "exclude (\n"
+                "    github.com/vulnerable/pkg v1.0.1\n"
+                ")\n"
+            )
+            mod_path = os.path.join(temp_dir, "go.mod")
+            with open(mod_path, "w", encoding="utf-8") as f:
+                f.write(go_mod_content)
+
+            import argparse
+            args = argparse.Namespace(path=temp_dir, concurrent=1, vuls=True)
+
+            with patch("kevlar.check_all_go_targets") as mock_check, \
+                 patch("kevlar.check_osv_vulnerabilities") as mock_osv:
+                mock_check.return_value = [{
+                    "name": "github.com/vulnerable/pkg",
+                    "declared": "v1.0.0",
+                    "installed": "v1.0.0",
+                    "latest": "v1.0.0",
+                    "latest_same_major": "v1.0.0",
+                    "latest_absolute": "v1.0.0",
+                    "status": "up-to-date",
+                    "deprecated": None,
+                    "error": None,
+                    "repo_url": None,
+                    "compare_url": None,
+                    "releases_url": None,
+                    "dep_type": "Direct"
+                }]
+                mock_osv.return_value = {
+                    ("github.com/vulnerable/pkg", "v1.0.0"): [{
+                        "id": "GHSA-1234-5678-9012",
+                        "summary": "Sample Vulnerability",
+                        "severity": "HIGH"
+                    }]
+                }
+
+                results, pkg_data, _ = kevlar.run_go_checker(args)
+                self.assertEqual(len(results), 1)
+                self.assertIn("excluded_warning", results[0])
+                self.assertIn("v1.0.1", results[0]["excluded_warning"])
+                self.assertIn("may contain fix patches", results[0]["excluded_warning"])
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_parse_go_sum_and_verify_checksums(self):
+        import tempfile
+        import shutil
+        from unittest.mock import patch
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            sum_content = (
+                "github.com/fatih/color v1.19.0 h1:Zp3PiM21/9Ld6FzSKyL5c/BULoe/ONr9KlbYVOfG8+w=\n"
+                "github.com/fatih/color v1.19.0/go.mod h1:zNk67I0ZUT1bEGsSGyCZYZNrHuTkJJB+r6Q9VuMi0LE=\n"
+            )
+            sum_path = os.path.join(temp_dir, "go.sum")
+            with open(sum_path, "w", encoding="utf-8") as f:
+                f.write(sum_content)
+
+            parsed = kevlar.parse_go_sum(sum_path)
+            self.assertIn(("github.com/fatih/color", "v1.19.0"), parsed)
+            self.assertEqual(parsed[("github.com/fatih/color", "v1.19.0")], "h1:Zp3PiM21/9Ld6FzSKyL5c/BULoe/ONr9KlbYVOfG8+w=")
+
+            results = [{
+                "name": "github.com/fatih/color",
+                "installed": "v1.19.0",
+                "declared": "v1.19.0"
+            }, {
+                "name": "github.com/missing/pkg",
+                "installed": "v1.0.0",
+                "declared": "v1.0.0"
+            }]
+
+            with patch("urllib.request.urlopen") as mock_urlopen:
+                import io
+                mock_urlopen.return_value.__enter__.return_value.read.return_value = (
+                    b"51441162\n"
+                    b"github.com/fatih/color v1.19.0 h1:Zp3PiM21/9Ld6FzSKyL5c/BULoe/ONr9KlbYVOfG8+w=\n"
+                )
+                kevlar.verify_go_checksums(results, sum_path, max_workers=1)
+
+            self.assertTrue(results[0].get("checksum_verified"))
+            self.assertTrue(results[1].get("missing_checksum"))
+        finally:
+            shutil.rmtree(temp_dir)
 
     def test_generate_remediation_diff_cpm_fallback(self):
         import tempfile

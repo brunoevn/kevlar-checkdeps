@@ -49,7 +49,7 @@ sys.stderr = SafeWriter(sys.stderr)
 # Global lock to protect concurrent console writes (sys.stdout, sys.stderr, print)
 console_lock = threading.Lock()
 
-VERSION = "1.10.1"
+VERSION = "1.10.2"
 
 # External APIs Configuration
 URL_NPM_REGISTRY = "https://registry.npmjs.org/"
@@ -1248,7 +1248,13 @@ def find_node_constraint(base_path, pkg_data):
 
 def classify_update(installed_str, latest_str):
     """Classifies the update difference between installed and latest version."""
-    if installed_str == latest_str:
+    if not installed_str or not latest_str:
+        return "up-to-date"
+        
+    clean_inst = str(installed_str).strip().lstrip("v").split("+")[0]
+    clean_late = str(latest_str).strip().lstrip("v").split("+")[0]
+    
+    if clean_inst == clean_late or clean_late in ("0.0.0", "unknown", ""):
         return "up-to-date"
         
     cmp = compare_versions(installed_str, latest_str)
@@ -1267,13 +1273,19 @@ def classify_update(installed_str, latest_str):
 
 def determine_update_type(installed_ver, latest_same_major, latest_absolute):
     """Determines update type, returning minor-major or patch-major if both updates exist."""
-    if not latest_absolute or installed_ver == "0.0.0":
+    if not latest_absolute or str(latest_absolute).strip() in ("0.0.0", "unknown", ""):
+        return "up-to-date"
+    if not installed_ver or str(installed_ver).strip() in ("0.0.0", "unknown", ""):
+        return "up-to-date"
+        
+    clean_inst = str(installed_ver).strip().lstrip("v").split("+")[0]
+    clean_abs = str(latest_absolute).strip().lstrip("v").split("+")[0]
+    if clean_inst == clean_abs:
         return "up-to-date"
         
     abs_type = classify_update(installed_ver, latest_absolute)
     if abs_type == "major" and latest_same_major and latest_same_major != installed_ver:
-        clean_inst = re.sub(r'^[^\d]*', '', installed_ver).strip()
-        clean_same = re.sub(r'^[^\d]*', '', latest_same_major).strip()
+        clean_same = str(latest_same_major).strip().lstrip("v").split("+")[0]
         if clean_inst and clean_same and clean_inst != clean_same:
             same_major_type = classify_update(clean_inst, clean_same)
             if same_major_type in ("minor", "patch"):
@@ -4672,13 +4684,52 @@ def escape_go_module(name):
             escaped += char
     return escaped
 
+def parse_go_work(filepath):
+    """Parses go.work workspace files for module directories in 'use' blocks/directives."""
+    modules = []
+    if not filepath or not os.path.exists(filepath):
+        return modules
+    try:
+        base_dir = os.path.dirname(filepath)
+        in_use_block = False
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                line_clean = line.strip()
+                if not line_clean or line_clean.startswith("//"):
+                    continue
+                if line_clean.startswith("use") and line_clean.endswith("("):
+                    in_use_block = True
+                    continue
+                elif in_use_block and line_clean == ")":
+                    in_use_block = False
+                    continue
+                
+                parts = line_clean.split()
+                if in_use_block:
+                    rel_path = parts[0]
+                    mod_path = os.path.abspath(os.path.join(base_dir, rel_path, "go.mod"))
+                    if os.path.exists(mod_path):
+                        modules.append(mod_path)
+                elif line_clean.startswith("use "):
+                    if len(parts) >= 2:
+                        rel_path = parts[1]
+                        mod_path = os.path.abspath(os.path.join(base_dir, rel_path, "go.mod"))
+                        if os.path.exists(mod_path):
+                            modules.append(mod_path)
+    except Exception as e:
+        print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing go.work: {e}{COLOR_RESET}")
+    return modules
+
 def parse_go_mod(filepath):
-    """Parses go.mod for direct and indirect dependencies with replace support."""
+    """Parses go.mod for direct, indirect, tools, replacements, excludes, and retractions."""
     dependencies = {}
     devDependencies = {}
+    local_replacements = {}
+    excluded_versions = {}
+    retracted_versions = {}
     
     if not filepath or not os.path.exists(filepath):
-        return dependencies, devDependencies
+        return dependencies, devDependencies, local_replacements, excluded_versions, retracted_versions
         
     raw_reqs = []
     replacements = {}
@@ -4689,6 +4740,9 @@ def parse_go_mod(filepath):
             lines = f.readlines()
             
         in_require_block = False
+        in_exclude_block = False
+        in_retract_block = False
+        in_tool_block = False
         
         for line in lines:
             line_clean = line.strip()
@@ -4714,7 +4768,28 @@ def parse_go_mod(filepath):
             elif in_require_block and line_content == ")":
                 in_require_block = False
                 continue
-                
+
+            if line_content.startswith("exclude") and line_content.endswith("("):
+                in_exclude_block = True
+                continue
+            elif in_exclude_block and line_content == ")":
+                in_exclude_block = False
+                continue
+
+            if line_content.startswith("retract") and line_content.endswith("("):
+                in_retract_block = True
+                continue
+            elif in_retract_block and line_content == ")":
+                in_retract_block = False
+                continue
+
+            if line_content.startswith("tool") and line_content.endswith("("):
+                in_tool_block = True
+                continue
+            elif in_tool_block and line_content == ")":
+                in_tool_block = False
+                continue
+
             if "=>" in line_content:
                 left, right = line_content.split("=>", 1)
                 left_parts = left.strip().split()
@@ -4722,16 +4797,49 @@ def parse_go_mod(filepath):
                     left_parts = left_parts[1:]
                     
                 right_parts = right.strip().split()
-                if len(right_parts) == 2 and left_parts:
-                    new_path = right_parts[0]
-                    new_version = right_parts[1]
-                    if not (new_path.startswith('.') or new_path.startswith('/') or new_path.startswith('\\')):
-                        if len(left_parts) == 1:
-                            replacements[left_parts[0]] = (new_path, new_version)
-                        elif len(left_parts) == 2:
-                            replacements_ver[(left_parts[0], left_parts[1])] = (new_path, new_version)
+                left_pkg = left_parts[0] if left_parts else None
+                left_ver = left_parts[1] if len(left_parts) >= 2 else None
+
+                if left_pkg and right_parts:
+                    target_path = right_parts[0]
+                    is_local_path = target_path.startswith('.') or target_path.startswith('/') or target_path.startswith('\\') or len(right_parts) == 1
+                    if is_local_path:
+                        local_replacements[left_pkg] = target_path
+                    elif len(right_parts) >= 2:
+                        new_path, new_version = right_parts[0], right_parts[1]
+                        if left_ver:
+                            replacements_ver[(left_pkg, left_ver)] = (new_path, new_version)
+                        else:
+                            replacements[left_pkg] = (new_path, new_version)
                 continue
-                
+
+            if in_exclude_block or line_content.startswith("exclude"):
+                parts = line_content.split()
+                if line_content.startswith("exclude"):
+                    parts = parts[1:]
+                if len(parts) >= 2:
+                    ex_pkg, ex_ver = parts[0], parts[1]
+                    excluded_versions.setdefault(ex_pkg, set()).add(ex_ver)
+                continue
+
+            if in_retract_block or line_content.startswith("retract"):
+                parts = line_content.split()
+                if line_content.startswith("retract"):
+                    parts = parts[1:]
+                if len(parts) >= 1:
+                    ret_ver = parts[0].strip("[]()")
+                    retracted_versions.setdefault("_global", set()).add(ret_ver)
+                continue
+
+            if in_tool_block or line_content.startswith("tool"):
+                parts = line_content.split()
+                if line_content.startswith("tool"):
+                    parts = parts[1:]
+                if parts:
+                    tool_pkg = parts[0]
+                    devDependencies[tool_pkg] = "tool"
+                continue
+
             if in_require_block:
                 req_parts = line_content.split()
                 if len(req_parts) >= 2:
@@ -4745,7 +4853,7 @@ def parse_go_mod(filepath):
                         pkg = req_parts[1]
                         ver = req_parts[2]
                         raw_reqs.append((pkg, ver, is_indirect))
-                        
+
         for pkg, ver, is_indir in raw_reqs:
             final_pkg = pkg
             final_ver = ver
@@ -4763,24 +4871,36 @@ def parse_go_mod(filepath):
     except Exception as e:
         print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing go.mod: {e}{COLOR_RESET}")
         
-    return dependencies, devDependencies
+    return dependencies, devDependencies, local_replacements, excluded_versions, retracted_versions
 
 def check_go_package(target):
     """Queries proxy.golang.org for Go module versions list."""
     name = target["name"]
     declared = target["declared"]
     installed_versions = target["installed"]
+    excluded_set = target.get("excluded_versions") or set()
+    retracted_set = target.get("retracted_versions") or set()
     
     versions_to_check = installed_versions if installed_versions else [declared]
     results = []
     
     try:
-        escaped_name = escape_go_module(name)
-        url = f"{URL_GO_PROXY}{escaped_name}/@v/list"
+        candidate_name = name
+        resp_data = None
         
-        req = urllib.request.Request(url)
-        with safe_urlopen(req, timeout=10) as response:
-            resp_data = response.read().decode("utf-8")
+        while True:
+            try:
+                escaped_name = escape_go_module(candidate_name)
+                url = f"{URL_GO_PROXY}{escaped_name}/@v/list"
+                req = urllib.request.Request(url)
+                with safe_urlopen(req, timeout=10) as response:
+                    resp_data = response.read().decode("utf-8")
+                break
+            except urllib.error.HTTPError as err:
+                if err.code == 404 and "/" in candidate_name:
+                    candidate_name = candidate_name.rsplit("/", 1)[0]
+                else:
+                    raise err
             
         versions_list = [v.strip() for v in resp_data.split("\n") if v.strip()]
         
@@ -4793,6 +4913,12 @@ def check_go_package(target):
                 
         valid_versions = stable_versions if stable_versions else [(v, v.split("+")[0]) for v in versions_list]
         
+        # Exclude versions specified in exclude / retract directives
+        if excluded_set or retracted_set:
+            filtered = [item for item in valid_versions if item[0] not in excluded_set and item[0] not in retracted_set]
+            if filtered:
+                valid_versions = filtered
+        
         all_versions = [item[0] for item in valid_versions]
         
         for ver_str in versions_to_check:
@@ -4800,11 +4926,10 @@ def check_go_package(target):
             if not latest_same_major:
                 latest_same_major = latest_absolute
                 
-            clean_ver = ver_str.lstrip("v").split("+")[0] if ver_str else "0.0.0"
-            clean_latest_absolute = latest_absolute.lstrip("v").split("+")[0] if latest_absolute else "0.0.0"
-            
-            clean_latest_same = latest_same_major.lstrip("v").split("+")[0] if latest_same_major else "0.0.0"
-            update_type = determine_update_type(clean_ver, clean_latest_same, clean_latest_absolute)
+            clean_ver = ver_str.lstrip("v").split("+")[0] if ver_str else ""
+            clean_latest_absolute = latest_absolute.lstrip("v").split("+")[0] if latest_absolute else ""
+            clean_latest_same = latest_same_major.lstrip("v").split("+")[0] if latest_same_major else ""
+            update_type = determine_update_type(ver_str, latest_same_major, latest_absolute)
                 
             repo_url = None
             compare_url = None
@@ -4828,7 +4953,8 @@ def check_go_package(target):
                 "error": None,
                 "repo_url": repo_url,
                 "compare_url": compare_url,
-                "releases_url": releases_url
+                "releases_url": releases_url,
+                "dep_type": target.get("dep_type", "Direct")
             })
             
     except urllib.error.HTTPError as e:
@@ -4841,7 +4967,8 @@ def check_go_package(target):
                 "latest": None,
                 "status": "error",
                 "deprecated": None,
-                "error": error_msg
+                "error": error_msg,
+                "dep_type": target.get("dep_type", "Direct")
             })
     except Exception as e:
         for ver_str in versions_to_check:
@@ -4852,7 +4979,8 @@ def check_go_package(target):
                 "latest": None,
                 "status": "error",
                 "deprecated": None,
-                "error": str(e)
+                "error": str(e),
+                "dep_type": target.get("dep_type", "Direct")
             })
             
     return results
@@ -4863,63 +4991,320 @@ def check_all_go_targets(targets, max_workers):
     print(f"{COLOR_BOLD}{COLOR_CYAN}Checking {total} packages...{COLOR_RESET}\n")
     return _check_all_targets_unified(targets, check_go_package, f"{COLOR_GRAY}[Progress: Go check]", max_workers)
 
+def resolve_go_parent_graph(direct_deps, max_workers=10):
+    """
+    Fetches .mod files for direct Go dependencies via GOPROXY concurrently
+    to map which direct dependencies require each transitive dependency.
+    Returns dict: { child_package_name: set([parent_package_name, ...]) }
+    """
+    parents = {}
+    if not direct_deps:
+        return parents
+        
+    total = len(direct_deps)
+    completed = 0
+    lock = threading.Lock()
+
+    def _fetch_single_mod(item):
+        nonlocal completed
+        name, ver = item
+        if name and ver:
+            try:
+                esc = escape_go_module(name)
+                url = f"{URL_GO_PROXY}{esc}/@v/{ver}.mod"
+                req = urllib.request.Request(url)
+                with safe_urlopen(req, timeout=6) as response:
+                    mod_text = response.read().decode("utf-8")
+                    
+                in_require_block = False
+                for line in mod_text.splitlines():
+                    line_clean = line.strip()
+                    if not line_clean or line_clean.startswith("//"):
+                        continue
+                    if line_clean.startswith("require") and line_clean.endswith("("):
+                        in_require_block = True
+                        continue
+                    elif in_require_block and line_clean == ")":
+                        in_require_block = False
+                        continue
+                        
+                    line_content = line_clean.split("//", 1)[0].strip() if "//" in line_clean else line_clean
+                    if not line_content:
+                        continue
+                        
+                    parts = line_content.split()
+                    if in_require_block and len(parts) >= 2:
+                        child_pkg = parts[0]
+                        parents.setdefault(child_pkg, set()).add(name)
+                    elif not in_require_block and line_content.startswith("require") and len(parts) >= 3:
+                        child_pkg = parts[1]
+                        parents.setdefault(child_pkg, set()).add(name)
+            except Exception:
+                pass
+
+        with lock:
+            completed += 1
+            pct = int((completed / total) * 100)
+            sys.stdout.write(f"\r{COLOR_GRAY}{ICON_INFO} Resolving parent dependency graph for Go modules: {completed}/{total} ({pct}%)...{COLOR_RESET}")
+            sys.stdout.flush()
+
+    sys.stdout.write(f"{COLOR_GRAY}{ICON_INFO} Resolving parent dependency graph for Go modules: 0/{total} (0%)...{COLOR_RESET}")
+    sys.stdout.flush()
+
+    with ThreadPoolExecutor(max_workers=min(max_workers, 15)) as executor:
+        executor.map(_fetch_single_mod, direct_deps.items())
+
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+    return parents
+
+def parse_go_sum(filepath):
+    """Parses go.sum file into dict mapping (module, version) -> h1_hash."""
+    checksums = {}
+    if not filepath or not os.path.exists(filepath):
+        return checksums
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                line_clean = line.strip()
+                if not line_clean or line_clean.startswith("//"):
+                    continue
+                parts = line_clean.split()
+                if len(parts) >= 3:
+                    mod_name = parts[0]
+                    ver_str = parts[1]
+                    hash_str = parts[2]
+                    if not ver_str.endswith("/go.mod") and hash_str.startswith("h1:"):
+                        checksums[(mod_name, ver_str)] = hash_str
+    except Exception as e:
+        print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing go.sum: {e}{COLOR_RESET}")
+    return checksums
+
+def verify_go_checksums(results, go_sum_path, max_workers=10):
+    """Verifies local go.sum entries against sum.golang.org Checksum Database."""
+    has_sum_file = os.path.exists(go_sum_path) if (go_sum_path and os.path.exists(go_sum_path)) else False
+    local_checksums = parse_go_sum(go_sum_path) if has_sum_file else {}
+    
+    if not has_sum_file:
+        for r in results:
+            if r.get("status") != "local":
+                r["missing_checksum"] = True
+        return
+
+    items_to_verify = []
+    for r in results:
+        if r.get("status") == "local":
+            continue
+        name = r["name"]
+        installed = r.get("installed") or r.get("declared")
+        if isinstance(installed, list):
+            installed = installed[0] if installed else None
+        
+        if not installed:
+            continue
+            
+        key = (name, installed)
+        if key not in local_checksums:
+            r["missing_checksum"] = True
+        else:
+            items_to_verify.append((r, name, installed, local_checksums[key]))
+
+    total = len(items_to_verify)
+    if total == 0:
+        return
+
+    completed = 0
+    lock = threading.Lock()
+
+    def _verify_single(item):
+        nonlocal completed
+        r, name, ver, local_hash = item
+        try:
+            esc = escape_go_module(name)
+            url = f"https://sum.golang.org/lookup/{esc}@{ver}"
+            req = urllib.request.Request(url)
+            with safe_urlopen(req, timeout=6) as response:
+                resp_text = response.read().decode("utf-8")
+            
+            official_hash = None
+            prefix = f"{name} {ver} h1:"
+            for line in resp_text.splitlines():
+                if line.startswith(prefix):
+                    official_hash = line.split(prefix, 1)[1].strip()
+                    break
+                    
+            if official_hash and (f"h1:{official_hash}" != local_hash and official_hash != local_hash):
+                r["mismatch_checksum"] = True
+            elif official_hash:
+                r["checksum_verified"] = True
+        except Exception:
+            pass
+
+        with lock:
+            completed += 1
+            pct = int((completed / total) * 100)
+            sys.stdout.write(f"\r{COLOR_GRAY}{ICON_INFO} Verifying go.sum checksums against sum.golang.org: {completed}/{total} ({pct}%)...{COLOR_RESET}")
+            sys.stdout.flush()
+
+    sys.stdout.write(f"{COLOR_GRAY}{ICON_INFO} Verifying go.sum checksums against sum.golang.org: 0/{total} (0%)...{COLOR_RESET}")
+    sys.stdout.flush()
+
+    with ThreadPoolExecutor(max_workers=min(max_workers, 15)) as executor:
+        executor.map(_verify_single, items_to_verify)
+
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+
 def run_go_checker(args):
-    """Main orchestrator for Go Modules checker."""
-    manifest = None
+    """Main orchestrator for Go Modules checker with workspace (go.work) and local replace support."""
+    manifests = []
     if os.path.exists(args.path):
         if os.path.isdir(args.path):
+            work_file = os.path.join(args.path, "go.work")
+            if os.path.exists(work_file):
+                manifests.extend(parse_go_work(work_file))
             cand = os.path.join(args.path, "go.mod")
-            if os.path.exists(cand):
-                manifest = cand
+            if os.path.exists(cand) and cand not in manifests:
+                manifests.append(cand)
         elif os.path.isfile(args.path) and args.path.endswith("go.mod"):
-            manifest = args.path
+            manifests.append(args.path)
             
-    if not manifest:
-        print(f"{COLOR_RED}{ICON_ERROR} No go.mod found in: {args.path}{COLOR_RESET}")
+    if not manifests:
+        print(f"{COLOR_RED}{ICON_ERROR} No go.mod or go.work found in: {args.path}{COLOR_RESET}")
         return None, None, 0
         
-    print(f"{COLOR_GRAY}{ICON_INFO} Reading go.mod...{COLOR_RESET}")
-    dependencies, devDependencies = parse_go_mod(manifest)
-    
-    all_direct = {**dependencies, **devDependencies}
+    all_deps = {}
+    all_dev_deps = {}
+    all_local_replacements = {}
+    all_excluded = {}
+    all_retracted = {}
+
+    for manifest in manifests:
+        print(f"{COLOR_GRAY}{ICON_INFO} Reading {os.path.basename(manifest)}...{COLOR_RESET}")
+        deps, dev_deps, local_reps, ex_vers, ret_vers = parse_go_mod(manifest)
+        all_deps.update(deps)
+        all_dev_deps.update(dev_deps)
+        all_local_replacements.update(local_reps)
+        for k, v in ex_vers.items():
+            all_excluded.setdefault(k, set()).update(v)
+        for k, v in ret_vers.items():
+            all_retracted.setdefault(k, set()).update(v)
+
     targets = []
+    local_results = []
     
-    for name, declared_ver in all_direct.items():
-        targets.append({
-            "name": name,
-            "declared": declared_ver,
-            "installed": [declared_ver] if declared_ver else []
-        })
-        
-    if not targets:
-        print(f"{COLOR_YELLOW}{ICON_WARN} No packages identified to check.{COLOR_RESET}")
-        return None, None, 0
+    for name, declared_ver in all_deps.items():
+        if name in all_local_replacements:
+            loc_path = all_local_replacements[name]
+            local_results.append({
+                "name": name,
+                "declared": declared_ver,
+                "installed": declared_ver,
+                "latest": f"Local ({loc_path})",
+                "latest_same_major": declared_ver,
+                "latest_absolute": declared_ver,
+                "status": "local",
+                "deprecated": None,
+                "error": None,
+                "repo_url": None,
+                "compare_url": None,
+                "releases_url": None,
+                "dep_type": "Direct",
+                "required_by": []
+            })
+        else:
+            targets.append({
+                "name": name,
+                "declared": declared_ver,
+                "installed": [declared_ver] if declared_ver else [],
+                "dep_type": "Direct",
+                "excluded_versions": all_excluded.get(name, set()),
+                "retracted_versions": all_retracted.get("_global", set())
+            })
+
+    for name, declared_ver in all_dev_deps.items():
+        dep_kind = "Dev" if declared_ver == "tool" else "Transitive"
+        if name in all_local_replacements:
+            loc_path = all_local_replacements[name]
+            local_results.append({
+                "name": name,
+                "declared": declared_ver,
+                "installed": declared_ver,
+                "latest": f"Local ({loc_path})",
+                "latest_same_major": declared_ver,
+                "latest_absolute": declared_ver,
+                "status": "local",
+                "deprecated": None,
+                "error": None,
+                "repo_url": None,
+                "compare_url": None,
+                "releases_url": None,
+                "dep_type": dep_kind,
+                "required_by": ["indirect"] if dep_kind == "Transitive" else []
+            })
+        else:
+            targets.append({
+                "name": name,
+                "declared": declared_ver,
+                "installed": [declared_ver] if declared_ver else [],
+                "dep_type": dep_kind,
+                "excluded_versions": all_excluded.get(name, set()),
+                "retracted_versions": all_retracted.get("_global", set())
+            })
         
     start_time = time.time()
-    results = check_all_go_targets(targets, args.concurrent)
+    results = check_all_go_targets(targets, args.concurrent) if targets else []
+    results.extend(local_results)
     
     # Check vulnerabilities via OSV if requested
     if getattr(args, "vuls", False):
         tech_info = TECHNOLOGIES["go"]
-        osv_vulns = check_osv_vulnerabilities(targets, tech_info["osv_ecosystem"], args.concurrent)
+        osv_vulns = check_osv_vulnerabilities([t for t in targets if t.get("installed")], tech_info["osv_ecosystem"], args.concurrent)
         
         for r in results:
             key = (r["name"], r["installed"])
             r["vulnerabilities"] = osv_vulns.get(key, [])
+            
+            # Alert if an excluded version in go.mod could contain a fix for this vulnerability
+            pkg_ex = all_excluded.get(r["name"], set())
+            if pkg_ex and r.get("vulnerabilities"):
+                r["excluded_warning"] = f"Version(s) {', '.join(sorted(pkg_ex))} are explicitly excluded in go.mod and may contain fix patches for detected vulnerabilities."
     else:
         for r in results:
             r["vulnerabilities"] = []
             
-    direct_keys = set(dependencies.keys())
+    # Resolve exact parent dependency tree via GOPROXY
+    parent_map = resolve_go_parent_graph(all_deps, getattr(args, "concurrent", 10))
+
+    direct_keys = set(all_deps.keys())
     for r in results:
-        if r["name"] not in direct_keys:
-            r["required_by"] = ["indirect"]
-        else:
+        if r["name"] not in direct_keys and r.get("dep_type") != "Dev":
+            r["dep_type"] = "Transitive"
+            pkg_parents = parent_map.get(r["name"])
+            if pkg_parents:
+                r["required_by"] = sorted(list(pkg_parents))
+            else:
+                r["required_by"] = ["indirect"]
+        elif r["name"] in direct_keys:
+            r["dep_type"] = "Direct"
             r["required_by"] = []
+
+    # Verify go.sum checksums against sum.golang.org
+    sum_file = None
+    if os.path.isdir(args.path):
+        cand_sum = os.path.join(args.path, "go.sum")
+        if os.path.exists(cand_sum):
+            sum_file = cand_sum
+    elif os.path.isfile(args.path):
+        cand_sum = os.path.join(os.path.dirname(args.path), "go.sum")
+        if os.path.exists(cand_sum):
+            sum_file = cand_sum
+
+    verify_go_checksums(results, sum_file, getattr(args, "concurrent", 10))
         
     elapsed = time.time() - start_time
     
-    return results, {"dependencies": dependencies, "devDependencies": devDependencies, "all_direct": all_direct}, elapsed
+    return results, {"dependencies": all_deps, "devDependencies": {}, "all_direct": all_deps}, elapsed
 
 # ==============================================================================
 # Rust (Cargo) Scanning Logic
@@ -7150,6 +7535,8 @@ class HTMLReportTemplateProvider:
         .stat-card.success .stat-val { color: var(--success); }
         .stat-card.muted .stat-val { color: var(--text-muted); }
         .stat-card.depr .stat-val { color: var(--depr); }
+        .stat-card.malicious { background-color: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); }
+        .stat-card.malicious .stat-val { color: #fca5a5; }
         
         /* Controls Toolbar */
         .controls-toolbar {
@@ -8130,9 +8517,13 @@ class HTMLReportTemplateProvider:
         <div class="dashboard-grid">
             <!-- Stats -->
             <div class="stats-grid">
-                <div class="stat-card primary-large">
+                <div class="stat-card primary">
                     <div class="stat-val">${total}</div>
                     <div class="stat-lbl">Checked</div>
+                </div>
+                <div class="stat-card malicious">
+                    <div class="stat-val">☠️ ${malicious}</div>
+                    <div class="stat-lbl">Malicious</div>
                 </div>
                 <div class="stat-card error">
                     <div class="stat-val">${total_vulns}</div>
@@ -8563,6 +8954,9 @@ class HTMLReportTemplateProvider:
                 if (r.mismatch_checksum) {
                     notes_warnings_list.push('<div class="note-warning-item"><span class="note-warning-icon">❌</span> <div><strong>INTEGRITY MISMATCH:</strong> Lockfile checksum does not match official registry checksum!</div></div>');
                 }
+                if (r.excluded_warning) {
+                    notes_warnings_list.push('<div class="note-warning-item"><span class="note-warning-icon">⚠️</span> <div><strong>Excluded Version Alert:</strong> ' + escapeHtml(r.excluded_warning) + '</div></div>');
+                }
                 
                 if (notes_warnings_list.length > 0) {
                     notes_warnings_html = 
@@ -8655,6 +9049,11 @@ class HTMLReportTemplateProvider:
                                     const latest_sm = r.latest_same_major || installed;
                                     const latest_abs = r.latest_absolute || installed;
                                     
+                                    const clean_ver_str = (val) => (val ? val.toString().replace(/^v/i, '') : '');
+                                    const installed_clean = clean_ver_str(installed);
+                                    const latest_sm_clean = clean_ver_str(latest_sm);
+                                    const latest_abs_clean = clean_ver_str(latest_abs);
+                                    
                                     let declared_html = '';
                                     if (declared_esc) {
                                         declared_html = '<div class="version-installed" style="margin-bottom: 2px;">' +
@@ -8667,7 +9066,7 @@ class HTMLReportTemplateProvider:
                                         declared_html +
                                         '<div class="version-installed">' +
                                             '<span class="label">Installed:</span>' +
-                                            '<span>v' + escapeHtml(installed) + '</span>' +
+                                            '<span>v' + escapeHtml(installed_clean) + '</span>' +
                                         '</div>' +
                                         '<div class="version-chips">';
                                     
@@ -8683,7 +9082,7 @@ class HTMLReportTemplateProvider:
                                             versions_html += 
                                                 '<span class="v-chip v-chip-safe" title="Safe update within the same major version">' +
                                                     '<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 3px;"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>' +
-                                                    'Safe: v' + escapeHtml(latest_sm) +
+                                                    'Safe: v' + escapeHtml(latest_sm_clean) +
                                                 '</span>';
                                         }
                                         // Major update available (requires upgrade to new major)
@@ -8691,7 +9090,7 @@ class HTMLReportTemplateProvider:
                                             versions_html += 
                                                 '<span class="v-chip v-chip-major" title="Major update with potential breaking changes">' +
                                                     '<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 3px;"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path></svg>' +
-                                                    'Major: v' + escapeHtml(latest_abs) +
+                                                    'Major: v' + escapeHtml(latest_abs_clean) +
                                                 '</span>';
                                         }
                                     }
@@ -9574,21 +9973,24 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                 else:
                     is_direct_install = check_semver_satisfies(installed, declared)
             
-            dep_type = "Transitive"
-            if r.get("is_engine", False):
-                dep_type = "Engine"
-            elif pkg_data and is_direct_install:
-                if name in pkg_data.get("all_direct", {}):
-                    dep_type = "Direct"
-                elif name in pkg_data.get("devDependencies", {}):
-                    dep_type = "Dev"
+            dep_type = r.get("dep_type")
+            if not dep_type:
+                dep_type = "Transitive"
+                if r.get("is_engine", False):
+                    dep_type = "Engine"
+                elif pkg_data and is_direct_install:
+                    if name in pkg_data.get("all_direct", {}):
+                        dep_type = "Direct"
+                    elif name in pkg_data.get("devDependencies", {}):
+                        dep_type = "Dev"
                     
-            if r.get("required_by") and not r.get("is_engine", False) and not is_direct_install:
+            if r.get("required_by") and not r.get("is_engine", False) and ("indirect" in r.get("required_by", []) or dep_type == "Transitive"):
                 dep_type = "Transitive"
                 
             pkg_record = {
                 "name": name,
-                "declared": declared if is_direct_install else "",
+                "declared": declared if (is_direct_install and dep_type != "Transitive") else declared if dep_type == "Transitive" else "",
+                "dep_type": dep_type,
                 "installed": installed,
                 "latest": r["latest"],
                 "latest_same_major": r.get("latest_same_major"),
@@ -9616,6 +10018,7 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                 "project_path": r.get("project_path", ""),
                 "dep_type": dep_type,
                 "remediation": r.get("remediation"),
+                "excluded_warning": r.get("excluded_warning"),
                 "compare_url": r.get("compare_url"),
                 "releases_url": r.get("releases_url")
             }
@@ -9657,6 +10060,7 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             "VERSION": VERSION,
             "deprecated": str(deprecated),
             "errors": str(errors),
+            "malicious": str(malicious),
             "outdated": str(outdated),
             "project_path_header_html": project_path_header_html,
             "suppressed_vulns": str(suppressed_vulns),
@@ -10270,6 +10674,8 @@ Examples:
         if "technology" not in r:
             r["technology"] = args.tech if args.tech != "auto" else r.get("technology")
             
+    sys.stdout.write(f"{COLOR_GRAY}{ICON_INFO} Processing results and generating report table...{COLOR_RESET}\n")
+    sys.stdout.flush()
     populate_remediation_recommendations(results, args.path)
     validate_configuration_drift(results)
     apply_vulnerability_suppressions(results, args.suppress, project_path=args.path)
