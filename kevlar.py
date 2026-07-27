@@ -4684,13 +4684,52 @@ def escape_go_module(name):
             escaped += char
     return escaped
 
+def parse_go_work(filepath):
+    """Parses go.work workspace files for module directories in 'use' blocks/directives."""
+    modules = []
+    if not filepath or not os.path.exists(filepath):
+        return modules
+    try:
+        base_dir = os.path.dirname(filepath)
+        in_use_block = False
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                line_clean = line.strip()
+                if not line_clean or line_clean.startswith("//"):
+                    continue
+                if line_clean.startswith("use") and line_clean.endswith("("):
+                    in_use_block = True
+                    continue
+                elif in_use_block and line_clean == ")":
+                    in_use_block = False
+                    continue
+                
+                parts = line_clean.split()
+                if in_use_block:
+                    rel_path = parts[0]
+                    mod_path = os.path.abspath(os.path.join(base_dir, rel_path, "go.mod"))
+                    if os.path.exists(mod_path):
+                        modules.append(mod_path)
+                elif line_clean.startswith("use "):
+                    if len(parts) >= 2:
+                        rel_path = parts[1]
+                        mod_path = os.path.abspath(os.path.join(base_dir, rel_path, "go.mod"))
+                        if os.path.exists(mod_path):
+                            modules.append(mod_path)
+    except Exception as e:
+        print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing go.work: {e}{COLOR_RESET}")
+    return modules
+
 def parse_go_mod(filepath):
-    """Parses go.mod for direct and indirect dependencies with replace support."""
+    """Parses go.mod for direct, indirect, tools, replacements, excludes, and retractions."""
     dependencies = {}
     devDependencies = {}
+    local_replacements = {}
+    excluded_versions = {}
+    retracted_versions = {}
     
     if not filepath or not os.path.exists(filepath):
-        return dependencies, devDependencies
+        return dependencies, devDependencies, local_replacements, excluded_versions, retracted_versions
         
     raw_reqs = []
     replacements = {}
@@ -4701,6 +4740,9 @@ def parse_go_mod(filepath):
             lines = f.readlines()
             
         in_require_block = False
+        in_exclude_block = False
+        in_retract_block = False
+        in_tool_block = False
         
         for line in lines:
             line_clean = line.strip()
@@ -4726,7 +4768,28 @@ def parse_go_mod(filepath):
             elif in_require_block and line_content == ")":
                 in_require_block = False
                 continue
-                
+
+            if line_content.startswith("exclude") and line_content.endswith("("):
+                in_exclude_block = True
+                continue
+            elif in_exclude_block and line_content == ")":
+                in_exclude_block = False
+                continue
+
+            if line_content.startswith("retract") and line_content.endswith("("):
+                in_retract_block = True
+                continue
+            elif in_retract_block and line_content == ")":
+                in_retract_block = False
+                continue
+
+            if line_content.startswith("tool") and line_content.endswith("("):
+                in_tool_block = True
+                continue
+            elif in_tool_block and line_content == ")":
+                in_tool_block = False
+                continue
+
             if "=>" in line_content:
                 left, right = line_content.split("=>", 1)
                 left_parts = left.strip().split()
@@ -4734,16 +4797,49 @@ def parse_go_mod(filepath):
                     left_parts = left_parts[1:]
                     
                 right_parts = right.strip().split()
-                if len(right_parts) == 2 and left_parts:
-                    new_path = right_parts[0]
-                    new_version = right_parts[1]
-                    if not (new_path.startswith('.') or new_path.startswith('/') or new_path.startswith('\\')):
-                        if len(left_parts) == 1:
-                            replacements[left_parts[0]] = (new_path, new_version)
-                        elif len(left_parts) == 2:
-                            replacements_ver[(left_parts[0], left_parts[1])] = (new_path, new_version)
+                left_pkg = left_parts[0] if left_parts else None
+                left_ver = left_parts[1] if len(left_parts) >= 2 else None
+
+                if left_pkg and right_parts:
+                    target_path = right_parts[0]
+                    is_local_path = target_path.startswith('.') or target_path.startswith('/') or target_path.startswith('\\') or len(right_parts) == 1
+                    if is_local_path:
+                        local_replacements[left_pkg] = target_path
+                    elif len(right_parts) >= 2:
+                        new_path, new_version = right_parts[0], right_parts[1]
+                        if left_ver:
+                            replacements_ver[(left_pkg, left_ver)] = (new_path, new_version)
+                        else:
+                            replacements[left_pkg] = (new_path, new_version)
                 continue
-                
+
+            if in_exclude_block or line_content.startswith("exclude"):
+                parts = line_content.split()
+                if line_content.startswith("exclude"):
+                    parts = parts[1:]
+                if len(parts) >= 2:
+                    ex_pkg, ex_ver = parts[0], parts[1]
+                    excluded_versions.setdefault(ex_pkg, set()).add(ex_ver)
+                continue
+
+            if in_retract_block or line_content.startswith("retract"):
+                parts = line_content.split()
+                if line_content.startswith("retract"):
+                    parts = parts[1:]
+                if len(parts) >= 1:
+                    ret_ver = parts[0].strip("[]()")
+                    retracted_versions.setdefault("_global", set()).add(ret_ver)
+                continue
+
+            if in_tool_block or line_content.startswith("tool"):
+                parts = line_content.split()
+                if line_content.startswith("tool"):
+                    parts = parts[1:]
+                if parts:
+                    tool_pkg = parts[0]
+                    devDependencies[tool_pkg] = "tool"
+                continue
+
             if in_require_block:
                 req_parts = line_content.split()
                 if len(req_parts) >= 2:
@@ -4757,7 +4853,7 @@ def parse_go_mod(filepath):
                         pkg = req_parts[1]
                         ver = req_parts[2]
                         raw_reqs.append((pkg, ver, is_indirect))
-                        
+
         for pkg, ver, is_indir in raw_reqs:
             final_pkg = pkg
             final_ver = ver
@@ -4775,13 +4871,15 @@ def parse_go_mod(filepath):
     except Exception as e:
         print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing go.mod: {e}{COLOR_RESET}")
         
-    return dependencies, devDependencies
+    return dependencies, devDependencies, local_replacements, excluded_versions, retracted_versions
 
 def check_go_package(target):
     """Queries proxy.golang.org for Go module versions list."""
     name = target["name"]
     declared = target["declared"]
     installed_versions = target["installed"]
+    excluded_set = target.get("excluded_versions") or set()
+    retracted_set = target.get("retracted_versions") or set()
     
     versions_to_check = installed_versions if installed_versions else [declared]
     results = []
@@ -4804,6 +4902,12 @@ def check_go_package(target):
                 stable_versions.append((v, clean_v))
                 
         valid_versions = stable_versions if stable_versions else [(v, v.split("+")[0]) for v in versions_list]
+        
+        # Exclude versions specified in exclude / retract directives
+        if excluded_set or retracted_set:
+            filtered = [item for item in valid_versions if item[0] not in excluded_set and item[0] not in retracted_set]
+            if filtered:
+                valid_versions = filtered
         
         all_versions = [item[0] for item in valid_versions]
         
@@ -4839,7 +4943,8 @@ def check_go_package(target):
                 "error": None,
                 "repo_url": repo_url,
                 "compare_url": compare_url,
-                "releases_url": releases_url
+                "releases_url": releases_url,
+                "dep_type": target.get("dep_type", "Direct")
             })
             
     except urllib.error.HTTPError as e:
@@ -4852,7 +4957,8 @@ def check_go_package(target):
                 "latest": None,
                 "status": "error",
                 "deprecated": None,
-                "error": error_msg
+                "error": error_msg,
+                "dep_type": target.get("dep_type", "Direct")
             })
     except Exception as e:
         for ver_str in versions_to_check:
@@ -4863,7 +4969,8 @@ def check_go_package(target):
                 "latest": None,
                 "status": "error",
                 "deprecated": None,
-                "error": str(e)
+                "error": str(e),
+                "dep_type": target.get("dep_type", "Direct")
             })
             
     return results
@@ -4875,62 +4982,135 @@ def check_all_go_targets(targets, max_workers):
     return _check_all_targets_unified(targets, check_go_package, f"{COLOR_GRAY}[Progress: Go check]", max_workers)
 
 def run_go_checker(args):
-    """Main orchestrator for Go Modules checker."""
-    manifest = None
+    """Main orchestrator for Go Modules checker with workspace (go.work) and local replace support."""
+    manifests = []
     if os.path.exists(args.path):
         if os.path.isdir(args.path):
+            work_file = os.path.join(args.path, "go.work")
+            if os.path.exists(work_file):
+                manifests.extend(parse_go_work(work_file))
             cand = os.path.join(args.path, "go.mod")
-            if os.path.exists(cand):
-                manifest = cand
+            if os.path.exists(cand) and cand not in manifests:
+                manifests.append(cand)
         elif os.path.isfile(args.path) and args.path.endswith("go.mod"):
-            manifest = args.path
+            manifests.append(args.path)
             
-    if not manifest:
-        print(f"{COLOR_RED}{ICON_ERROR} No go.mod found in: {args.path}{COLOR_RESET}")
+    if not manifests:
+        print(f"{COLOR_RED}{ICON_ERROR} No go.mod or go.work found in: {args.path}{COLOR_RESET}")
         return None, None, 0
         
-    print(f"{COLOR_GRAY}{ICON_INFO} Reading go.mod...{COLOR_RESET}")
-    dependencies, devDependencies = parse_go_mod(manifest)
-    
-    all_direct = {**dependencies, **devDependencies}
+    all_deps = {}
+    all_dev_deps = {}
+    all_local_replacements = {}
+    all_excluded = {}
+    all_retracted = {}
+
+    for manifest in manifests:
+        print(f"{COLOR_GRAY}{ICON_INFO} Reading {os.path.basename(manifest)}...{COLOR_RESET}")
+        deps, dev_deps, local_reps, ex_vers, ret_vers = parse_go_mod(manifest)
+        all_deps.update(deps)
+        all_dev_deps.update(dev_deps)
+        all_local_replacements.update(local_reps)
+        for k, v in ex_vers.items():
+            all_excluded.setdefault(k, set()).update(v)
+        for k, v in ret_vers.items():
+            all_retracted.setdefault(k, set()).update(v)
+
     targets = []
+    local_results = []
     
-    for name, declared_ver in all_direct.items():
-        targets.append({
-            "name": name,
-            "declared": declared_ver,
-            "installed": [declared_ver] if declared_ver else []
-        })
-        
-    if not targets:
-        print(f"{COLOR_YELLOW}{ICON_WARN} No packages identified to check.{COLOR_RESET}")
-        return None, None, 0
+    for name, declared_ver in all_deps.items():
+        if name in all_local_replacements:
+            loc_path = all_local_replacements[name]
+            local_results.append({
+                "name": name,
+                "declared": declared_ver,
+                "installed": declared_ver,
+                "latest": f"Local ({loc_path})",
+                "latest_same_major": declared_ver,
+                "latest_absolute": declared_ver,
+                "status": "local",
+                "deprecated": None,
+                "error": None,
+                "repo_url": None,
+                "compare_url": None,
+                "releases_url": None,
+                "dep_type": "Direct",
+                "required_by": []
+            })
+        else:
+            targets.append({
+                "name": name,
+                "declared": declared_ver,
+                "installed": [declared_ver] if declared_ver else [],
+                "dep_type": "Direct",
+                "excluded_versions": all_excluded.get(name, set()),
+                "retracted_versions": all_retracted.get("_global", set())
+            })
+
+    for name, declared_ver in all_dev_deps.items():
+        dep_kind = "Dev" if declared_ver == "tool" else "Transitive"
+        if name in all_local_replacements:
+            loc_path = all_local_replacements[name]
+            local_results.append({
+                "name": name,
+                "declared": declared_ver,
+                "installed": declared_ver,
+                "latest": f"Local ({loc_path})",
+                "latest_same_major": declared_ver,
+                "latest_absolute": declared_ver,
+                "status": "local",
+                "deprecated": None,
+                "error": None,
+                "repo_url": None,
+                "compare_url": None,
+                "releases_url": None,
+                "dep_type": dep_kind,
+                "required_by": ["indirect"] if dep_kind == "Transitive" else []
+            })
+        else:
+            targets.append({
+                "name": name,
+                "declared": declared_ver,
+                "installed": [declared_ver] if declared_ver else [],
+                "dep_type": dep_kind,
+                "excluded_versions": all_excluded.get(name, set()),
+                "retracted_versions": all_retracted.get("_global", set())
+            })
         
     start_time = time.time()
-    results = check_all_go_targets(targets, args.concurrent)
+    results = check_all_go_targets(targets, args.concurrent) if targets else []
+    results.extend(local_results)
     
     # Check vulnerabilities via OSV if requested
     if getattr(args, "vuls", False):
         tech_info = TECHNOLOGIES["go"]
-        osv_vulns = check_osv_vulnerabilities(targets, tech_info["osv_ecosystem"], args.concurrent)
+        osv_vulns = check_osv_vulnerabilities([t for t in targets if t.get("installed")], tech_info["osv_ecosystem"], args.concurrent)
         
         for r in results:
             key = (r["name"], r["installed"])
             r["vulnerabilities"] = osv_vulns.get(key, [])
+            
+            # Alert if an excluded version in go.mod could contain a fix for this vulnerability
+            pkg_ex = all_excluded.get(r["name"], set())
+            if pkg_ex and r.get("vulnerabilities"):
+                r["excluded_warning"] = f"Version(s) {', '.join(sorted(pkg_ex))} are explicitly excluded in go.mod and may contain fix patches for detected vulnerabilities."
     else:
         for r in results:
             r["vulnerabilities"] = []
             
-    direct_keys = set(dependencies.keys())
+    direct_keys = set(all_deps.keys())
     for r in results:
-        if r["name"] not in direct_keys:
+        if r["name"] not in direct_keys and r.get("dep_type") != "Dev":
+            r["dep_type"] = "Transitive"
             r["required_by"] = ["indirect"]
-        else:
+        elif r["name"] in direct_keys:
+            r["dep_type"] = "Direct"
             r["required_by"] = []
         
     elapsed = time.time() - start_time
     
-    return results, {"dependencies": dependencies, "devDependencies": devDependencies, "all_direct": all_direct}, elapsed
+    return results, {"dependencies": all_deps, "devDependencies": {}, "all_direct": all_deps}, elapsed
 
 # ==============================================================================
 # Rust (Cargo) Scanning Logic
@@ -8574,6 +8754,9 @@ class HTMLReportTemplateProvider:
                 if (r.mismatch_checksum) {
                     notes_warnings_list.push('<div class="note-warning-item"><span class="note-warning-icon">❌</span> <div><strong>INTEGRITY MISMATCH:</strong> Lockfile checksum does not match official registry checksum!</div></div>');
                 }
+                if (r.excluded_warning) {
+                    notes_warnings_list.push('<div class="note-warning-item"><span class="note-warning-icon">⚠️</span> <div><strong>Excluded Version Alert:</strong> ' + escapeHtml(r.excluded_warning) + '</div></div>');
+                }
                 
                 if (notes_warnings_list.length > 0) {
                     notes_warnings_html = 
@@ -9590,21 +9773,24 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                 else:
                     is_direct_install = check_semver_satisfies(installed, declared)
             
-            dep_type = "Transitive"
-            if r.get("is_engine", False):
-                dep_type = "Engine"
-            elif pkg_data and is_direct_install:
-                if name in pkg_data.get("all_direct", {}):
-                    dep_type = "Direct"
-                elif name in pkg_data.get("devDependencies", {}):
-                    dep_type = "Dev"
+            dep_type = r.get("dep_type")
+            if not dep_type:
+                dep_type = "Transitive"
+                if r.get("is_engine", False):
+                    dep_type = "Engine"
+                elif pkg_data and is_direct_install:
+                    if name in pkg_data.get("all_direct", {}):
+                        dep_type = "Direct"
+                    elif name in pkg_data.get("devDependencies", {}):
+                        dep_type = "Dev"
                     
-            if r.get("required_by") and not r.get("is_engine", False) and not is_direct_install:
+            if r.get("required_by") and not r.get("is_engine", False) and ("indirect" in r.get("required_by", []) or dep_type == "Transitive"):
                 dep_type = "Transitive"
                 
             pkg_record = {
                 "name": name,
-                "declared": declared if is_direct_install else "",
+                "declared": declared if (is_direct_install and dep_type != "Transitive") else declared if dep_type == "Transitive" else "",
+                "dep_type": dep_type,
                 "installed": installed,
                 "latest": r["latest"],
                 "latest_same_major": r.get("latest_same_major"),
@@ -9632,6 +9818,7 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                 "project_path": r.get("project_path", ""),
                 "dep_type": dep_type,
                 "remediation": r.get("remediation"),
+                "excluded_warning": r.get("excluded_warning"),
                 "compare_url": r.get("compare_url"),
                 "releases_url": r.get("releases_url")
             }
