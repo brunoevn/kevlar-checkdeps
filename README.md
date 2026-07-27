@@ -18,7 +18,7 @@ Designed with a modular and extensible architecture, it supports checking direct
   - **Java (`maven`)**: supporting multi-module `<modules>`, centralized `<dependencyManagement>`, and recursive parent POM properties/dependency inheritance.
   - **Java/Kotlin (`gradle`)**: supporting `build.gradle`, `build.gradle.kts`, `gradle.lockfile`, and Version Catalogs `libs.versions.toml`.
   - **Android (`android`)**: prioritizing Google's Maven Registry for Android libraries.
-  - **Go (`go`)**: supporting `go.mod` (including module `replace` directives to accurately resolve local or overridden dependencies).
+  - **Go (`go`)**: supporting `go.mod`, `go.sum`, and `go.work` workspaces (including module `replace` directives, `exclude`, `retract`, and Go 1.24+ `tool` executable directives).
   - **Rust (`rust`)**: supporting `Cargo.toml` and `Cargo.lock` (including native v4 lockfile formats).
   - **Ruby (`ruby`)**: supporting `Gemfile` and `Gemfile.lock`.
 - **Outdated Package Detection**: Compares installed versions against the latest versions in registries, classifying updates into `Major`, `Minor`, and `Patch` increments, as well as composite status like `Minor/Major` and `Patch/Major` when both a safe same-major update and a major version update are available.
@@ -28,22 +28,24 @@ Designed with a modular and extensible architecture, it supports checking direct
   - For `pip`: Identifies and reports "yanked" (deprecated/withdrawn) releases on PyPI.
   - For `rust`: Identifies and reports "yanked" crates on crates.io.
 - **Security Vulnerability Audits**: Queries the public Google OSV database to identify active vulnerabilities, including CVE/GHSA IDs, CVSS vectors, and advisory summaries.
-- **Malicious Code Detection (`MAL-`)**: Automatically classifies packages flagged with `MAL-` vulnerability IDs (indicating known malicious payload distributions) under a high-priority `malicious` severity. These threats are prioritized at the top of all reports, decorated with dedicated UI indicators (such as `☠️ MALICIOUS CODE` badges and custom glow filters in HTML reports), tracked separately in final summaries, and can be isolated via interactive dashboard filters.
+- **Malicious Code Detection (`MAL-`)**: Automatically classifies packages flagged with `MAL-` vulnerability IDs (indicating known malicious payload distributions) under a high-priority `malicious` severity. These threats are prioritized at the top of all reports, decorated with dedicated UI indicators (such as `☠️ MALICIOUS CODE` badges, custom glow filters in HTML reports, and a dedicated **`Malicious`** stat card positioned directly above `Outdated`), tracked separately in final summaries, and can be isolated via interactive dashboard filters.
 - **Transitive Parent Tracing**:
   - For `npm`: Recursively builds a dependency graph from `package-lock.json`, Yarn `yarn.lock`, or pnpm `pnpm-lock.yaml`.
   - For `pip`: Parses transitives from lockfiles (`poetry.lock`, `Pipfile.lock`, `pdm.lock`) or `# via parent_name` comments inside `requirements.txt`.
   - For `nuget`: Reconstructs the parent-child graph from `obj/project.assets.json`.
   - For `php`: Reconstructs the parent-child graph from `composer.lock`.
-  - For `go`: Flags indirect packages inside `go.mod` as transitive dependencies.
+  - For `go`: Concurrently queries `GOPROXY` (`resolve_go_parent_graph`) to build exact parent-child dependency trees, identifying which direct module requires each transitive dependency.
   - For `rust`: Reconstructs the parent-child graph from `Cargo.lock`.
   - For `ruby`: Reconstructs the parent-child graph from `Gemfile.lock`.
   - Annotates transitive packages clearly in reports (e.g., `Transitive (via Newtonsoft.Json)`).
 - **Fast Execution**: Uses Python's `concurrent.futures.ThreadPoolExecutor` to perform network requests concurrently.
 - **High Performance Scanning**: Optimizes queries by requesting abbreviated metadata format headers from npm, and checks security advisories in a single `POST /v1/querybatch` request rather than one-by-one.
-- **Visual Console Reporting**: Displays findings in a neat, colorized table with summary statistics.
+- **Visual Console Reporting**: Displays findings in a neat, colorized table with summary statistics and real-time percentage progress indicators.
 - **Terminal Compatibility Fallback**: Automatically detects standard terminal encoding capabilities, switching seamlessly from Unicode characters to clean ASCII frames to prevent encoding crashes on Windows consoles.
 - **JSON, Markdown, HTML & SARIF Exports**: Supports exporting results to formatted Markdown tables, raw JSON datasets, interactive HTML dashboards, or standard SARIF v2.1.0 JSON reports.
-- **NPM Registry Checksum Auditing**: For Node.js (`npm`), cross-validates local lockfile integrity hashes against official registry metadata, flagging **Missing Checksums**, **Weak Algorithms** (SHA-1), and critical **Integrity Mismatches**.
+- **Lockfile & Registry Checksum Auditing**:
+  - For Node.js (`npm`), cross-validates local lockfile integrity hashes against official registry metadata, flagging **Missing Checksums**, **Weak Algorithms** (SHA-1), and critical **Integrity Mismatches**.
+  - For Go (`go`), parses `go.sum` and cross-validates cryptographic `h1:` hashes against Google's official Go Checksum Database (`sum.golang.org`), flagging missing lockfile checksums and critical integrity mismatches.
 - **Advanced HTML Filtering Controls**: Interactive HTML dashboards include:
   - **AND Intersection Filtering**: Combine multiple filters (e.g., *Outdated* + *Vulnerable*) to show only packages matching all selected categories.
   - **Dependency Scope/Type Filtering**: Filter packages dynamically by their scope (e.g., *Direct*, *Dev*, *Transitive*, *Engine*) using the **Scope** dropdown filter.
