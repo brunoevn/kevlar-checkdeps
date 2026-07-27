@@ -4991,46 +4991,61 @@ def resolve_go_parent_graph(direct_deps, max_workers=10):
     if not direct_deps:
         return parents
         
+    total = len(direct_deps)
+    completed = 0
+    lock = threading.Lock()
+
     def _fetch_single_mod(item):
+        nonlocal completed
         name, ver = item
-        if not name or not ver:
-            return
-        try:
-            esc = escape_go_module(name)
-            url = f"{URL_GO_PROXY}{esc}/@v/{ver}.mod"
-            req = urllib.request.Request(url)
-            with safe_urlopen(req, timeout=6) as response:
-                mod_text = response.read().decode("utf-8")
-                
-            in_require_block = False
-            for line in mod_text.splitlines():
-                line_clean = line.strip()
-                if not line_clean or line_clean.startswith("//"):
-                    continue
-                if line_clean.startswith("require") and line_clean.endswith("("):
-                    in_require_block = True
-                    continue
-                elif in_require_block and line_clean == ")":
-                    in_require_block = False
-                    continue
+        if name and ver:
+            try:
+                esc = escape_go_module(name)
+                url = f"{URL_GO_PROXY}{esc}/@v/{ver}.mod"
+                req = urllib.request.Request(url)
+                with safe_urlopen(req, timeout=6) as response:
+                    mod_text = response.read().decode("utf-8")
                     
-                line_content = line_clean.split("//", 1)[0].strip() if "//" in line_clean else line_clean
-                if not line_content:
-                    continue
-                    
-                parts = line_content.split()
-                if in_require_block and len(parts) >= 2:
-                    child_pkg = parts[0]
-                    parents.setdefault(child_pkg, set()).add(name)
-                elif not in_require_block and line_content.startswith("require") and len(parts) >= 3:
-                    child_pkg = parts[1]
-                    parents.setdefault(child_pkg, set()).add(name)
-        except Exception:
-            pass
+                in_require_block = False
+                for line in mod_text.splitlines():
+                    line_clean = line.strip()
+                    if not line_clean or line_clean.startswith("//"):
+                        continue
+                    if line_clean.startswith("require") and line_clean.endswith("("):
+                        in_require_block = True
+                        continue
+                    elif in_require_block and line_clean == ")":
+                        in_require_block = False
+                        continue
+                        
+                    line_content = line_clean.split("//", 1)[0].strip() if "//" in line_clean else line_clean
+                    if not line_content:
+                        continue
+                        
+                    parts = line_content.split()
+                    if in_require_block and len(parts) >= 2:
+                        child_pkg = parts[0]
+                        parents.setdefault(child_pkg, set()).add(name)
+                    elif not in_require_block and line_content.startswith("require") and len(parts) >= 3:
+                        child_pkg = parts[1]
+                        parents.setdefault(child_pkg, set()).add(name)
+            except Exception:
+                pass
+
+        with lock:
+            completed += 1
+            pct = int((completed / total) * 100)
+            sys.stdout.write(f"\r{COLOR_GRAY}{ICON_INFO} Resolving parent dependency graph for Go modules: {completed}/{total} ({pct}%)...{COLOR_RESET}")
+            sys.stdout.flush()
+
+    sys.stdout.write(f"{COLOR_GRAY}{ICON_INFO} Resolving parent dependency graph for Go modules: 0/{total} (0%)...{COLOR_RESET}")
+    sys.stdout.flush()
 
     with ThreadPoolExecutor(max_workers=min(max_workers, 15)) as executor:
         executor.map(_fetch_single_mod, direct_deps.items())
-        
+
+    sys.stdout.write("\n")
+    sys.stdout.flush()
     return parents
 
 def parse_go_sum(filepath):
@@ -5084,7 +5099,15 @@ def verify_go_checksums(results, go_sum_path, max_workers=10):
         else:
             items_to_verify.append((r, name, installed, local_checksums[key]))
 
+    total = len(items_to_verify)
+    if total == 0:
+        return
+
+    completed = 0
+    lock = threading.Lock()
+
     def _verify_single(item):
+        nonlocal completed
         r, name, ver, local_hash = item
         try:
             esc = escape_go_module(name)
@@ -5107,10 +5130,20 @@ def verify_go_checksums(results, go_sum_path, max_workers=10):
         except Exception:
             pass
 
-    if items_to_verify:
-        print(f"{COLOR_GRAY}{ICON_INFO} Verifying go.sum checksums against sum.golang.org...{COLOR_RESET}")
-        with ThreadPoolExecutor(max_workers=min(max_workers, 15)) as executor:
-            executor.map(_verify_single, items_to_verify)
+        with lock:
+            completed += 1
+            pct = int((completed / total) * 100)
+            sys.stdout.write(f"\r{COLOR_GRAY}{ICON_INFO} Verifying go.sum checksums against sum.golang.org: {completed}/{total} ({pct}%)...{COLOR_RESET}")
+            sys.stdout.flush()
+
+    sys.stdout.write(f"{COLOR_GRAY}{ICON_INFO} Verifying go.sum checksums against sum.golang.org: 0/{total} (0%)...{COLOR_RESET}")
+    sys.stdout.flush()
+
+    with ThreadPoolExecutor(max_workers=min(max_workers, 15)) as executor:
+        executor.map(_verify_single, items_to_verify)
+
+    sys.stdout.write("\n")
+    sys.stdout.flush()
 
 def run_go_checker(args):
     """Main orchestrator for Go Modules checker with workspace (go.work) and local replace support."""
@@ -5231,7 +5264,6 @@ def run_go_checker(args):
             r["vulnerabilities"] = []
             
     # Resolve exact parent dependency tree via GOPROXY
-    print(f"{COLOR_GRAY}{ICON_INFO} Resolving parent dependency graph for Go modules...{COLOR_RESET}")
     parent_map = resolve_go_parent_graph(all_deps, getattr(args, "concurrent", 10))
 
     direct_keys = set(all_deps.keys())
