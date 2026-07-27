@@ -7535,6 +7535,8 @@ class HTMLReportTemplateProvider:
         .stat-card.success .stat-val { color: var(--success); }
         .stat-card.muted .stat-val { color: var(--text-muted); }
         .stat-card.depr .stat-val { color: var(--depr); }
+        .stat-card.malicious { background-color: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); }
+        .stat-card.malicious .stat-val { color: #fca5a5; }
         
         /* Controls Toolbar */
         .controls-toolbar {
@@ -8515,9 +8517,13 @@ class HTMLReportTemplateProvider:
         <div class="dashboard-grid">
             <!-- Stats -->
             <div class="stats-grid">
-                <div class="stat-card primary-large">
+                <div class="stat-card primary">
                     <div class="stat-val">${total}</div>
                     <div class="stat-lbl">Checked</div>
+                </div>
+                <div class="stat-card malicious">
+                    <div class="stat-val">☠️ ${malicious}</div>
+                    <div class="stat-lbl">Malicious</div>
                 </div>
                 <div class="stat-card error">
                     <div class="stat-val">${total_vulns}</div>
@@ -10054,6 +10060,7 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             "VERSION": VERSION,
             "deprecated": str(deprecated),
             "errors": str(errors),
+            "malicious": str(malicious),
             "outdated": str(outdated),
             "project_path_header_html": project_path_header_html,
             "suppressed_vulns": str(suppressed_vulns),
