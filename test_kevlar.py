@@ -2214,6 +2214,34 @@ class TestKevlar(unittest.TestCase):
         self.assertEqual(res[0]["status"], "local")
         self.assertIsNone(res[0]["error"])
 
+    def test_pseudo_version_and_none_latest_up_to_date(self):
+        # 1. Test classify_update with pseudo-versions and matching/clean versions
+        self.assertEqual(kevlar.classify_update("v0.0.0-20260525132238-948f4557a654", "0.0.0-20260525132238-948f4557a654"), "up-to-date")
+        self.assertEqual(kevlar.classify_update("0.0.0-20260525132238-948f4557a654", "0.0.0"), "up-to-date")
+        self.assertEqual(kevlar.classify_update("v1.2.3", "1.2.3"), "up-to-date")
+        
+        # 2. Test determine_update_type when latest_absolute is None, 0.0.0, or matches installed pseudo-version
+        self.assertEqual(kevlar.determine_update_type("v0.0.0-20260525132238-948f4557a654", None, None), "up-to-date")
+        self.assertEqual(kevlar.determine_update_type("v0.0.0-20260525132238-948f4557a654", "0.0.0", "0.0.0"), "up-to-date")
+        self.assertEqual(kevlar.determine_update_type("v0.0.0-20260525132238-948f4557a654", "v0.0.0-20260525132238-948f4557a654", "v0.0.0-20260525132238-948f4557a654"), "up-to-date")
+        
+    @patch("urllib.request.urlopen")
+    def test_check_go_package_pseudo_version_status(self, mock_urlopen):
+        import io
+        # Mock empty list returned by Go proxy
+        mock_urlopen.return_value.__enter__.return_value.read.return_value = b""
+        
+        target = {
+            "name": "github.com/charmbracelet/ultraviolet",
+            "declared": "v0.0.0-20260525132238-948f4557a654",
+            "installed": ["v0.0.0-20260525132238-948f4557a654"]
+        }
+        res = kevlar.check_go_package(target)
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0]["status"], "up-to-date")
+        self.assertIsNone(res[0]["latest"])
+        self.assertIsNone(res[0]["latest_absolute"])
+
     def test_generate_remediation_diff_cpm_fallback(self):
         import tempfile
         import shutil

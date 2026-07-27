@@ -1248,7 +1248,13 @@ def find_node_constraint(base_path, pkg_data):
 
 def classify_update(installed_str, latest_str):
     """Classifies the update difference between installed and latest version."""
-    if installed_str == latest_str:
+    if not installed_str or not latest_str:
+        return "up-to-date"
+        
+    clean_inst = str(installed_str).strip().lstrip("v").split("+")[0]
+    clean_late = str(latest_str).strip().lstrip("v").split("+")[0]
+    
+    if clean_inst == clean_late or clean_late in ("0.0.0", "unknown", ""):
         return "up-to-date"
         
     cmp = compare_versions(installed_str, latest_str)
@@ -1267,13 +1273,19 @@ def classify_update(installed_str, latest_str):
 
 def determine_update_type(installed_ver, latest_same_major, latest_absolute):
     """Determines update type, returning minor-major or patch-major if both updates exist."""
-    if not latest_absolute or installed_ver == "0.0.0":
+    if not latest_absolute or str(latest_absolute).strip() in ("0.0.0", "unknown", ""):
+        return "up-to-date"
+    if not installed_ver or str(installed_ver).strip() in ("0.0.0", "unknown", ""):
+        return "up-to-date"
+        
+    clean_inst = str(installed_ver).strip().lstrip("v").split("+")[0]
+    clean_abs = str(latest_absolute).strip().lstrip("v").split("+")[0]
+    if clean_inst == clean_abs:
         return "up-to-date"
         
     abs_type = classify_update(installed_ver, latest_absolute)
     if abs_type == "major" and latest_same_major and latest_same_major != installed_ver:
-        clean_inst = re.sub(r'^[^\d]*', '', installed_ver).strip()
-        clean_same = re.sub(r'^[^\d]*', '', latest_same_major).strip()
+        clean_same = str(latest_same_major).strip().lstrip("v").split("+")[0]
         if clean_inst and clean_same and clean_inst != clean_same:
             same_major_type = classify_update(clean_inst, clean_same)
             if same_major_type in ("minor", "patch"):
@@ -4800,11 +4812,10 @@ def check_go_package(target):
             if not latest_same_major:
                 latest_same_major = latest_absolute
                 
-            clean_ver = ver_str.lstrip("v").split("+")[0] if ver_str else "0.0.0"
-            clean_latest_absolute = latest_absolute.lstrip("v").split("+")[0] if latest_absolute else "0.0.0"
-            
-            clean_latest_same = latest_same_major.lstrip("v").split("+")[0] if latest_same_major else "0.0.0"
-            update_type = determine_update_type(clean_ver, clean_latest_same, clean_latest_absolute)
+            clean_ver = ver_str.lstrip("v").split("+")[0] if ver_str else ""
+            clean_latest_absolute = latest_absolute.lstrip("v").split("+")[0] if latest_absolute else ""
+            clean_latest_same = latest_same_major.lstrip("v").split("+")[0] if latest_same_major else ""
+            update_type = determine_update_type(ver_str, latest_same_major, latest_absolute)
                 
             repo_url = None
             compare_url = None
@@ -8655,6 +8666,11 @@ class HTMLReportTemplateProvider:
                                     const latest_sm = r.latest_same_major || installed;
                                     const latest_abs = r.latest_absolute || installed;
                                     
+                                    const clean_ver_str = (val) => (val ? val.toString().replace(/^v/i, '') : '');
+                                    const installed_clean = clean_ver_str(installed);
+                                    const latest_sm_clean = clean_ver_str(latest_sm);
+                                    const latest_abs_clean = clean_ver_str(latest_abs);
+                                    
                                     let declared_html = '';
                                     if (declared_esc) {
                                         declared_html = '<div class="version-installed" style="margin-bottom: 2px;">' +
@@ -8667,7 +8683,7 @@ class HTMLReportTemplateProvider:
                                         declared_html +
                                         '<div class="version-installed">' +
                                             '<span class="label">Installed:</span>' +
-                                            '<span>v' + escapeHtml(installed) + '</span>' +
+                                            '<span>v' + escapeHtml(installed_clean) + '</span>' +
                                         '</div>' +
                                         '<div class="version-chips">';
                                     
@@ -8683,7 +8699,7 @@ class HTMLReportTemplateProvider:
                                             versions_html += 
                                                 '<span class="v-chip v-chip-safe" title="Safe update within the same major version">' +
                                                     '<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 3px;"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>' +
-                                                    'Safe: v' + escapeHtml(latest_sm) +
+                                                    'Safe: v' + escapeHtml(latest_sm_clean) +
                                                 '</span>';
                                         }
                                         // Major update available (requires upgrade to new major)
@@ -8691,7 +8707,7 @@ class HTMLReportTemplateProvider:
                                             versions_html += 
                                                 '<span class="v-chip v-chip-major" title="Major update with potential breaking changes">' +
                                                     '<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 3px;"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path></svg>' +
-                                                    'Major: v' + escapeHtml(latest_abs) +
+                                                    'Major: v' + escapeHtml(latest_abs_clean) +
                                                 '</span>';
                                         }
                                     }
