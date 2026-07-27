@@ -4981,6 +4981,58 @@ def check_all_go_targets(targets, max_workers):
     print(f"{COLOR_BOLD}{COLOR_CYAN}Checking {total} packages...{COLOR_RESET}\n")
     return _check_all_targets_unified(targets, check_go_package, f"{COLOR_GRAY}[Progress: Go check]", max_workers)
 
+def resolve_go_parent_graph(direct_deps, max_workers=10):
+    """
+    Fetches .mod files for direct Go dependencies via GOPROXY concurrently
+    to map which direct dependencies require each transitive dependency.
+    Returns dict: { child_package_name: set([parent_package_name, ...]) }
+    """
+    parents = {}
+    if not direct_deps:
+        return parents
+        
+    def _fetch_single_mod(item):
+        name, ver = item
+        if not name or not ver:
+            return
+        try:
+            esc = escape_go_module(name)
+            url = f"{URL_GO_PROXY}{esc}/@v/{ver}.mod"
+            req = urllib.request.Request(url)
+            with safe_urlopen(req, timeout=6) as response:
+                mod_text = response.read().decode("utf-8")
+                
+            in_require_block = False
+            for line in mod_text.splitlines():
+                line_clean = line.strip()
+                if not line_clean or line_clean.startswith("//"):
+                    continue
+                if line_clean.startswith("require") and line_clean.endswith("("):
+                    in_require_block = True
+                    continue
+                elif in_require_block and line_clean == ")":
+                    in_require_block = False
+                    continue
+                    
+                line_content = line_clean.split("//", 1)[0].strip() if "//" in line_clean else line_clean
+                if not line_content:
+                    continue
+                    
+                parts = line_content.split()
+                if in_require_block and len(parts) >= 2:
+                    child_pkg = parts[0]
+                    parents.setdefault(child_pkg, set()).add(name)
+                elif not in_require_block and line_content.startswith("require") and len(parts) >= 3:
+                    child_pkg = parts[1]
+                    parents.setdefault(child_pkg, set()).add(name)
+        except Exception:
+            pass
+
+    with ThreadPoolExecutor(max_workers=min(max_workers, 15)) as executor:
+        executor.map(_fetch_single_mod, direct_deps.items())
+        
+    return parents
+
 def run_go_checker(args):
     """Main orchestrator for Go Modules checker with workspace (go.work) and local replace support."""
     manifests = []
@@ -5099,11 +5151,19 @@ def run_go_checker(args):
         for r in results:
             r["vulnerabilities"] = []
             
+    # Resolve exact parent dependency tree via GOPROXY
+    print(f"{COLOR_GRAY}{ICON_INFO} Resolving parent dependency graph for Go modules...{COLOR_RESET}")
+    parent_map = resolve_go_parent_graph(all_deps, getattr(args, "concurrent", 10))
+
     direct_keys = set(all_deps.keys())
     for r in results:
         if r["name"] not in direct_keys and r.get("dep_type") != "Dev":
             r["dep_type"] = "Transitive"
-            r["required_by"] = ["indirect"]
+            pkg_parents = parent_map.get(r["name"])
+            if pkg_parents:
+                r["required_by"] = sorted(list(pkg_parents))
+            else:
+                r["required_by"] = ["indirect"]
         elif r["name"] in direct_keys:
             r["dep_type"] = "Direct"
             r["required_by"] = []
