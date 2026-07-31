@@ -106,7 +106,7 @@ TECHNOLOGIES = {
         "runner": None
     },
     "nuget": {
-        "files": [".csproj", "packages.config", "project.assets.json"],
+        "files": [".csproj", ".sln", ".slnx", "packages.config", "project.assets.json"],
         "osv_ecosystem": "NuGet",
         "runner": None
     },
@@ -3695,41 +3695,65 @@ def find_and_parse_cpm_versions(start_path):
     return {}
 
 def parse_sln_file(sln_path):
-    """Parses a .sln file to retrieve relative paths to all project files."""
+    """Parses a .sln or .slnx solution file to retrieve relative paths to all project files."""
     project_paths = []
     try:
-        with open(sln_path, "r", encoding="utf-8-sig") as f:
-            content = f.read()
-            
-        proj_re = re.compile(r'Project\([^)]+\)\s*=\s*"[^"]+"\s*,\s*"([^"]+)"')
-        matches = proj_re.findall(content)
         sln_dir = os.path.dirname(os.path.abspath(sln_path))
-        
-        for m in matches:
-            norm_path = m.replace("\\", "/")
-            if norm_path.endswith((".csproj", ".vbproj", ".fsproj")):
-                full_path = os.path.join(sln_dir, norm_path)
-                if os.path.exists(full_path):
-                    project_paths.append(full_path)
+        if sln_path.lower().endswith(".slnx"):
+            try:
+                import xml.etree.ElementTree as ET
+                tree = ET.parse(sln_path)
+                root = tree.getroot()
+                for elem in root.iter("Project"):
+                    rel_p = elem.get("Path")
+                    if rel_p:
+                        norm_path = rel_p.replace("\\", "/")
+                        if norm_path.endswith((".csproj", ".vbproj", ".fsproj")):
+                            full_path = os.path.abspath(os.path.join(sln_dir, norm_path))
+                            if os.path.exists(full_path):
+                                project_paths.append(full_path)
+            except Exception:
+                with open(sln_path, "r", encoding="utf-8-sig", errors="ignore") as f:
+                    content = f.read()
+                matches = re.findall(r'Path\s*=\s*"([^"]+)"', content, re.IGNORECASE)
+                for m in matches:
+                    norm_path = m.replace("\\", "/")
+                    if norm_path.endswith((".csproj", ".vbproj", ".fsproj")):
+                        full_path = os.path.abspath(os.path.join(sln_dir, norm_path))
+                        if os.path.exists(full_path):
+                            project_paths.append(full_path)
+        else:
+            with open(sln_path, "r", encoding="utf-8-sig", errors="ignore") as f:
+                content = f.read()
+                
+            proj_re = re.compile(r'Project\([^)]+\)\s*=\s*"[^"]+"\s*,\s*"([^"]+)"')
+            matches = proj_re.findall(content)
+            
+            for m in matches:
+                norm_path = m.replace("\\", "/")
+                if norm_path.endswith((".csproj", ".vbproj", ".fsproj")):
+                    full_path = os.path.abspath(os.path.join(sln_dir, norm_path))
+                    if os.path.exists(full_path):
+                        project_paths.append(full_path)
     except Exception as e:
-        print(f"{COLOR_YELLOW}{ICON_WARN} Warning reading .sln file: {e}{COLOR_RESET}")
+        print(f"{COLOR_YELLOW}{ICON_WARN} Warning reading solution file: {e}{COLOR_RESET}")
         
     return project_paths
 
 def find_nuget_files(path):
-    """Finds Solution file (.sln), MSBuild project files, and assets files."""
+    """Finds Solution file (.sln / .slnx), MSBuild project files, and assets files."""
     sln_file = None
     manifests = []
     assets_files = []
     
     abs_path = os.path.abspath(path)
     if os.path.isfile(abs_path):
-        if abs_path.endswith(".sln"):
+        if abs_path.lower().endswith((".sln", ".slnx")):
             sln_file = abs_path
         elif abs_path.endswith((".csproj", ".vbproj", ".fsproj")) or abs_path.endswith("packages.config"):
             manifests = [abs_path]
     elif os.path.isdir(abs_path):
-        sln_candidates = [os.path.join(abs_path, f) for f in os.listdir(abs_path) if f.endswith(".sln")]
+        sln_candidates = [os.path.join(abs_path, f) for f in os.listdir(abs_path) if f.lower().endswith((".sln", ".slnx"))]
         if sln_candidates:
             sln_file = sln_candidates[0]
         else:
