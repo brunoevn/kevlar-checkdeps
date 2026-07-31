@@ -2496,5 +2496,42 @@ class TestKevlar(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_npm_checker_only_engines(self):
+        import tempfile
+        import shutil
+        import types
+        import json
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            package_json_content = {
+                "name": "engines-only-app",
+                "version": "1.0.0",
+                "engines": {
+                    "node": ">=14"
+                }
+            }
+            with open(os.path.join(temp_dir, "package.json"), "w", encoding="utf-8") as f:
+                json.dump(package_json_content, f, indent=2)
+
+            args = types.SimpleNamespace(
+                path=temp_dir,
+                all=False,
+                concurrent=5,
+                vuls=False,
+                suppress=None
+            )
+
+            results, pkg_data, elapsed = kevlar.run_npm_checker(args)
+            self.assertIsNotNone(results)
+            self.assertTrue(len(results) > 0)
+            engine_item = next((r for r in results if r.get("name") == "node" and r.get("is_engine")), None)
+            self.assertIsNotNone(engine_item)
+            self.assertEqual(engine_item["declared"], ">=14")
+            self.assertIn(engine_item["status"], ("error", "minor"))
+        finally:
+            shutil.rmtree(temp_dir)
+
 if __name__ == "__main__":
     unittest.main()
+

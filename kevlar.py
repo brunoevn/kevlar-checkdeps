@@ -2691,12 +2691,14 @@ def run_npm_checker(args):
                 t_integrity[ver] = integrity_data[key]
         t["integrity"] = t_integrity
     
-    if not targets:
+    node_constraint, _source = find_node_constraint(args.path, pkg_data)
+    
+    if not targets and not node_constraint:
         print(f"{COLOR_YELLOW}{ICON_WARN} No packages identified to check.{COLOR_RESET}")
         return None, None, 0
         
     start_time = time.time()
-    results = check_all_targets(targets, args.concurrent)
+    results = check_all_targets(targets, args.concurrent) if targets else []
     
     # Identify and isolate direct vs transitive results for npm packages
     # We want to clear the 'declared' constraint for transitive versions of a package
@@ -2760,7 +2762,6 @@ def run_npm_checker(args):
             r["vulnerabilities"] = []
             
     # Check Node.js version if applicable
-    node_constraint, _source = find_node_constraint(args.path, pkg_data)
     if node_constraint:
         status, deprecated_msg, error_msg, recommendation = analyze_node_constraint(node_constraint)
             
