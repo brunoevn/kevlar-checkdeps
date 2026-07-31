@@ -2529,9 +2529,23 @@ class TestKevlar(unittest.TestCase):
             self.assertIsNotNone(engine_item)
             self.assertEqual(engine_item["declared"], ">=14")
             self.assertIn(engine_item["status"], ("error", "minor"))
+            
+            engine_item["project_path"] = temp_dir
+            engine_item["technology"] = "npm"
+            kevlar.populate_remediation_recommendations(results, temp_dir)
+            rem = engine_item.get("remediation")
+            self.assertIsNotNone(rem)
+            self.assertIsNotNone(rem.get("options"))
+            options = rem["options"]
+            self.assertGreaterEqual(len(options), 3)
+            labels = [opt["label"] for opt in options]
+            self.assertIn("Version 24", labels)
+            self.assertIn("Version 26", labels)
+            self.assertIn("Version 24 o 26", labels)
         finally:
             shutil.rmtree(temp_dir)
 
 if __name__ == "__main__":
     unittest.main()
+
 

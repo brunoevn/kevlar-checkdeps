@@ -7254,6 +7254,12 @@ def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ve
             match_prefix = match_opt.group(1)
             match_version = match_opt.group(2)
             
+    effective_prefix = match_prefix
+    if re.match(r'^[~^>=<!]', latest_ver.strip()):
+        effective_prefix = ""
+        
+    upgraded_str = effective_prefix + latest_ver
+            
     start_ctx = max(0, line_idx_to_change - 2)
     end_ctx = min(len(lines), line_idx_to_change + 3)
     
@@ -7268,27 +7274,25 @@ def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ve
             escaped_orig = escape_html(orig_line)
             if target_text and target_text in orig_line:
                 escaped_target = escape_html(target_text)
-                escaped_prefix = escape_html(match_prefix)
+                escaped_prefix = escape_html(effective_prefix)
                 escaped_version = escape_html(match_version)
                 
                 html_orig = escaped_orig.replace(
                     escaped_target, 
-                    f'{escaped_prefix}<span class="diff-remove-chunk">{escaped_version}</span>'
+                    f'<span class="diff-remove-chunk">{escaped_target}</span>'
                 )
-                new_line = orig_line.replace(target_text, match_prefix + latest_ver)
+                new_line = orig_line.replace(target_text, upgraded_str)
             else:
                 html_orig = escaped_orig
                 new_line = orig_line + f" -> {latest_ver}"
                 
             escaped_new = escape_html(new_line)
-            escaped_upgraded = escape_html(match_prefix + latest_ver)
-            escaped_prefix = escape_html(match_prefix)
-            escaped_latest = escape_html(latest_ver)
+            escaped_upgraded = escape_html(upgraded_str)
             
-            if (match_prefix + latest_ver) in new_line:
+            if upgraded_str in new_line:
                 html_new = escaped_new.replace(
                     escaped_upgraded, 
-                    f'{escaped_prefix}<span class="diff-add-chunk">{escaped_latest}</span>'
+                    f'<span class="diff-add-chunk">{escaped_upgraded}</span>'
                 )
             else:
                 html_new = escaped_new
@@ -7322,6 +7326,40 @@ def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ve
         "current_code": current_block,
         "suggested_code": suggested_block
     }
+
+def format_remediation_option_label(ver_str: str) -> str:
+    """Formats a version/constraint string into a user-friendly tab label.
+    Examples:
+        ">=24.0.0" -> "Version 24"
+        ">=26.0.0" -> "Version 26"
+        ">=24.0.0 or >=26.0.0" -> "Version 24 o 26"
+    """
+    if not ver_str:
+        return ""
+        
+    def _clean_single_ver(s: str) -> str:
+        s = s.strip()
+        m = re.search(r'(?:>=|>|<=|<|~|\^|v)?\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?', s)
+        if m:
+            major = m.group(1)
+            minor = m.group(2)
+            patch = m.group(3)
+            if (not minor or minor == '0') and (not patch or patch == '0'):
+                return major
+            elif minor and patch:
+                return f"{major}.{minor}.{patch}"
+            elif minor:
+                return f"{major}.{minor}"
+            return major
+        return s.lstrip("v>=").strip()
+
+    if " or " in ver_str:
+        parts = [p.strip() for p in ver_str.split(" or ") if p.strip()]
+        clean_parts = [_clean_single_ver(p) for p in parts]
+        return f"Version {' o '.join(clean_parts)}"
+    else:
+        clean_v = _clean_single_ver(ver_str)
+        return f"Version {clean_v}"
 
 def populate_remediation_recommendations(results, default_project_path):
     """Calculates and attaches remediation info to each result if possible."""
@@ -7392,6 +7430,27 @@ def populate_remediation_recommendations(results, default_project_path):
                 # Try to generate diffs for this manifest file
                 temp_safe = None
                 temp_major = None
+                temp_options = []
+                
+                target_string = latest_abs or r.get("latest") or ""
+                if " or " in target_string:
+                    parts = [p.strip() for p in target_string.split(" or ") if p.strip()]
+                    if len(parts) >= 2:
+                        for p in parts:
+                            diff_p = generate_remediation_diff(
+                                manifest_path, found_line_idx, declared, p, tech, name
+                            )
+                            if diff_p:
+                                lbl = format_remediation_option_label(p)
+                                temp_options.append({"label": lbl, "diff": diff_p})
+                        # Add the combined choice ("A or B")
+                        diff_comb = generate_remediation_diff(
+                            manifest_path, found_line_idx, declared, target_string, tech, name
+                        )
+                        if diff_comb:
+                            lbl_comb = format_remediation_option_label(target_string)
+                            temp_options.append({"label": lbl_comb, "diff": diff_comb})
+
                 if latest_sm:
                     temp_safe = generate_remediation_diff(
                         manifest_path, found_line_idx, declared, latest_sm, tech, name
@@ -7402,15 +7461,19 @@ def populate_remediation_recommendations(results, default_project_path):
                     )
                 
                 # If we succeeded in generating at least one valid diff, we stop searching
-                if temp_safe or temp_major:
+                if temp_safe or temp_major or temp_options:
                     remediation_safe = temp_safe
                     remediation_major = temp_major
+                    remediation_options = temp_options
                     break
                 
-        if remediation_safe or remediation_major:
+        if remediation_safe or remediation_major or remediation_options:
+            fallback_safe = remediation_options[0]["diff"] if remediation_options else None
+            fallback_major = remediation_options[-1]["diff"] if remediation_options else None
             r["remediation"] = {
-                "safe": remediation_safe,
-                "major": remediation_major
+                "safe": remediation_safe or fallback_safe,
+                "major": remediation_major or fallback_major,
+                "options": remediation_options if remediation_options else None
             }
 
 class HTMLReportTemplateProvider:
@@ -8967,7 +9030,7 @@ class HTMLReportTemplateProvider:
                                 ' Notes & Warnings' +
                             '</div>' +
                             '<div class="notes-warnings-body">' +
-                                notes_warnings_list.join('\\n') +
+                                notes_warnings_list.join('') +
                             '</div>' +
                         '</div>';
                 }
@@ -8979,7 +9042,7 @@ class HTMLReportTemplateProvider:
                 }
                 
                 let remediation_button_html = '';
-                const has_remediation = r.remediation && (r.remediation.safe || r.remediation.major);
+                const has_remediation = r.remediation && (r.remediation.safe || r.remediation.major || (r.remediation.options && r.remediation.options.length));
                 if (has_remediation && is_direct) {
                     remediation_button_html = 
                         '<div class="remediation-section">' +
@@ -9018,7 +9081,7 @@ class HTMLReportTemplateProvider:
                         changelog_html = 
                             '<div class="changelog-section">' +
                                 '<div style="font-size: 12px; font-weight: 700; color: var(--warning); margin-bottom: 8px;">Analysis & Migration Links:</div>' +
-                                buttons.join('\\n') +
+                                buttons.join('') +
                             '</div>';
                     }
                 }
@@ -9579,24 +9642,49 @@ class HTMLReportTemplateProvider:
             
             activeRemediationInfo = info;
             
-            const firstValid = info.safe || info.major;
-            document.getElementById('modal-filepath').textContent = firstValid.display_path || (firstValid.manifest_path + ':' + firstValid.line_number);
-            
             const tabsContainer = document.getElementById('modal-tabs-container');
-            const safeTab = document.getElementById('tab-safe');
-            const majorTab = document.getElementById('tab-major');
             
-            if (info.safe && info.major) {
+            if (info.options && info.options.length > 0) {
+                const firstValid = info.options[0].diff;
+                if (firstValid) {
+                    document.getElementById('modal-filepath').textContent = firstValid.display_path || (firstValid.manifest_path + ':' + firstValid.line_number);
+                }
+                
+                tabsContainer.innerHTML = '';
                 tabsContainer.style.display = 'flex';
-                safeTab.style.display = 'block';
-                majorTab.style.display = 'block';
-                switchRemediationTab('safe');
+                
+                info.options.forEach((opt, idx) => {
+                    const btn = document.createElement('button');
+                    btn.className = 'modal-tab' + (idx === 0 ? ' active' : '');
+                    btn.textContent = opt.label;
+                    btn.onclick = function() {
+                        const allTabs = tabsContainer.querySelectorAll('.modal-tab');
+                        allTabs.forEach(t => t.classList.remove('active'));
+                        btn.classList.add('active');
+                        renderDiff(opt.diff);
+                    };
+                    tabsContainer.appendChild(btn);
+                });
+                
+                renderDiff(info.options[0].diff);
             } else {
-                tabsContainer.style.display = 'none';
-                if (info.safe) {
-                    renderDiff(info.safe);
-                } else if (info.major) {
-                    renderDiff(info.major);
+                const firstValid = info.safe || info.major;
+                if (firstValid) {
+                    document.getElementById('modal-filepath').textContent = firstValid.display_path || (firstValid.manifest_path + ':' + firstValid.line_number);
+                }
+                
+                if (info.safe && info.major) {
+                    tabsContainer.innerHTML = '<button id="tab-safe" class="modal-tab active" onclick="switchRemediationTab(&quot;safe&quot;)">Safe Update</button>' +
+                                              '<button id="tab-major" class="modal-tab" onclick="switchRemediationTab(&quot;major&quot;)">Major Upgrade</button>';
+                    tabsContainer.style.display = 'flex';
+                    switchRemediationTab('safe');
+                } else {
+                    tabsContainer.style.display = 'none';
+                    if (info.safe) {
+                        renderDiff(info.safe);
+                    } else if (info.major) {
+                        renderDiff(info.major);
+                    }
                 }
             }
             
