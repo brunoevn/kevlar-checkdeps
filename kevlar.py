@@ -3735,7 +3735,7 @@ def parse_sln_file(sln_path):
                         norm_path = rel_p.replace("\\", "/")
                         if norm_path.endswith((".csproj", ".vbproj", ".fsproj")):
                             full_path = os.path.abspath(os.path.join(sln_dir, norm_path))
-                            if os.path.exists(full_path):
+                            if _is_safe_path(sln_dir, full_path) and os.path.exists(full_path):
                                 project_paths.append(full_path)
             except Exception:
                 with open(sln_path, "r", encoding="utf-8-sig", errors="ignore") as f:
@@ -3745,7 +3745,7 @@ def parse_sln_file(sln_path):
                     norm_path = m.replace("\\", "/")
                     if norm_path.endswith((".csproj", ".vbproj", ".fsproj")):
                         full_path = os.path.abspath(os.path.join(sln_dir, norm_path))
-                        if os.path.exists(full_path):
+                        if _is_safe_path(sln_dir, full_path) and os.path.exists(full_path):
                             project_paths.append(full_path)
         else:
             with open(sln_path, "r", encoding="utf-8-sig", errors="ignore") as f:
@@ -3758,7 +3758,7 @@ def parse_sln_file(sln_path):
                 norm_path = m.replace("\\", "/")
                 if norm_path.endswith((".csproj", ".vbproj", ".fsproj")):
                     full_path = os.path.abspath(os.path.join(sln_dir, norm_path))
-                    if os.path.exists(full_path):
+                    if _is_safe_path(sln_dir, full_path) and os.path.exists(full_path):
                         project_paths.append(full_path)
     except Exception as e:
         print(f"{COLOR_YELLOW}{ICON_WARN} Warning reading solution file: {e}{COLOR_RESET}")

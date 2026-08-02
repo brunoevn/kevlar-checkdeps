@@ -8,6 +8,43 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 import kevlar
 
 class TestKevlar(unittest.TestCase):
+
+    def test_parse_sln_path_traversal(self):
+        import tempfile
+        import os
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sln_path = os.path.join(tmpdir, "test.sln")
+
+            normal_proj_dir = os.path.join(tmpdir, "NormalProj")
+            os.makedirs(normal_proj_dir, exist_ok=True)
+            normal_proj_path = os.path.join(normal_proj_dir, "NormalProj.csproj")
+            with open(normal_proj_path, "w") as f:
+                f.write("<Project></Project>")
+
+            malicious_path_relative = "..\\MaliciousProj.csproj"
+            malicious_path_absolute = os.path.abspath(os.path.join(tmpdir, "..", "MaliciousProj.csproj"))
+
+            with open(sln_path, "w") as f:
+                f.write('Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NormalProj", "NormalProj\\NormalProj.csproj", "{GUID1}"\n')
+                f.write(f'Project("{{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}}") = "MaliciousProj", "{malicious_path_relative}", "{{GUID2}}"\n')
+
+            created_malicious = False
+            try:
+                with open(malicious_path_absolute, "w") as f:
+                    f.write("<Project></Project>")
+                created_malicious = True
+            except PermissionError:
+                pass
+
+            if created_malicious:
+                project_paths = kevlar.parse_sln_file(sln_path)
+                self.assertEqual(len(project_paths), 1)
+                self.assertTrue(project_paths[0].endswith("NormalProj.csproj"))
+                self.assertFalse(any("MaliciousProj.csproj" in p for p in project_paths))
+                try:
+                    os.remove(malicious_path_absolute)
+                except:
+                    pass
     
     def test_parse_semver(self):
         # 3 segments
