@@ -6547,7 +6547,7 @@ def generate_sarif_run(results):
             "driver": {
                 "name": "Kevlar CheckDeps",
                 "version": VERSION,
-                "informationUri": "https://github.com/brunoevn/kevlar-checkdeps",
+                "informationUri": "https://kevlar-checkdeps.dev",
                 "rules": []
             }
         },
