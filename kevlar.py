@@ -6671,12 +6671,23 @@ def generate_sarif_run(results):
                                 manifest_lines_cache[path] = []
                         
                         lines = manifest_lines_cache[path]
+                        best_score = -1
                         for idx, line in enumerate(lines):
                             if match_line_for_dependency(line, name, tech):
-                                manifest_path = path
-                                line_number = idx + 1
-                                found_line = True
-                                break
+                                score = 1
+                                if declared:
+                                    ver_digits = re.search(r'\d+\.\d+', str(declared))
+                                    if ver_digits and ver_digits.group(0) in line:
+                                        score = 2
+                                    elif str(declared).strip() in line:
+                                        score = 2
+                                if score > best_score:
+                                    best_score = score
+                                    manifest_path = path
+                                    line_number = idx + 1
+                                    if score == 2:
+                                        found_line = True
+                                        break
                         if found_line:
                             break
                     if not manifest_path:
@@ -7064,9 +7075,10 @@ def _match_npm_php(line_lower, pkg_lower):
     return re.search(pattern, line_lower) is not None
 
 def _match_pip(line_lower, pkg_lower):
-    pattern_req = r'^\s*' + re.escape(pkg_lower) + r'\s*(==|>=|<=|~=|!=|>|<|@|;|$)'
+    extras = r'(\[[^\]]+\])?'
+    pattern_req = r'^\s*' + re.escape(pkg_lower) + extras + r'\s*(==|>=|<=|~=|!=|>|<|@|;|[\'"]|$)'
     pattern_toml = r'^\s*' + re.escape(pkg_lower) + r'\s*=\s*'
-    pattern_setup = r'[\'"]' + re.escape(pkg_lower) + r'([>=<!~]+|[\'"]\s*,)'
+    pattern_setup = r'[\'"]' + re.escape(pkg_lower) + extras + r'([>=<!~^@;]+|[\'"]\s*[,\]])'
     return (re.search(pattern_req, line_lower) is not None or 
             re.search(pattern_toml, line_lower) is not None or
             re.search(pattern_setup, line_lower) is not None)
@@ -7566,14 +7578,25 @@ def populate_remediation_recommendations(results, default_project_path):
                 continue
                 
             found_line_idx = None
+            best_score = -1
             for idx, line in enumerate(lines):
                 if r.get("is_engine", False):
                     matched = f'"{name}"' in line or '"engines"' in line
                 else:
                     matched = match_line_for_dependency(line, name, tech)
                 if matched:
-                    found_line_idx = idx + 1
-                    break
+                    score = 1
+                    if declared:
+                        ver_digits = re.search(r'\d+\.\d+', str(declared))
+                        if ver_digits and ver_digits.group(0) in line:
+                            score = 2
+                        elif str(declared).strip() in line:
+                            score = 2
+                    if score > best_score:
+                        best_score = score
+                        found_line_idx = idx + 1
+                        if score == 2:
+                            break
                     
             if found_line_idx is not None:
                 # Try to generate diffs for this manifest file

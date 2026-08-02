@@ -1277,6 +1277,7 @@ class TestKevlar(unittest.TestCase):
         self.assertTrue(kevlar.match_line_for_dependency('requests==2.25.1', 'requests', 'pip'))
         self.assertTrue(kevlar.match_line_for_dependency('  flask >= 2.0', 'flask', 'pip'))
         self.assertTrue(kevlar.match_line_for_dependency('    "itsdangerous>=2.0",', 'itsdangerous', 'pip'))
+        self.assertTrue(kevlar.match_line_for_dependency('    "mcp[cli]>=1.0",', 'mcp', 'pip'))
         self.assertFalse(kevlar.match_line_for_dependency('flask-login==0.5.0', 'flask', 'pip'))
         
         # nuget
