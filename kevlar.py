@@ -4405,8 +4405,9 @@ def parse_maven_pom_recursive(filepath, parent_dep_mgmt=None, seen_files=None, b
                 rel_path_elem = parent_elem.find(f"{prefix}relativePath")
                 rel_path = rel_path_elem.text.strip() if (rel_path_elem is not None and rel_path_elem.text) else "../pom.xml"
                 parent_pom_path = os.path.abspath(os.path.join(os.path.dirname(abs_path), rel_path))
-                if _is_safe_path(base_dir, parent_pom_path) and os.path.exists(parent_pom_path):
-                    _p_deps, p_props, p_dep_mgmt = parse_maven_pom_recursive(parent_pom_path, parent_dep_mgmt, seen_files, base_dir=base_dir)
+                if os.path.exists(parent_pom_path):
+                    parent_dir = os.path.dirname(parent_pom_path)
+                    _p_deps, p_props, p_dep_mgmt = parse_maven_pom_recursive(parent_pom_path, parent_dep_mgmt, seen_files, base_dir=parent_dir)
                     properties.update(p_props)
                     dep_mgmt.update(p_dep_mgmt)
                     
@@ -4426,6 +4427,18 @@ def parse_maven_pom_recursive(filepath, parent_dep_mgmt=None, seen_files=None, b
                 if not properties["${project.groupId}"]:
                     properties["${project.groupId}"] = (parent_elem.findtext(f"{prefix}groupId") or "").strip()
                     
+            # Interpolate properties recursively in properties dictionary
+            for _ in range(5):
+                prop_changed = False
+                for p_k, p_v in list(properties.items()):
+                    if p_v and "${" in p_v:
+                        for sub_k, sub_v in properties.items():
+                            if sub_v and sub_k in p_v:
+                                properties[p_k] = p_v.replace(sub_k, sub_v)
+                                prop_changed = True
+                if not prop_changed:
+                    break
+
             # 3. Parse local dependencyManagement
             local_dep_mgmt = parse_maven_dependency_management(root, prefix, properties)
             dep_mgmt.update(local_dep_mgmt)
@@ -4442,19 +4455,38 @@ def parse_maven_pom_recursive(filepath, parent_dep_mgmt=None, seen_files=None, b
                         group = g_elem.text.strip() if g_elem.text else ""
                         artifact = a_elem.text.strip() if a_elem.text else ""
                         
-                        for prop_name, prop_val in properties.items():
-                            group = group.replace(prop_name, prop_val)
-                            artifact = artifact.replace(prop_name, prop_val)
+                        for _ in range(5):
+                            changed = False
+                            for prop_name, prop_val in properties.items():
+                                if prop_val:
+                                    if prop_name in group:
+                                        group = group.replace(prop_name, prop_val)
+                                        changed = True
+                                    if prop_name in artifact:
+                                        artifact = artifact.replace(prop_name, prop_val)
+                                        changed = True
+                            if not changed:
+                                break
                             
                         if group and artifact:
                             coord = f"{group}:{artifact}"
                             version = "*"
                             if v_elem is not None and v_elem.text:
                                 version = v_elem.text.strip()
-                                for prop_name, prop_val in properties.items():
-                                    version = version.replace(prop_name, prop_val)
                             elif coord in dep_mgmt:
                                 version = dep_mgmt[coord]
+                                
+                            for _ in range(5):
+                                changed = False
+                                for prop_name, prop_val in properties.items():
+                                    if prop_val and prop_name in version:
+                                        version = version.replace(prop_name, prop_val)
+                                        changed = True
+                                if not changed:
+                                    break
+                                
+                            if "${" in version:
+                                print(f"{COLOR_YELLOW}{ICON_WARN} Unresolved version property '{version}' for Maven package '{coord}' in {os.path.basename(filepath)}{COLOR_RESET}")
                                 
                             dependencies[coord] = version
                             

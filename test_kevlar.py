@@ -2596,7 +2596,55 @@ class TestKevlar(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_maven_parent_pom_property_resolution(self):
+        """Test that parse_maven_pom resolves properties defined in parent pom.xml when parsing child modules."""
+        import tempfile
+        import shutil
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            # Create parent pom.xml
+            parent_pom = (
+                '<project>\n'
+                '    <groupId>com.example</groupId>\n'
+                '    <artifactId>parent</artifactId>\n'
+                '    <version>1.0.0</version>\n'
+                '    <properties>\n'
+                '        <commons.fileupload.version>1.3.3</commons.fileupload.version>\n'
+                '    </properties>\n'
+                '</project>\n'
+            )
+            with open(os.path.join(temp_dir, "pom.xml"), "w", encoding="utf-8") as f:
+                f.write(parent_pom)
+
+            # Create child submodule pom.xml
+            child_dir = os.path.join(temp_dir, "child")
+            os.makedirs(child_dir, exist_ok=True)
+            child_pom = (
+                '<project>\n'
+                '    <parent>\n'
+                '        <groupId>com.example</groupId>\n'
+                '        <artifactId>parent</artifactId>\n'
+                '        <version>1.0.0</version>\n'
+                '    </parent>\n'
+                '    <artifactId>child</artifactId>\n'
+                '    <dependencies>\n'
+                '        <dependency>\n'
+                '            <groupId>commons-fileupload</groupId>\n'
+                '            <artifactId>commons-fileupload</artifactId>\n'
+                '            <version>${commons.fileupload.version}</version>\n'
+                '        </dependency>\n'
+                '    </dependencies>\n'
+                '</project>\n'
+            )
+            child_pom_path = os.path.join(child_dir, "pom.xml")
+            with open(child_pom_path, "w", encoding="utf-8") as f:
+                f.write(child_pom)
+
+            deps = kevlar.parse_maven_pom(child_pom_path)
+            self.assertEqual(deps.get("commons-fileupload:commons-fileupload"), "1.3.3")
+        finally:
+            shutil.rmtree(temp_dir)
+
 if __name__ == "__main__":
     unittest.main()
-
-
