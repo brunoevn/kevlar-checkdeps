@@ -6251,8 +6251,11 @@ class TerminalTextFormatter:
             right = diff - left
             return (" " * left) + text + (" " * right)
 
-def print_results_table(results, pkg_data, show_all, vuls_enabled=False):
+def print_results_table(results, pkg_data, show_all, vuls_enabled=False, no_show_console=False):
     """Draws a beautiful styled console report table with precise alignment."""
+    if no_show_console:
+        return
+        
     filtered_results = []
     for r in results:
         is_issue = (
@@ -10667,6 +10670,11 @@ Examples:
         help="Output report format when using --scan-all. 'both' generates HTML and JSON."
     )
     parser.add_argument(
+        "--no-show-console", "-n",
+        action="store_true",
+        help="Suppress printing detailed dependency tables and vulnerability lists in the console, displaying only progress logs, project headers, and summary reports."
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Print detailed stack trace and internal error messages to stdout during execution."
@@ -10747,7 +10755,7 @@ Examples:
                     apply_vulnerability_suppressions(results, args.suppress, project_path=project_path)
                     results = sorted(results, key=lambda x: x["name"].lower())
                     
-                    print_results_table(results, pkg_data, args.show_all, args.vuls)
+                    print_results_table(results, pkg_data, args.show_all, args.vuls, getattr(args, "no_show_console", False))
                     print_summary(results, elapsed, args.vuls)
                     
                     # Generate report file(s) for this project folder
@@ -10906,14 +10914,14 @@ Examples:
         if "technology" not in r:
             r["technology"] = args.tech if args.tech != "auto" else r.get("technology")
             
-    sys.stdout.write(f"{COLOR_GRAY}{ICON_INFO} Processing results and generating report table...{COLOR_RESET}\n")
+    sys.stdout.write(f"{COLOR_GRAY}{ICON_INFO} Processing results...{COLOR_RESET}\n")
     sys.stdout.flush()
     populate_remediation_recommendations(results, args.path)
     validate_configuration_drift(results)
     apply_vulnerability_suppressions(results, args.suppress, project_path=args.path)
     results = sorted(results, key=lambda x: x["name"].lower())
     
-    print_results_table(results, pkg_data, args.show_all, args.vuls)
+    print_results_table(results, pkg_data, args.show_all, args.vuls, getattr(args, "no_show_console", False))
     print_summary(results, elapsed, args.vuls)
     
     if args.output:

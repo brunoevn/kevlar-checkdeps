@@ -2646,5 +2646,30 @@ class TestKevlar(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_no_show_console_flag(self):
+        """Test that print_results_table returns without printing when no_show_console is True."""
+        import io
+        import sys
+
+        captured_output = io.StringIO()
+        old_stdout = sys.stdout
+        sys.stdout = captured_output
+        try:
+            results = [{
+                "name": "log4j",
+                "declared": "1.2.17",
+                "installed": "1.2.17",
+                "latest": "2.17.1",
+                "status": "major",
+                "vulnerabilities": [],
+                "deprecated": None
+            }]
+            kevlar.print_results_table(results, {}, show_all=True, no_show_console=True)
+            self.assertEqual(captured_output.getvalue(), "")
+        finally:
+            sys.stdout = old_stdout
+
+
 if __name__ == "__main__":
     unittest.main()
+
