@@ -9853,7 +9853,7 @@ class HTMLReportTemplateProvider:
                 if (!v) return '';
                 v = String(v).trim().toLowerCase();
                 if (v.startsWith('v')) v = v.slice(1);
-                return v.replace(/^[~^>=<!\s]+/, '');
+                return v.replace(/^[~^>=<!\\s]+/, '');
             }
 
             const currClean = cleanV(currentVer);
