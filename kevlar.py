@@ -6490,7 +6490,7 @@ def print_results_table(results, pkg_data, show_all, vuls_enabled=False):
                     summary = vuln["summary"]
                     print(f"    - {COLOR_BOLD}{COLOR_GRAY}{vid}{COLOR_RESET}: {summary} {COLOR_GRAY}(Reason: {reason}){COLOR_RESET}")
 
-def print_summary(results, elapsed_time, vuls_enabled=False):
+def print_summary(results, elapsed_time, vuls_enabled=False, projects_count=None):
     """Prints checks run count and categorization breakdown."""
     total = len(results)
     up_to_date = sum(1 for r in results if r["status"] in ("up-to-date", "local"))
@@ -6503,6 +6503,8 @@ def print_summary(results, elapsed_time, vuls_enabled=False):
     outdated_total = sum(1 for r in results if r["status"] in ("patch", "minor", "major", "minor-major", "patch-major"))
     
     print(f"\n{COLOR_BOLD}{COLOR_CYAN}Summary Report:{COLOR_RESET}")
+    if projects_count is not None:
+        print(f"  Projects:    {COLOR_BOLD}{projects_count}{COLOR_RESET} scanned")
     print(f"  Checked:     {total} packages in {elapsed_time:.2f}s")
     print(f"  Up-to-date:  {COLOR_GREEN}{up_to_date}{COLOR_RESET}")
     print(f"  Outdated:    {COLOR_YELLOW}{outdated_total}{COLOR_RESET} (Patch: {COLOR_CYAN}{patch}{COLOR_RESET}, Minor: {COLOR_YELLOW}{minor}{COLOR_RESET}, Major: {COLOR_RED}{major}{COLOR_RESET})")
@@ -10802,7 +10804,7 @@ Examples:
         print("=" * 80)
         print("CONSOLIDATED SUMMARY")
         print("=" * 80)
-        print_summary(combined_results, total_elapsed, args.vuls)
+        print_summary(combined_results, total_elapsed, args.vuls, projects_count=len(projects))
         
         if args.format == "sarif" and sarif_runs:
             consolidated_path = "report-consolidated.sarif"
