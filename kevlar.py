@@ -1757,12 +1757,26 @@ def parse_pnpm_lock(filepath):
                         current_pkg, current_version = item[2]
                         break
                 
-                # Check transition out/in of the packages or snapshots block at root level
-                if stripped.startswith("packages:") or stripped.startswith("snapshots:"):
+                # Check transition out/in of importers, packages, or snapshots block at root level
+                if stripped.startswith("importers:"):
+                    stack.append((indent, 'IMPORTERS', None))
+                    continue
+                elif stripped.startswith("packages:") or stripped.startswith("snapshots:"):
                     stack.append((indent, 'PACKAGES', None))
                     continue
                 
-                if current_state == 'PACKAGES':
+                if current_state == 'IMPORTERS':
+                    if stripped.startswith("dependencies:") or stripped.startswith("devDependencies:") or stripped.startswith("optionalDependencies:") or stripped.startswith("peerDependencies:"):
+                        stack.append((indent, 'IMPORTER_DEPS', None))
+                
+                elif current_state == 'IMPORTER_DEPS':
+                    if ":" in stripped:
+                        dep_name = stripped.split(":", 1)[0].strip().strip("'\"")
+                        if dep_name and dep_name not in ("specifier", "version"):
+                            parents.setdefault(dep_name, set()).add("root")
+                            stack.append((indent, 'IMPORTER_DEP_ITEM', dep_name))
+                
+                elif current_state == 'PACKAGES':
                     # We are expecting package definitions as keys, e.g., '/direct-dep@1.0.1:'
                     # Remove trailing empty object if present, e.g. "key: {}" -> "key:"
                     raw_line = stripped
@@ -1909,16 +1923,17 @@ def parse_package_lock(filepath):
                     for child_name in all_deps.keys():
                         parents.setdefault(child_name, set()).add(pkg_name)
                         
-            # Root package dependencies
-            root_info = data["packages"].get("") or {}
-            root_deps = {
-                **root_info.get("dependencies", {}),
-                **root_info.get("devDependencies", {}),
-                **root_info.get("peerDependencies", {}),
-                **root_info.get("optionalDependencies", {})
-            }
-            for child_name in root_deps.keys():
-                parents.setdefault(child_name, set()).add("root")
+            # Root & workspace package dependencies
+            for pkg_path, pkg_info in data["packages"].items():
+                if isinstance(pkg_info, dict) and "node_modules/" not in pkg_path:
+                    ws_deps = {
+                        **pkg_info.get("dependencies", {}),
+                        **pkg_info.get("devDependencies", {}),
+                        **pkg_info.get("peerDependencies", {}),
+                        **pkg_info.get("optionalDependencies", {})
+                    }
+                    for child_name in ws_deps.keys():
+                        parents.setdefault(child_name, set()).add("root")
                         
         # 2. Parse dependencies key (v1 and v2 fallback)
         if "dependencies" in data and isinstance(data["dependencies"], dict):
@@ -2644,10 +2659,11 @@ def find_direct_parents(name, parents_map, direct_packages):
         
         curr_parents = parents_map.get(current, [])
         for p in curr_parents:
-            if p == "root":
-                continue
             if p in direct_packages:
                 direct_parents.add(p)
+            elif p == "root":
+                if current != name:
+                    direct_parents.add(current)
             else:
                 queue.append(p)
                 
