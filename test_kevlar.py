@@ -1291,6 +1291,7 @@ class TestKevlar(unittest.TestCase):
         
         # rust
         self.assertTrue(kevlar.match_line_for_dependency('serde = "1.0"', 'serde', 'rust'))
+        self.assertTrue(kevlar.match_line_for_dependency('[dependencies.clap]', 'clap', 'rust'))
         
         # ruby
         self.assertTrue(kevlar.match_line_for_dependency("gem 'rails'", 'rails', 'ruby'))
@@ -1300,6 +1301,34 @@ class TestKevlar(unittest.TestCase):
         
         # fallback / unknown tech
         self.assertFalse(kevlar.match_line_for_dependency('some random line', 'package', 'unknown-tech'))
+
+    def test_parse_cargo_toml(self):
+        import tempfile
+        content = (
+            '[dependencies]\n'
+            'bincode = "1.0"\n'
+            '\n'
+            '[dependencies.clap]\n'
+            'version = "4.6.1"\n'
+            'optional = true\n'
+            'features = ["wrap_help"]\n'
+            '\n'
+            '[target.\'cfg(target_os = "macos")\'.dependencies]\n'
+            'plist = "1.9.0"\n'
+        )
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".toml") as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        try:
+            deps = kevlar.parse_cargo_toml(tmp_path)
+            self.assertIn("bincode", deps)
+            self.assertIn("clap", deps)
+            self.assertIn("plist", deps)
+            self.assertNotIn("version", deps)
+            self.assertNotIn("optional", deps)
+            self.assertNotIn("features", deps)
+        finally:
+            os.remove(tmp_path)
 
     def test_parse_composer_lock(self):
         import tempfile
@@ -2467,6 +2496,23 @@ class TestKevlar(unittest.TestCase):
             self.assertIsNotNone(diff_ver)
             self.assertIn('<span class="diff-add-chunk">10.0.10</span>', diff_ver["suggested_code"][0]["html"])
             self.assertIn("System.Text.Json", diff_ver["suggested_code"][0]["html"])
+            
+            # 2b. Cargo.toml semver specifier compatible diff (e.g. declared 1.3.3 vs Cargo.toml 1.0)
+            cargo_content = '[dependencies]\nbincode = "1.0"\n'
+            cargo_path = os.path.join(temp_dir, "Cargo.toml")
+            with open(cargo_path, "w", encoding="utf-8") as f:
+                f.write(cargo_content)
+                
+            diff_cargo = kevlar.generate_remediation_diff(
+                cargo_path,
+                line_index=2,
+                declared_ver="1.3.3",
+                latest_ver="3.0.0",
+                tech="rust",
+                package_name="bincode"
+            )
+            self.assertIsNotNone(diff_cargo)
+            self.assertIn('<span class="diff-add-chunk">3.0.0</span>', diff_cargo["suggested_code"][1]["html"])
             
             # 3. Test find_manifest_files parent resolution for nuget props file
             sub_dir = os.path.join(temp_dir, "src", "Project")

@@ -28,6 +28,7 @@ import traceback
 import unicodedata
 import ctypes
 import tomllib
+import random
 
 # Safe terminal output wrapping to prevent UnicodeEncodeError on Windows
 class SafeWriter:
@@ -380,9 +381,9 @@ def get_severity_level(vuln):
     # 1. Exact matches or plain text checks first
     if "CRITICAL" in sev_upper:
         return "critical"
-    if "HIGH" in sev_upper:
+    if "HIGH" in sev_upper or "UNSOUND" in sev_upper:
         return "high"
-    if "MEDIUM" in sev_upper or "MODERATE" in sev_upper:
+    if "MEDIUM" in sev_upper or "MODERATE" in sev_upper or "UNMAINTAINED" in sev_upper or "WARNING" in sev_upper or "NOTICE" in sev_upper or "INFORMATIONAL" in sev_upper:
         return "medium"
     if "LOW" in sev_upper:
         return "low"
@@ -632,8 +633,8 @@ def _sanitize_error_message(exc, target_name):
         
     return "Unexpected execution error during analysis"
 
-def safe_urlopen(req, timeout=10, max_retries=3, backoff=0.5):
-    """Safely opens a URL with retries, exponential backoff, and default headers."""
+def safe_urlopen(req, timeout=10, max_retries=5, backoff=0.5):
+    """Safely opens a URL with retries, exponential backoff, Retry-After handling, and default headers."""
     # 1. Extraer la URL de forma segura
     if isinstance(req, str):
         url_str = req
@@ -671,17 +672,31 @@ def safe_urlopen(req, timeout=10, max_retries=3, backoff=0.5):
         try:
             return urllib.request.urlopen(req, timeout=timeout)
         except urllib.error.HTTPError as e:
-            # Do not retry on client errors (4xx) except possibly rate limits (429)
             if e.code == 404:
                 raise e
-            if e.code < 500 and e.code != 429:
+            if e.code == 429:
+                last_err = e
+                if attempt < max_retries - 1:
+                    retry_after = e.headers.get("Retry-After") if hasattr(e, "headers") and e.headers else None
+                    wait_sec = None
+                    if retry_after:
+                        try:
+                            wait_sec = float(retry_after)
+                        except ValueError:
+                            pass
+                    if wait_sec is None:
+                        wait_sec = backoff * (2 ** attempt) + random.uniform(0.5, 1.5)
+                    time.sleep(wait_sec)
+                    continue
+                raise e
+            if e.code < 500:
                 raise e
             last_err = e
         except (urllib.error.URLError, ConnectionResetError, TimeoutError, OSError) as e:
             last_err = e
             
         if attempt < max_retries - 1:
-            time.sleep(backoff * (2 ** attempt))
+            time.sleep(backoff * (2 ** attempt) + random.uniform(0.1, 0.5))
             
     if last_err:
         raise last_err
@@ -2401,24 +2416,41 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
         vuln_list = []
         for vid in vids:
             vuln_data = hydrated_details.get(vid, {})
+            def _extract_osv_severity(data_dict):
+                sev = "UNKNOWN"
+                if "severity" in data_dict and isinstance(data_dict["severity"], list):
+                    for s in data_dict["severity"]:
+                        if s.get("type") in ("CVSS_V4", "CVSS_V3", "CVSS_V2"):
+                            score = s.get('score')
+                            if score:
+                                score_str = str(score)
+                                if score_str.startswith("CVSS"):
+                                    sev = score_str
+                                else:
+                                    prefix = "CVSS:4.0/" if s.get("type") == "CVSS_V4" else ("CVSS:3.0/" if s.get("type") == "CVSS_V3" else "CVSS:2.0/")
+                                    sev = f"{prefix}{score_str}"
+                            break
+                if sev == "UNKNOWN":
+                    db_specs = []
+                    if isinstance(data_dict.get("database_specific"), dict):
+                        db_specs.append(data_dict["database_specific"])
+                    if isinstance(data_dict.get("affected"), list):
+                        for aff in data_dict["affected"]:
+                            if isinstance(aff, dict) and isinstance(aff.get("database_specific"), dict):
+                                db_specs.append(aff["database_specific"])
+                    for db_spec in db_specs:
+                        sev_val = db_spec.get("severity") or db_spec.get("cvss")
+                        if sev_val:
+                            sev = str(sev_val)
+                            break
+                        info_val = db_spec.get("informational")
+                        if info_val:
+                            sev = str(info_val).upper()
+                            break
+                return sev
+
             # Determine severity
-            severity = "UNKNOWN"
-            if "severity" in vuln_data and isinstance(vuln_data["severity"], list):
-                for sev in vuln_data["severity"]:
-                    if sev.get("type") in ("CVSS_V4", "CVSS_V3", "CVSS_V2"):
-                        score = sev.get('score')
-                        if score:
-                            score_str = str(score)
-                            if score_str.startswith("CVSS"):
-                                severity = score_str
-                            else:
-                                prefix = "CVSS:4.0/" if sev.get("type") == "CVSS_V4" else ("CVSS:3.0/" if sev.get("type") == "CVSS_V3" else "CVSS:2.0/")
-                                severity = f"{prefix}{score_str}"
-                        break
-            if severity == "UNKNOWN":
-                db_spec = vuln_data.get("database_specific")
-                if db_spec and isinstance(db_spec, dict):
-                    severity = db_spec.get("severity") or "UNKNOWN"
+            severity = _extract_osv_severity(vuln_data)
             
             summary = vuln_data.get("summary")
             details = vuln_data.get("details", "")
@@ -2429,22 +2461,7 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
                     alias_data = hydrated_details.get(alias)
                     if alias_data:
                         if severity == "UNKNOWN":
-                            if "severity" in alias_data and isinstance(alias_data["severity"], list):
-                                for sev in alias_data["severity"]:
-                                    if sev.get("type") in ("CVSS_V4", "CVSS_V3", "CVSS_V2"):
-                                        score = sev.get('score')
-                                        if score:
-                                            score_str = str(score)
-                                            if score_str.startswith("CVSS"):
-                                                severity = score_str
-                                            else:
-                                                prefix = "CVSS:4.0/" if sev.get("type") == "CVSS_V4" else ("CVSS:3.0/" if sev.get("type") == "CVSS_V3" else "CVSS:2.0/")
-                                                severity = f"{prefix}{score_str}"
-                                        break
-                            if severity == "UNKNOWN":
-                                db_spec = alias_data.get("database_specific")
-                                if db_spec and isinstance(db_spec, dict):
-                                    severity = db_spec.get("severity") or "UNKNOWN"
+                            severity = _extract_osv_severity(alias_data)
                         
                         if not summary or summary == "No summary provided":
                             summary = alias_data.get("summary")
@@ -5476,6 +5493,7 @@ def parse_cargo_toml(filepath):
         return dependencies
         
     current_section = None
+    is_specific_pkg_section = False
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             for line in f:
@@ -5483,27 +5501,36 @@ def parse_cargo_toml(filepath):
                 if not line or line.startswith("#"):
                     continue
                     
-                # Detect sections, e.g. [dependencies] or [dependencies.tokio]
+                # Detect sections, e.g. [dependencies], [dependencies.tokio], [target.'...'.dependencies.plist]
                 m_sec = re.match(r'^\[([^\]]+)\]', line)
                 if m_sec:
                     current_section = m_sec.group(1).strip()
+                    is_specific_pkg_section = False
+                    
+                    # Extract package name from section header like [dependencies.clap] or [target.'...'.dependencies.clap]
+                    m_sub = re.search(r'(?:dependencies|dev-dependencies|build-dependencies)\.([a-zA-Z0-9_-]+)$', current_section)
+                    if m_sub:
+                        dependencies.add(m_sub.group(1))
+                        is_specific_pkg_section = True
                     continue
                     
                 # Check dependency sections
                 is_dep_section = (
                     current_section in ("dependencies", "dev-dependencies", "build-dependencies")
                     or (current_section and (
-                        current_section.startswith("dependencies.")
-                        or current_section.startswith("dev-dependencies.")
-                        or current_section.startswith("build-dependencies.")
+                        "dependencies" in current_section
+                        or "dev-dependencies" in current_section
+                        or "build-dependencies" in current_section
                     ))
                 )
                 
-                if is_dep_section:
+                if is_dep_section and not is_specific_pkg_section:
                     # Match name = "version" or name = { ... }
                     m_dep = re.match(r'^([a-zA-Z0-9_-]+)\s*=', line)
                     if m_dep:
-                        dependencies.add(m_dep.group(1).strip())
+                        dep_name = m_dep.group(1).strip()
+                        if dep_name not in ("version", "optional", "features", "default-features", "path"):
+                            dependencies.add(dep_name)
     except Exception as e:
         print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Cargo.toml: {e}{COLOR_RESET}")
         
@@ -5550,8 +5577,22 @@ def parse_cargo_lock(filepath):
     parents_clean = {k: list(v) for k, v in parents.items()}
     return resolved_clean, parents_clean
 
+def get_crates_index_url(crate_name):
+    """Generates the official Cargo sparse index CDN URL for a crate."""
+    name = crate_name.lower()
+    length = len(name)
+    if length == 1:
+        prefix = f"1/{name}"
+    elif length == 2:
+        prefix = f"2/{name}"
+    elif length == 3:
+        prefix = f"3/{name[0]}/{name}"
+    else:
+        prefix = f"{name[:2]}/{name[2:4]}/{name}"
+    return f"https://index.crates.io/{prefix}"
+
 def check_rust_package(target):
-    """Queries crates.io API for crate metadata and checks target version."""
+    """Queries crates.io index/API for crate metadata and checks target version."""
     name = target["name"]
     declared = target["declared"]
     installed_versions = target["installed"]
@@ -5560,25 +5601,55 @@ def check_rust_package(target):
     results = []
     
     try:
-        url = f"{URL_RUST_REGISTRY}{urllib.parse.quote(name)}"
-        req = urllib.request.Request(url)
-        # crates.io requires a User-Agent
-        req.add_header("User-Agent", f"Kevlar-CheckDeps/{VERSION}")
-        
-        with safe_urlopen(req, timeout=10) as response:
-            data = json.loads(response.read().decode("utf-8"))
-            
-        crate_info = data.get("crate", {})
-        latest_version = crate_info.get("max_stable_version") or crate_info.get("max_version")
-        
-        versions_meta = data.get("versions", [])
+        all_versions = []
         yanked_versions = set()
-        for v_meta in versions_meta:
-            if v_meta.get("yanked"):
-                yanked_versions.add(v_meta.get("num"))
-                
-        all_versions = [v.get("num") for v in versions_meta if v.get("num")]
+        repo_url_raw = None
+        latest_version = None
         
+        # 1. Primary: Fast official CDN Cargo sparse index (no rate limits)
+        url_index = get_crates_index_url(name)
+        req_index = urllib.request.Request(url_index)
+        fetched_index = False
+        try:
+            with safe_urlopen(req_index, timeout=10) as response:
+                content = response.read().decode("utf-8", errors="ignore")
+                for line in content.strip().split("\n"):
+                    if not line.strip():
+                        continue
+                    try:
+                        v_data = json.loads(line)
+                        v_num = v_data.get("vers")
+                        if v_num:
+                            all_versions.append(v_num)
+                            if v_data.get("yanked"):
+                                yanked_versions.add(v_num)
+                    except Exception:
+                        pass
+                if all_versions:
+                    fetched_index = True
+        except Exception:
+            pass
+            
+        # 2. Fallback: REST API if sparse index call failed or returned no versions
+        if not fetched_index:
+            url = f"{URL_RUST_REGISTRY}{urllib.parse.quote(name)}"
+            req = urllib.request.Request(url)
+            req.add_header("User-Agent", f"Kevlar-CheckDeps/{VERSION}")
+            
+            with safe_urlopen(req, timeout=10) as response:
+                data = json.loads(response.read().decode("utf-8"))
+                
+            crate_info = data.get("crate", {})
+            latest_version = crate_info.get("max_stable_version") or crate_info.get("max_version")
+            repo_url_raw = crate_info.get("repository") or crate_info.get("homepage")
+            
+            versions_meta = data.get("versions", [])
+            for v_meta in versions_meta:
+                if v_meta.get("yanked"):
+                    yanked_versions.add(v_meta.get("num"))
+                    
+            all_versions = [v.get("num") for v in versions_meta if v.get("num")]
+            
         for ver_str in versions_to_check:
             clean_ver = re.sub(r'^[^\d]*', '', ver_str) if ver_str else "0.0.0"
             if not clean_ver:
@@ -5598,8 +5669,9 @@ def check_rust_package(target):
             compare_url = None
             releases_url = None
             if status in ("major", "minor-major", "patch-major"):
-                raw_url = crate_info.get("repository") or crate_info.get("homepage")
-                repo_url = clean_repo_url(raw_url)
+                if not repo_url_raw:
+                    repo_url_raw = f"https://github.com/rust-lang/{name}" if is_github_url(f"https://github.com/rust-lang/{name}") else None
+                repo_url = clean_repo_url(repo_url_raw)
                 if repo_url:
                     compare_url = get_compare_url(repo_url, clean_ver, latest_absolute)
                     releases_url = f"{repo_url}/releases" if is_github_url(repo_url) else repo_url
@@ -5635,7 +5707,8 @@ def check_rust_package(target):
 
 def check_all_rust_targets(targets, max_workers):
     """Checks all Rust target crates in parallel."""
-    return _check_all_targets_unified(targets, check_rust_package, "[Rust] Checking registry", max_workers)
+    rust_workers = min(max_workers, 5) if max_workers else 5
+    return _check_all_targets_unified(targets, check_rust_package, "[Rust] Checking registry", rust_workers)
 
 def run_rust_checker(args):
     """Main orchestrator for Rust Cargo checker."""
@@ -5686,8 +5759,13 @@ def run_rust_checker(args):
         for r in results:
             r["vulnerabilities"] = []
             
-    # Resolve transitive dependency parents
+    # Resolve transitive dependency parents & dep_type
     for r in results:
+        if r["name"] in direct:
+            r["dep_type"] = "Direct"
+        else:
+            r["dep_type"] = "Transitive"
+            r["declared"] = None
         direct_parents = find_direct_parents(r["name"], parents, direct)
         r["required_by"] = sorted(list(direct_parents - {r["name"]}))
             
@@ -7098,8 +7176,10 @@ def _match_go(line_lower, pkg_lower):
     return re.search(pattern, line_lower) is not None
 
 def _match_rust(line_lower, pkg_lower):
-    pattern = r'^\s*' + re.escape(pkg_lower) + r'\s*=\s*'
-    return re.search(pattern, line_lower) is not None
+    pattern_eq = r'^\s*' + re.escape(pkg_lower) + r'\s*=\s*'
+    pattern_sec = r'\[\s*(?:target\.[^\]]+\.)?(?:dependencies|dev-dependencies|build-dependencies)\.' + re.escape(pkg_lower) + r'\s*\]'
+    return (re.search(pattern_eq, line_lower) is not None or
+            re.search(pattern_sec, line_lower) is not None)
 
 def _match_ruby(line_lower, pkg_lower):
     pattern = r'gem\s+[\'"]' + re.escape(pkg_lower) + r'[\'"]'
@@ -7390,7 +7470,19 @@ def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ve
                     v = v[1:]
                 v = re.sub(r'^[~^>=<!\s]+', '', v)
                 return v
-            if clean_ver(declared_ver) != clean_ver(resolved_version):
+            def is_version_compatible(v1, v2):
+                c1 = clean_ver(v1)
+                c2 = clean_ver(v2)
+                if not c1 or not c2:
+                    return True
+                if c1 == c2 or c1.startswith(c2) or c2.startswith(c1):
+                    return True
+                m1 = re.match(r'^(\d+)', c1)
+                m2 = re.match(r'^(\d+)', c2)
+                if m1 and m2 and m1.group(1) == m2.group(1):
+                    return True
+                return False
+            if not is_version_compatible(declared_ver, resolved_version):
                 return None
     # --- End of property placeholder logic ---
 
@@ -7598,6 +7690,23 @@ def populate_remediation_recommendations(results, default_project_path):
                         if score == 2:
                             break
                     
+            diff_name = name
+            diff_declared = declared
+            
+            if found_line_idx is None and r.get("required_by"):
+                # For transitive dependencies, locate the direct parent package in the manifest file
+                for parent_name in r.get("required_by", []):
+                    for idx, line in enumerate(lines):
+                        if match_line_for_dependency(line, parent_name, tech):
+                            found_line_idx = idx + 1
+                            diff_name = parent_name
+                            parent_r = next((item for item in results if item["name"] == parent_name), None)
+                            if parent_r and parent_r.get("declared"):
+                                diff_declared = parent_r["declared"]
+                            break
+                    if found_line_idx is not None:
+                        break
+                        
             if found_line_idx is not None:
                 # Try to generate diffs for this manifest file
                 temp_safe = None
@@ -7610,14 +7719,14 @@ def populate_remediation_recommendations(results, default_project_path):
                     if len(parts) >= 2:
                         for p in parts:
                             diff_p = generate_remediation_diff(
-                                manifest_path, found_line_idx, declared, p, tech, name
+                                manifest_path, found_line_idx, diff_declared, p, tech, diff_name
                             )
                             if diff_p:
                                 lbl = format_remediation_option_label(p)
                                 temp_options.append({"label": lbl, "diff": diff_p})
                         # Add the combined choice ("A or B")
                         diff_comb = generate_remediation_diff(
-                            manifest_path, found_line_idx, declared, target_string, tech, name
+                            manifest_path, found_line_idx, diff_declared, target_string, tech, diff_name
                         )
                         if diff_comb:
                             lbl_comb = format_remediation_option_label(target_string)
@@ -7625,11 +7734,11 @@ def populate_remediation_recommendations(results, default_project_path):
 
                 if latest_sm:
                     temp_safe = generate_remediation_diff(
-                        manifest_path, found_line_idx, declared, latest_sm, tech, name
+                        manifest_path, found_line_idx, diff_declared, latest_sm, tech, diff_name
                     )
                 if latest_abs:
                     temp_major = generate_remediation_diff(
-                        manifest_path, found_line_idx, declared, latest_abs, tech, name
+                        manifest_path, found_line_idx, diff_declared, latest_abs, tech, diff_name
                     )
                 
                 # If we succeeded in generating at least one valid diff, we stop searching
