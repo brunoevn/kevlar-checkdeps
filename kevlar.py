@@ -1745,9 +1745,15 @@ def parse_pnpm_lock(filepath):
                 
                 indent = len(line) - len(line.lstrip())
                 
-                # Maintain the indentation stack: pop states that are at the same or deeper indentation
-                while stack and indent <= stack[-1][0]:
-                    stack.pop()
+                # Maintain the indentation stack: pop states that are at deeper indentation (preserving DEPENDENCIES at equal indent)
+                while stack:
+                    top_indent, top_state, _ = stack[-1]
+                    if top_state in ('DEPENDENCIES', 'IMPORTER_DEPS') and indent == top_indent:
+                        break
+                    if indent <= top_indent:
+                        stack.pop()
+                    else:
+                        break
                 
                 current_state = stack[-1][1] if stack else 'ROOT'
                 current_pkg = None
@@ -1765,14 +1771,24 @@ def parse_pnpm_lock(filepath):
                     stack.append((indent, 'PACKAGES', None))
                     continue
                 
-                if current_state == 'IMPORTERS':
-                    if stripped.startswith("dependencies:") or stripped.startswith("devDependencies:") or stripped.startswith("optionalDependencies:") or stripped.startswith("peerDependencies:"):
+                if current_state in ('IMPORTERS', 'IMPORTER_ITEM', 'IMPORTER_DEPS'):
+                    if stripped.startswith(("dependencies:", "devDependencies:", "optionalDependencies:", "peerDependencies:")):
+                        while stack and stack[-1][1] in ('IMPORTER_DEPS', 'IMPORTER_DEP_ITEM'):
+                            stack.pop()
                         stack.append((indent, 'IMPORTER_DEPS', None))
+                        continue
+                    elif stripped.endswith(":") and current_state in ('IMPORTERS', 'IMPORTER_ITEM'):
+                        imp_name = stripped.rstrip(":").strip("'\"")
+                        base_name = imp_name.rsplit("/", 1)[-1]
+                        parents.setdefault(imp_name, set()).add("root")
+                        parents.setdefault(base_name, set()).add("root")
+                        stack.append((indent, 'IMPORTER_ITEM', imp_name))
+                        continue
                 
-                elif current_state == 'IMPORTER_DEPS':
+                if current_state == 'IMPORTER_DEPS':
                     if ":" in stripped:
                         dep_name = stripped.split(":", 1)[0].strip().strip("'\"")
-                        if dep_name and dep_name not in ("specifier", "version"):
+                        if dep_name and dep_name not in ("specifier", "version") and dep_name not in ("node", "npm", "pnpm", "yarn", "bun", "python"):
                             parents.setdefault(dep_name, set()).add("root")
                             stack.append((indent, 'IMPORTER_DEP_ITEM', dep_name))
                 
@@ -1785,6 +1801,8 @@ def parse_pnpm_lock(filepath):
                     raw_pkg = raw_line.rstrip(":").strip("'\"")
                     if raw_pkg.startswith("/"):
                         raw_pkg = raw_pkg[1:]
+                    if "node_modules/" in raw_pkg:
+                        raw_pkg = raw_pkg.split("node_modules/")[-1]
                     if "/" in raw_pkg and not raw_pkg.startswith("@"):
                         first_part = raw_pkg.split("/", 1)[0]
                         if "." in first_part or "localhost" in first_part:
@@ -1816,13 +1834,20 @@ def parse_pnpm_lock(filepath):
                     if version and "(" in version:
                         version = version.split("(", 1)[0]
                     
-                    if pkg_name and version:
+                    if pkg_name and version and pkg_name not in ("node", "npm", "pnpm", "yarn", "bun", "python"):
                         resolved.setdefault(pkg_name, set()).add(version)
                         # Push this package's context onto the stack
                         stack.append((indent, 'PACKAGE_BODY', (pkg_name, version)))
                 
-                elif current_state == 'PACKAGE_BODY':
-                    # Inside a package block. We check for integrity and dependency subsections.
+                if current_state in ('PACKAGE_BODY', 'DEPENDENCIES'):
+                    if stripped.startswith(("dependencies:", "devDependencies:", "optionalDependencies:", "peerDependencies:")):
+                        while stack and stack[-1][1] in ('DEPENDENCIES', 'DEPENDENCY_ITEM'):
+                            stack.pop()
+                        stack.append((indent, 'DEPENDENCIES', None))
+                        continue
+
+                if current_state == 'PACKAGE_BODY':
+                    # Inside a package block. We check for integrity.
                     if "integrity" in stripped and current_version:
                         parts = stripped.split("integrity", 1)
                         if len(parts) == 2:
@@ -1833,9 +1858,6 @@ def parse_pnpm_lock(filepath):
                             val = val.split()[0].strip(",}'\"")
                             if val:
                                 integrity_dict[(current_pkg, current_version)] = val
-                                
-                    if stripped.startswith("dependencies:") or stripped.startswith("optionalDependencies:") or stripped.startswith("peerDependencies:"):
-                        stack.append((indent, 'DEPENDENCIES', None))
                 
                 elif current_state == 'DEPENDENCIES':
                     # We are in a list of dependencies under a package.
@@ -1843,8 +1865,9 @@ def parse_pnpm_lock(filepath):
                     if ":" in stripped:
                         dep_name, dep_ver = stripped.split(":", 1)
                         dep_name = dep_name.strip().strip("'\"")
-                        if dep_name and current_pkg:
+                        if dep_name and current_pkg and dep_name not in ("node", "npm", "pnpm", "yarn", "bun", "python") and dep_name not in ("specifier", "version", "integrity", "optional", "transitivePeerDependencies"):
                             parents.setdefault(dep_name, set()).add(current_pkg)
+                            stack.append((indent, 'DEPENDENCY_ITEM', dep_name))
                             
         parents_clean = {k: list(v) for k, v in parents.items()}
         resolved_clean = {k: list(v) for k, v in resolved.items()}
@@ -2800,13 +2823,24 @@ def run_npm_checker(args):
             "is_engine": True
         })
             
-    # Resolve transitive dependency parents
-    direct_packages = set(pkg_data["all_direct"].keys()) if pkg_data else set()
+    # Resolve transitive dependency parents & dependency types
+    direct_packages = set(pkg_data["all_direct"].keys()) if pkg_data and "all_direct" in pkg_data else set()
+    if parents_data:
+        root_parents = {name for name, pts in parents_data.items() if "root" in pts}
+        direct_packages.update(root_parents)
+        
     for r in results:
         if not r.get("is_engine", False):
-            direct_parents = find_direct_parents(r["name"], parents_data, direct_packages)
-            r["required_by"] = sorted(list(direct_parents - {r["name"]}))
+            if r["name"] in direct_packages:
+                dev_deps = pkg_data.get("devDependencies", {}) if pkg_data else {}
+                r["dep_type"] = "Dev" if r["name"] in dev_deps else "Direct"
+                r["required_by"] = []
+            else:
+                r["dep_type"] = "Transitive"
+                direct_parents = find_direct_parents(r["name"], parents_data, direct_packages)
+                r["required_by"] = sorted(list(direct_parents - {r["name"]}))
         else:
+            r["dep_type"] = "Engine"
             r["required_by"] = []
             
     elapsed = time.time() - start_time
