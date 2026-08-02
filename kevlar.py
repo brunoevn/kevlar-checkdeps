@@ -7993,22 +7993,35 @@ class HTMLReportTemplateProvider:
             font-size: 10px;
             background-color: #1e293b;
             color: var(--text-muted);
-            padding: 2px 6px;
-            border-radius: 4px;
+            padding: 0 6px;
+            height: 20px;
+            box-sizing: border-box;
+            border-radius: 5px;
             text-transform: uppercase;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            line-height: 1;
         }
         
         .pkg-badges {
             display: flex;
             gap: 6px;
             flex-wrap: wrap;
+            align-items: center;
         }
         
         .badge {
             font-size: 11px;
-            padding: 2px 8px;
-            border-radius: 6px;
+            padding: 0 7px;
+            height: 20px;
+            box-sizing: border-box;
+            border-radius: 5px;
             font-weight: 600;
+            line-height: 1;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
         }
         
         .badge-success { background-color: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
@@ -8021,26 +8034,43 @@ class HTMLReportTemplateProvider:
         .badge-project { background-color: rgba(55, 65, 81, 0.4); color: #9ca3af; border: 1px solid rgba(75, 85, 99, 0.4); }
         
         .badge-vuln-stats {
-            background-color: rgba(239, 68, 68, 0.1);
-            border: 1px solid rgba(239, 68, 68, 0.2);
+            background-color: rgba(239, 68, 68, 0.12);
+            border: 1px solid rgba(239, 68, 68, 0.25);
             color: #ef4444;
             display: inline-flex;
             align-items: center;
-            gap: 4px;
+            justify-content: center;
+            gap: 5px;
+            padding: 0 7px;
+            height: 20px;
+            box-sizing: border-box;
             font-weight: 700;
+            line-height: 1;
+        }
+        .badge-vuln-stats .vuln-severity-pills-inner {
+            display: inline-flex;
+            gap: 3px;
+            align-items: center;
+            justify-content: center;
+            margin-left: 2px;
         }
         .vuln-severity-pills {
             display: inline-flex;
-            gap: 4px;
+            gap: 3px;
             align-items: center;
+            justify-content: center;
         }
         .sev-pill {
-            font-size: 10px;
-            padding: 2px 6px;
-            border-radius: 5px;
+            font-size: 9px;
+            padding: 0 4px;
+            height: 14px;
+            line-height: 14px;
+            box-sizing: border-box;
+            border-radius: 3px;
             font-weight: 700;
             display: inline-flex;
             align-items: center;
+            justify-content: center;
         }
         .sev-pill.sev-mal { background-color: rgba(127, 29, 29, 0.4); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.5); }
         .sev-pill.sev-c { background-color: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
@@ -8552,7 +8582,9 @@ class HTMLReportTemplateProvider:
             cursor: pointer;
             display: inline-flex;
             align-items: center;
+            justify-content: center;
             gap: 6px;
+            line-height: 1;
             transition: filter 0.2s ease;
         }
         
@@ -8571,7 +8603,9 @@ class HTMLReportTemplateProvider:
             cursor: pointer;
             display: inline-flex;
             align-items: center;
+            justify-content: center;
             gap: 6px;
+            line-height: 1;
             transition: filter 0.2s ease;
             box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
         }
@@ -8905,14 +8939,6 @@ class HTMLReportTemplateProvider:
                         }
                     });
                     
-                    const total_v = pkg_vulns.length;
-                    const badge_html = 
-                        '<span class="badge badge-vuln-stats" title="' + total_v + ' Vulnerabilities">' +
-                            '<svg class="icon-shield" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px; vertical-align: middle;"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>' +
-                            '<span>' + total_v + ' vuls</span>' +
-                        '</span>';
-                    badges.push(badge_html);
-                    
                     let pills = [];
                     if (mal_cnt > 0) pills.push('<span class="sev-pill sev-mal" title="Malicious Code">☠️ ' + mal_cnt + '</span>');
                     if (c_cnt > 0) pills.push('<span class="sev-pill sev-c">' + c_cnt + ' C</span>');
@@ -8920,10 +8946,20 @@ class HTMLReportTemplateProvider:
                     if (m_cnt > 0) pills.push('<span class="sev-pill sev-m">' + m_cnt + ' M</span>');
                     if (l_cnt > 0) pills.push('<span class="sev-pill sev-l">' + l_cnt + ' L</span>');
                     if (u_cnt > 0) pills.push('<span class="sev-pill sev-u">' + u_cnt + ' U</span>');
-                    
+
+                    let pills_html = '';
                     if (pills.length > 0) {
-                        badges.push('<div class="vuln-severity-pills">' + pills.join('') + '</div>');
+                        pills_html = '<span class="vuln-severity-pills-inner">' + pills.join('') + '</span>';
                     }
+
+                    const total_v = pkg_vulns.length;
+                    const badge_html = 
+                        '<span class="badge badge-vuln-stats" title="' + total_v + ' Vulnerabilities">' +
+                            '<svg class="icon-shield" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px; vertical-align: middle;"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>' +
+                            '<span>' + total_v + ' vuls</span>' +
+                            pills_html +
+                        '</span>';
+                    badges.push(badge_html);
                 }
                 
                 if (is_suppressed) {
