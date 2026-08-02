@@ -2646,6 +2646,29 @@ class TestKevlar(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_parse_requirements_txt_relative_inclusion(self):
+        """Test that parse_requirements_txt resolves included requirements files and ignores path strings like '..'."""
+        import tempfile
+        import shutil
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            root_req = os.path.join(temp_dir, "requirements.txt")
+            with open(root_req, "w", encoding="utf-8") as f:
+                f.write("requests==2.28.1\n")
+
+            sub_dir = os.path.join(temp_dir, "sub")
+            os.makedirs(sub_dir, exist_ok=True)
+            sub_req = os.path.join(sub_dir, "requirements.txt")
+            with open(sub_req, "w", encoding="utf-8") as f:
+                f.write("../requirements.txt\n")
+
+            deps, _ = kevlar.parse_requirements_txt(sub_req)
+            self.assertIn("requests", deps)
+            self.assertNotIn("..", deps)
+        finally:
+            shutil.rmtree(temp_dir)
+
     def test_no_show_console_flag(self):
         """Test that print_results_table returns without printing when no_show_console is True."""
         import io

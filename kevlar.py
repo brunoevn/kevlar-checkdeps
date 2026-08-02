@@ -3022,8 +3022,16 @@ def get_env_markers():
         "extra": "",
     }
 
-def parse_requirements_txt(filepath):
-    """Parses requirements.txt to extract dependencies and parent traces, supporting PEP 508."""
+def parse_requirements_txt(filepath, seen_files=None):
+    """Parses requirements.txt to extract dependencies and parent traces, supporting PEP 508 and file inclusions."""
+    if seen_files is None:
+        seen_files = set()
+        
+    abs_filepath = os.path.abspath(filepath)
+    if abs_filepath in seen_files:
+        return {}, {}
+    seen_files.add(abs_filepath)
+    
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             lines = f.readlines()
@@ -3071,6 +3079,23 @@ def parse_requirements_txt(filepath):
                 stripped_line = parts[0].strip()
                 comment = parts[1].strip()
                 
+            # Handle file inclusions like '-r requirements.txt', '-c constraints.txt', or relative paths like '../requirements.txt'
+            inc_target = None
+            is_url = any(s in stripped_line for s in ("http://", "https://", "git+", "svn+", "hg+", "@"))
+            if stripped_line.startswith(("-r ", "-c ", "--requirement ", "--constraint ")):
+                inc_target = stripped_line.split(maxsplit=1)[1].strip()
+            elif not is_url and (stripped_line.startswith((".", "/", "\\")) or stripped_line.endswith((".txt", ".in"))):
+                inc_target = stripped_line.lstrip("-e ").strip()
+                
+            if inc_target:
+                inc_path = os.path.abspath(os.path.join(os.path.dirname(abs_filepath), inc_target))
+                if os.path.exists(inc_path) and os.path.isfile(inc_path) and inc_path not in seen_files:
+                    inc_deps, inc_parents = parse_requirements_txt(inc_path, seen_files)
+                    dependencies.update(inc_deps)
+                    for k, v in inc_parents.items():
+                        parents.setdefault(k, set()).update(v)
+                continue
+                
             if stripped_line.startswith("-"):
                 continue
                 
@@ -3083,9 +3108,9 @@ def parse_requirements_txt(filepath):
                 req_part = stripped_line
                 marker_part = None
                 
-            # Parse package name, optional extras, and specifier/URL
+            # Parse package name, optional extras, and specifier/URL (PEP 508 names must start with alphanumeric)
             match = re.match(
-                r'^\s*([A-Za-z0-9_.-]+)(?:\s*\[\s*([A-Za-z0-9_,.-]+)\s*\])?\s*(.*)$',
+                r'^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)(?:\s*\[\s*([A-Za-z0-9_,.-]+)\s*\])?\s*(.*)$',
                 req_part
             )
             if not match:
@@ -10734,6 +10759,8 @@ Examples:
         original_path = args.path
         original_tech = getattr(args, "tech", None)
         
+        generated_report_basenames = set()
+        
         for project_path, techs in projects:
             for tech in techs:
                 tech_info = TECHNOLOGIES.get(tech)
@@ -10765,7 +10792,7 @@ Examples:
                     print_results_table(results, pkg_data, args.show_all, args.vuls, getattr(args, "no_show_console", False))
                     print_summary(results, elapsed, args.vuls)
                     
-                    # Generate report file(s) for this project folder
+                    # Generate report file(s) for this project folder with unique filename collision resolution
                     rel_path = os.path.relpath(project_path, original_path)
                     if rel_path == ".":
                         proj_dirname = os.path.basename(os.path.abspath(project_path))
@@ -10777,6 +10804,19 @@ Examples:
                     proj_dirname = proj_dirname.replace("/", "_").replace("\\", "_")
                     safe_proj_dirname = re.sub(r'[^\w\-]', '_', proj_dirname)
                     safe_proj_dirname = re.sub(r'_{2,}', '_', safe_proj_dirname).strip("_")
+                    
+                    base_safe_name = safe_proj_dirname
+                    if base_safe_name in generated_report_basenames:
+                        candidate = f"{base_safe_name}-{tech}"
+                        if candidate in generated_report_basenames:
+                            counter = 2
+                            while f"{candidate}-{counter}" in generated_report_basenames:
+                                counter += 1
+                            safe_proj_dirname = f"{candidate}-{counter}"
+                        else:
+                            safe_proj_dirname = candidate
+                            
+                    generated_report_basenames.add(safe_proj_dirname)
                     
                     if args.format in ("html", "both"):
                         proj_html_filepath = f"report-{safe_proj_dirname}.html"
