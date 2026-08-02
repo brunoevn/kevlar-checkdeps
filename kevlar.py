@@ -10578,6 +10578,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Kevlar CheckDeps: Generic Dependency Checker & SCA Tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        add_help=False,
         epilog="""
 Examples:
   python kevlar.py --tech npm --path ./Backend
@@ -10586,6 +10587,12 @@ Examples:
         """
     )
     
+    parser.add_argument(
+        "--help", "-h",
+        action="help",
+        default=argparse.SUPPRESS,
+        help="Show this help message and exit."
+    )
     parser.add_argument(
         "--version", "-V",
         action="version",
