@@ -7283,6 +7283,18 @@ def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ve
         effective_prefix = ""
         
     upgraded_str = effective_prefix + latest_ver
+
+    # Do not generate a diff if target version is identical to current version
+    def _clean_v(v):
+        if not v:
+            return ""
+        v = v.strip().lower()
+        if v.startswith('v'):
+            v = v[1:]
+        return re.sub(r'^[~^>=<!\s]+', '', v)
+
+    if target_text and latest_ver and _clean_v(target_text) == _clean_v(latest_ver):
+        return None
             
     start_ctx = max(0, line_idx_to_change - 2)
     end_ctx = min(len(lines), line_idx_to_change + 3)
@@ -7412,15 +7424,16 @@ def populate_remediation_recommendations(results, default_project_path):
         latest_sm = r.get("latest_same_major")
         latest_abs = r.get("latest_absolute") or r.get("latest")
         
-        # If latest_same_major is identical to installed, there's no safe update.
-        if latest_sm == clean_installed:
+        # If latest_same_major is identical to installed or declared, there's no safe update.
+        if latest_sm in (clean_installed, declared):
             latest_sm = None
-        # If latest_absolute is identical to latest_same_major, we don't need a separate major remediation.
-        if latest_abs == latest_sm:
+        # If latest_absolute is identical to installed, declared, or latest_same_major, there's no separate major remediation.
+        if latest_abs in (clean_installed, declared) or latest_abs == latest_sm:
             latest_abs = None
             
         remediation_safe = None
         remediation_major = None
+        remediation_options = None
         
         manifest_files = []
         if r.get("is_engine", False):
@@ -9250,10 +9263,18 @@ class HTMLReportTemplateProvider:
                 pkg_vulns.forEach(vid => {
                     const v = KEVLAR_VULNERABILITY_STORE[vid];
                     if (v) {
-                        vuln_strings.push(vid + ': ' + (v.summary || ''));
+                        let str = vid + ': ' + (v.summary || '');
+                        if (v.details) {
+                            let det = String(v.details).trim();
+                            if (det.length > 1000) {
+                                det = det.substring(0, 1000) + '...';
+                            }
+                            str += '\\\\n   Description/Details: ' + det;
+                        }
+                        vuln_strings.push(str);
                     }
                 });
-                details_parts.push("Vulnerabilities: " + vuln_strings.join('; '));
+                details_parts.push("Vulnerabilities:\\\\n" + vuln_strings.join('\\\\n\\\\n'));
             }
             if (is_deprecated) {
                 alert_types.push("Deprecation");
@@ -9758,50 +9779,78 @@ class HTMLReportTemplateProvider:
                 window.event.stopPropagation();
             }
             
-            let targetText = latestAbsolute;
-            let tasksIntro = `I want to update this package to version "$${latestAbsolute}". Please perform the following tasks in a detailed and professional manner:`;
+            function cleanV(v) {
+                if (!v) return '';
+                v = String(v).trim().toLowerCase();
+                if (v.startsWith('v')) v = v.slice(1);
+                return v.replace(/^[~^>=<!\s]+/, '');
+            }
+
+            const currClean = cleanV(currentVer);
+            const latestSmClean = cleanV(latestSameMajor);
+            const latestAbsClean = cleanV(latestAbsolute);
+
+            let hasNewerVersion = false;
+            let targetText = "";
+            let tasksIntro = "";
             
-            if (latestSameMajor && latestAbsolute && latestSameMajor !== latestAbsolute) {
-                if (latestSameMajor === currentVer) {
-                    targetText = latestAbsolute;
-                    tasksIntro = `I want to update this package to version "$${targetText}". Please perform the following tasks in a detailed and professional manner:`;
+            if (latestAbsClean && latestAbsClean !== currClean) {
+                hasNewerVersion = true;
+                if (latestSmClean && latestAbsClean && latestSmClean !== latestAbsClean && latestSmClean !== currClean) {
+                    targetText = `${latestSameMajor} or ${latestAbsolute}`;
+                    tasksIntro = `I want to update this package to version "${targetText}". Please perform the following tasks in a detailed and professional manner (taking into account the minor update to "${latestSameMajor}" vs the major update to "${latestAbsolute}" in your analysis):`;
                 } else {
-                    targetText = `$${latestSameMajor} or $${latestAbsolute}`;
-                    tasksIntro = `I want to update this package to version "$${targetText}". Please perform the following tasks in a detailed and professional manner (taking into account the minor update to "$${latestSameMajor}" vs the major update to "$${latestAbsolute}" in your analysis):`;
+                    targetText = latestAbsolute;
+                    tasksIntro = `I want to update this package to version "${targetText}". Please perform the following tasks in a detailed and professional manner:`;
                 }
-            } else if (latestSameMajor && latestSameMajor !== currentVer) {
+            } else if (latestSmClean && latestSmClean !== currClean) {
+                hasNewerVersion = true;
                 targetText = latestSameMajor;
-                tasksIntro = `I want to update this package to version "$${targetText}". Please perform the following tasks in a detailed and professional manner:`;
+                tasksIntro = `I want to update this package to version "${targetText}". Please perform the following tasks in a detailed and professional manner:`;
+            } else {
+                hasNewerVersion = false;
+                targetText = currentVer;
+                tasksIntro = `The package "${pkgName}" is currently on version "${currentVer}", which is the latest available version under this artifact/package coordinate, but security vulnerabilities or deprecation issues have been identified. Please perform the following tasks in a detailed and professional manner:`;
             }
             
-            let pkgDesc = `the package "$${pkgName}"`;
+            let pkgDesc = `the package "${pkgName}"`;
             if (depType === 'Transitive' && requiredBy) {
-                pkgDesc = `the transitive dependency package "$${pkgName}" (which is required by $${requiredBy})`;
+                pkgDesc = `the transitive dependency package "${pkgName}" (which is required by ${requiredBy})`;
             }
             
             let projectContext = "";
             if (projName && projDir) {
-                projectContext = ` (name: $${projName} directory: $${projDir})`;
+                projectContext = ` (name: ${projName} directory: ${projDir})`;
             }
             
             let manifestContext = "";
             if (manifestFile) {
-                manifestContext = `\nThe version is declared/configured in manifest file: "$${manifestFile}"` + (manifestLine ? ` at line $${manifestLine}` : "");
+                manifestContext = `\nThe version is declared/configured in manifest file: "${manifestFile}"` + (manifestLine ? ` at line ${manifestLine}` : "");
             }
             
-            const promptTexto = `Act as a Senior AppSec Expert and Principal Software Engineer specialized in the $${ecosystem} ecosystem.
-
-I have $${pkgDesc} in my project$${projectContext}, which is currently on version "$${currentVer}".$${manifestContext}
-An alert of type "$${alertType}" has been detected.
-Detailed information/Associated alerts:
-$${details}
-
-$${tasksIntro}
-
-1. Critically analyze any potential 'Breaking Changes' or destructive impacts when upgrading from version "$${currentVer}" to "$${targetText}".
-2. Verify if the target version "$${targetText}" safely resolves the issues and vulnerabilities described in the details above.
-3. Provide a step-by-step action plan with the exact console commands to perform the upgrade or mitigate risks if there are disruptive changes or incompatibilities.
+            let taskList = "";
+            if (hasNewerVersion) {
+                taskList = `1. Critically analyze any potential 'Breaking Changes' or destructive impacts when upgrading from version "${currentVer}" to "${targetText}".
+2. Verify if the target version "${targetText}" safely resolves the issues and vulnerabilities described in the details above, or if a package migration to an alternative library (e.g., new groupId/artifactId) is advised in the advisory text.
+3. Provide a step-by-step action plan with the exact console commands and code/manifest updates to perform the upgrade or migration.
 4. Check if any other libraries or transitive dependencies will become obsolete, unused, or orphaned as a result of this upgrade, and suggest how to safely clean them up (e.g., pruning unused packages).`;
+            } else {
+                taskList = `1. Investigate if this package coordinate ("${pkgName}") is End-Of-Life (EOL), unmaintained, or deprecated, and determine if a migration to a replacement package/library (e.g., a successor library, new groupId/artifactId such as org.apache.logging.log4j:log4j-core for log4j, or alternative framework) is required or recommended.
+2. If a package migration is recommended (or mentioned in the advisory details above), provide the exact code/manifest changes to replace "${pkgName}" with the recommended replacement library.
+3. If no package migration is needed or available, provide step-by-step mitigation workarounds, code patches, or configuration changes to neutralize the vulnerabilities in version "${currentVer}".
+4. Check if any other libraries or transitive dependencies will become obsolete, unused, or orphaned as a result, and suggest how to safely clean them up.`;
+            }
+            
+            const promptTexto = `Act as a Senior AppSec Expert and Principal Software Engineer specialized in the ${ecosystem} ecosystem.
+
+I have ${pkgDesc} in my project${projectContext}, which is currently on version "${currentVer}".${manifestContext}
+An alert of type "${alertType}" has been detected.
+Detailed information/Associated alerts:
+${details}
+
+${tasksIntro}
+
+${taskList}`;
 
             navigator.clipboard.writeText(promptTexto).then(() => {
                 let btn = null;

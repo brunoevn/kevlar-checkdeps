@@ -2545,6 +2545,57 @@ class TestKevlar(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_remediation_diff_identical_version_skipped(self):
+        import tempfile
+        import shutil
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            pom_content = (
+                '<project>\n'
+                '    <dependencies>\n'
+                '        <dependency>\n'
+                '            <groupId>log4j</groupId>\n'
+                '            <artifactId>log4j</artifactId>\n'
+                '            <version>1.2.17</version>\n'
+                '            <scope>test</scope>\n'
+                '        </dependency>\n'
+                '    </dependencies>\n'
+                '</project>\n'
+            )
+            pom_path = os.path.join(temp_dir, "pom.xml")
+            with open(pom_path, "w", encoding="utf-8") as f:
+                f.write(pom_content)
+
+            # 1. generate_remediation_diff should return None when target version equals current version
+            diff = kevlar.generate_remediation_diff(
+                pom_path,
+                line_index=6,
+                declared_ver="1.2.17",
+                latest_ver="1.2.17",
+                tech="maven",
+                package_name="log4j"
+            )
+            self.assertIsNone(diff)
+
+            # 2. populate_remediation_recommendations should not attach remediation when latest version equals current version
+            results = [{
+                "name": "log4j",
+                "declared": "1.2.17",
+                "installed": "1.2.17",
+                "latest_same_major": "1.2.17",
+                "latest_absolute": "1.2.17",
+                "latest": "1.2.17",
+                "status": "up-to-date",
+                "vulnerabilities": [{"id": "GHSA-1234"}],
+                "technology": "maven",
+                "project_path": temp_dir
+            }]
+            kevlar.populate_remediation_recommendations(results, temp_dir)
+            self.assertIsNone(results[0].get("remediation"))
+        finally:
+            shutil.rmtree(temp_dir)
+
 if __name__ == "__main__":
     unittest.main()
 
