@@ -2496,5 +2496,155 @@ class TestKevlar(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_npm_checker_only_engines(self):
+        import tempfile
+        import shutil
+        import types
+        import json
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            package_json_content = {
+                "name": "engines-only-app",
+                "version": "1.0.0",
+                "engines": {
+                    "node": ">=14"
+                }
+            }
+            with open(os.path.join(temp_dir, "package.json"), "w", encoding="utf-8") as f:
+                json.dump(package_json_content, f, indent=2)
+
+            args = types.SimpleNamespace(
+                path=temp_dir,
+                all=False,
+                concurrent=5,
+                vuls=False,
+                suppress=None
+            )
+
+            results, pkg_data, elapsed = kevlar.run_npm_checker(args)
+            self.assertIsNotNone(results)
+            self.assertTrue(len(results) > 0)
+            engine_item = next((r for r in results if r.get("name") == "node" and r.get("is_engine")), None)
+            self.assertIsNotNone(engine_item)
+            self.assertEqual(engine_item["declared"], ">=14")
+            self.assertIn(engine_item["status"], ("error", "minor"))
+            
+            engine_item["project_path"] = temp_dir
+            engine_item["technology"] = "npm"
+            kevlar.populate_remediation_recommendations(results, temp_dir)
+            rem = engine_item.get("remediation")
+            self.assertIsNotNone(rem)
+            self.assertIsNotNone(rem.get("options"))
+            options = rem["options"]
+            self.assertGreaterEqual(len(options), 3)
+            labels = [opt["label"] for opt in options]
+            self.assertIn("Version 24", labels)
+            self.assertIn("Version 26", labels)
+            self.assertIn("Version 24 o 26", labels)
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_remediation_diff_identical_version_skipped(self):
+        import tempfile
+        import shutil
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            pom_content = (
+                '<project>\n'
+                '    <dependencies>\n'
+                '        <dependency>\n'
+                '            <groupId>log4j</groupId>\n'
+                '            <artifactId>log4j</artifactId>\n'
+                '            <version>1.2.17</version>\n'
+                '            <scope>test</scope>\n'
+                '        </dependency>\n'
+                '    </dependencies>\n'
+                '</project>\n'
+            )
+            pom_path = os.path.join(temp_dir, "pom.xml")
+            with open(pom_path, "w", encoding="utf-8") as f:
+                f.write(pom_content)
+
+            # 1. generate_remediation_diff should return None when target version equals current version
+            diff = kevlar.generate_remediation_diff(
+                pom_path,
+                line_index=6,
+                declared_ver="1.2.17",
+                latest_ver="1.2.17",
+                tech="maven",
+                package_name="log4j"
+            )
+            self.assertIsNone(diff)
+
+            # 2. populate_remediation_recommendations should not attach remediation when latest version equals current version
+            results = [{
+                "name": "log4j",
+                "declared": "1.2.17",
+                "installed": "1.2.17",
+                "latest_same_major": "1.2.17",
+                "latest_absolute": "1.2.17",
+                "latest": "1.2.17",
+                "status": "up-to-date",
+                "vulnerabilities": [{"id": "GHSA-1234"}],
+                "technology": "maven",
+                "project_path": temp_dir
+            }]
+            kevlar.populate_remediation_recommendations(results, temp_dir)
+            self.assertIsNone(results[0].get("remediation"))
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_maven_parent_pom_property_resolution(self):
+        """Test that parse_maven_pom resolves properties defined in parent pom.xml when parsing child modules."""
+        import tempfile
+        import shutil
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            # Create parent pom.xml
+            parent_pom = (
+                '<project>\n'
+                '    <groupId>com.example</groupId>\n'
+                '    <artifactId>parent</artifactId>\n'
+                '    <version>1.0.0</version>\n'
+                '    <properties>\n'
+                '        <commons.fileupload.version>1.3.3</commons.fileupload.version>\n'
+                '    </properties>\n'
+                '</project>\n'
+            )
+            with open(os.path.join(temp_dir, "pom.xml"), "w", encoding="utf-8") as f:
+                f.write(parent_pom)
+
+            # Create child submodule pom.xml
+            child_dir = os.path.join(temp_dir, "child")
+            os.makedirs(child_dir, exist_ok=True)
+            child_pom = (
+                '<project>\n'
+                '    <parent>\n'
+                '        <groupId>com.example</groupId>\n'
+                '        <artifactId>parent</artifactId>\n'
+                '        <version>1.0.0</version>\n'
+                '    </parent>\n'
+                '    <artifactId>child</artifactId>\n'
+                '    <dependencies>\n'
+                '        <dependency>\n'
+                '            <groupId>commons-fileupload</groupId>\n'
+                '            <artifactId>commons-fileupload</artifactId>\n'
+                '            <version>${commons.fileupload.version}</version>\n'
+                '        </dependency>\n'
+                '    </dependencies>\n'
+                '</project>\n'
+            )
+            child_pom_path = os.path.join(child_dir, "pom.xml")
+            with open(child_pom_path, "w", encoding="utf-8") as f:
+                f.write(child_pom)
+
+            deps = kevlar.parse_maven_pom(child_pom_path)
+            self.assertEqual(deps.get("commons-fileupload:commons-fileupload"), "1.3.3")
+        finally:
+            shutil.rmtree(temp_dir)
+
 if __name__ == "__main__":
     unittest.main()

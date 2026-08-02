@@ -49,7 +49,7 @@ sys.stderr = SafeWriter(sys.stderr)
 # Global lock to protect concurrent console writes (sys.stdout, sys.stderr, print)
 console_lock = threading.Lock()
 
-VERSION = "1.10.2"
+VERSION = "1.10.3"
 
 # External APIs Configuration
 URL_NPM_REGISTRY = "https://registry.npmjs.org/"
@@ -106,7 +106,7 @@ TECHNOLOGIES = {
         "runner": None
     },
     "nuget": {
-        "files": [".csproj", "packages.config", "project.assets.json"],
+        "files": [".csproj", ".sln", ".slnx", "packages.config", "project.assets.json"],
         "osv_ecosystem": "NuGet",
         "runner": None
     },
@@ -2691,12 +2691,14 @@ def run_npm_checker(args):
                 t_integrity[ver] = integrity_data[key]
         t["integrity"] = t_integrity
     
-    if not targets:
+    node_constraint, _source = find_node_constraint(args.path, pkg_data)
+    
+    if not targets and not node_constraint:
         print(f"{COLOR_YELLOW}{ICON_WARN} No packages identified to check.{COLOR_RESET}")
         return None, None, 0
         
     start_time = time.time()
-    results = check_all_targets(targets, args.concurrent)
+    results = check_all_targets(targets, args.concurrent) if targets else []
     
     # Identify and isolate direct vs transitive results for npm packages
     # We want to clear the 'declared' constraint for transitive versions of a package
@@ -2760,7 +2762,6 @@ def run_npm_checker(args):
             r["vulnerabilities"] = []
             
     # Check Node.js version if applicable
-    node_constraint, _source = find_node_constraint(args.path, pkg_data)
     if node_constraint:
         status, deprecated_msg, error_msg, recommendation = analyze_node_constraint(node_constraint)
             
@@ -3694,41 +3695,65 @@ def find_and_parse_cpm_versions(start_path):
     return {}
 
 def parse_sln_file(sln_path):
-    """Parses a .sln file to retrieve relative paths to all project files."""
+    """Parses a .sln or .slnx solution file to retrieve relative paths to all project files."""
     project_paths = []
     try:
-        with open(sln_path, "r", encoding="utf-8-sig") as f:
-            content = f.read()
-            
-        proj_re = re.compile(r'Project\([^)]+\)\s*=\s*"[^"]+"\s*,\s*"([^"]+)"')
-        matches = proj_re.findall(content)
         sln_dir = os.path.dirname(os.path.abspath(sln_path))
-        
-        for m in matches:
-            norm_path = m.replace("\\", "/")
-            if norm_path.endswith((".csproj", ".vbproj", ".fsproj")):
-                full_path = os.path.join(sln_dir, norm_path)
-                if os.path.exists(full_path):
-                    project_paths.append(full_path)
+        if sln_path.lower().endswith(".slnx"):
+            try:
+                import xml.etree.ElementTree as ET
+                tree = ET.parse(sln_path)
+                root = tree.getroot()
+                for elem in root.iter("Project"):
+                    rel_p = elem.get("Path")
+                    if rel_p:
+                        norm_path = rel_p.replace("\\", "/")
+                        if norm_path.endswith((".csproj", ".vbproj", ".fsproj")):
+                            full_path = os.path.abspath(os.path.join(sln_dir, norm_path))
+                            if os.path.exists(full_path):
+                                project_paths.append(full_path)
+            except Exception:
+                with open(sln_path, "r", encoding="utf-8-sig", errors="ignore") as f:
+                    content = f.read()
+                matches = re.findall(r'Path\s*=\s*"([^"]+)"', content, re.IGNORECASE)
+                for m in matches:
+                    norm_path = m.replace("\\", "/")
+                    if norm_path.endswith((".csproj", ".vbproj", ".fsproj")):
+                        full_path = os.path.abspath(os.path.join(sln_dir, norm_path))
+                        if os.path.exists(full_path):
+                            project_paths.append(full_path)
+        else:
+            with open(sln_path, "r", encoding="utf-8-sig", errors="ignore") as f:
+                content = f.read()
+                
+            proj_re = re.compile(r'Project\([^)]+\)\s*=\s*"[^"]+"\s*,\s*"([^"]+)"')
+            matches = proj_re.findall(content)
+            
+            for m in matches:
+                norm_path = m.replace("\\", "/")
+                if norm_path.endswith((".csproj", ".vbproj", ".fsproj")):
+                    full_path = os.path.abspath(os.path.join(sln_dir, norm_path))
+                    if os.path.exists(full_path):
+                        project_paths.append(full_path)
     except Exception as e:
-        print(f"{COLOR_YELLOW}{ICON_WARN} Warning reading .sln file: {e}{COLOR_RESET}")
+        print(f"{COLOR_YELLOW}{ICON_WARN} Warning reading solution file: {e}{COLOR_RESET}")
         
     return project_paths
 
 def find_nuget_files(path):
-    """Finds Solution file (.sln), MSBuild project files, and assets files."""
+    """Finds Solution file (.sln / .slnx), MSBuild project files, and assets files."""
     sln_file = None
     manifests = []
     assets_files = []
     
     abs_path = os.path.abspath(path)
     if os.path.isfile(abs_path):
-        if abs_path.endswith(".sln"):
+        if abs_path.lower().endswith((".sln", ".slnx")):
             sln_file = abs_path
         elif abs_path.endswith((".csproj", ".vbproj", ".fsproj")) or abs_path.endswith("packages.config"):
             manifests = [abs_path]
     elif os.path.isdir(abs_path):
-        sln_candidates = [os.path.join(abs_path, f) for f in os.listdir(abs_path) if f.endswith(".sln")]
+        sln_candidates = [os.path.join(abs_path, f) for f in os.listdir(abs_path) if f.lower().endswith((".sln", ".slnx"))]
         if sln_candidates:
             sln_file = sln_candidates[0]
         else:
@@ -4380,8 +4405,9 @@ def parse_maven_pom_recursive(filepath, parent_dep_mgmt=None, seen_files=None, b
                 rel_path_elem = parent_elem.find(f"{prefix}relativePath")
                 rel_path = rel_path_elem.text.strip() if (rel_path_elem is not None and rel_path_elem.text) else "../pom.xml"
                 parent_pom_path = os.path.abspath(os.path.join(os.path.dirname(abs_path), rel_path))
-                if _is_safe_path(base_dir, parent_pom_path) and os.path.exists(parent_pom_path):
-                    _p_deps, p_props, p_dep_mgmt = parse_maven_pom_recursive(parent_pom_path, parent_dep_mgmt, seen_files, base_dir=base_dir)
+                if os.path.exists(parent_pom_path):
+                    parent_dir = os.path.dirname(parent_pom_path)
+                    _p_deps, p_props, p_dep_mgmt = parse_maven_pom_recursive(parent_pom_path, parent_dep_mgmt, seen_files, base_dir=parent_dir)
                     properties.update(p_props)
                     dep_mgmt.update(p_dep_mgmt)
                     
@@ -4401,6 +4427,18 @@ def parse_maven_pom_recursive(filepath, parent_dep_mgmt=None, seen_files=None, b
                 if not properties["${project.groupId}"]:
                     properties["${project.groupId}"] = (parent_elem.findtext(f"{prefix}groupId") or "").strip()
                     
+            # Interpolate properties recursively in properties dictionary
+            for _ in range(5):
+                prop_changed = False
+                for p_k, p_v in list(properties.items()):
+                    if p_v and "${" in p_v:
+                        for sub_k, sub_v in properties.items():
+                            if sub_v and sub_k in p_v:
+                                properties[p_k] = p_v.replace(sub_k, sub_v)
+                                prop_changed = True
+                if not prop_changed:
+                    break
+
             # 3. Parse local dependencyManagement
             local_dep_mgmt = parse_maven_dependency_management(root, prefix, properties)
             dep_mgmt.update(local_dep_mgmt)
@@ -4417,19 +4455,38 @@ def parse_maven_pom_recursive(filepath, parent_dep_mgmt=None, seen_files=None, b
                         group = g_elem.text.strip() if g_elem.text else ""
                         artifact = a_elem.text.strip() if a_elem.text else ""
                         
-                        for prop_name, prop_val in properties.items():
-                            group = group.replace(prop_name, prop_val)
-                            artifact = artifact.replace(prop_name, prop_val)
+                        for _ in range(5):
+                            changed = False
+                            for prop_name, prop_val in properties.items():
+                                if prop_val:
+                                    if prop_name in group:
+                                        group = group.replace(prop_name, prop_val)
+                                        changed = True
+                                    if prop_name in artifact:
+                                        artifact = artifact.replace(prop_name, prop_val)
+                                        changed = True
+                            if not changed:
+                                break
                             
                         if group and artifact:
                             coord = f"{group}:{artifact}"
                             version = "*"
                             if v_elem is not None and v_elem.text:
                                 version = v_elem.text.strip()
-                                for prop_name, prop_val in properties.items():
-                                    version = version.replace(prop_name, prop_val)
                             elif coord in dep_mgmt:
                                 version = dep_mgmt[coord]
+                                
+                            for _ in range(5):
+                                changed = False
+                                for prop_name, prop_val in properties.items():
+                                    if prop_val and prop_name in version:
+                                        version = version.replace(prop_name, prop_val)
+                                        changed = True
+                                if not changed:
+                                    break
+                                
+                            if "${" in version:
+                                print(f"{COLOR_YELLOW}{ICON_WARN} Unresolved version property '{version}' for Maven package '{coord}' in {os.path.basename(filepath)}{COLOR_RESET}")
                                 
                             dependencies[coord] = version
                             
@@ -6433,7 +6490,7 @@ def print_results_table(results, pkg_data, show_all, vuls_enabled=False):
                     summary = vuln["summary"]
                     print(f"    - {COLOR_BOLD}{COLOR_GRAY}{vid}{COLOR_RESET}: {summary} {COLOR_GRAY}(Reason: {reason}){COLOR_RESET}")
 
-def print_summary(results, elapsed_time, vuls_enabled=False):
+def print_summary(results, elapsed_time, vuls_enabled=False, projects_count=None):
     """Prints checks run count and categorization breakdown."""
     total = len(results)
     up_to_date = sum(1 for r in results if r["status"] in ("up-to-date", "local"))
@@ -6446,6 +6503,8 @@ def print_summary(results, elapsed_time, vuls_enabled=False):
     outdated_total = sum(1 for r in results if r["status"] in ("patch", "minor", "major", "minor-major", "patch-major"))
     
     print(f"\n{COLOR_BOLD}{COLOR_CYAN}Summary Report:{COLOR_RESET}")
+    if projects_count is not None:
+        print(f"  Projects:    {COLOR_BOLD}{projects_count}{COLOR_RESET} scanned")
     print(f"  Checked:     {total} packages in {elapsed_time:.2f}s")
     print(f"  Up-to-date:  {COLOR_GREEN}{up_to_date}{COLOR_RESET}")
     print(f"  Outdated:    {COLOR_YELLOW}{outdated_total}{COLOR_RESET} (Patch: {COLOR_CYAN}{patch}{COLOR_RESET}, Minor: {COLOR_YELLOW}{minor}{COLOR_RESET}, Major: {COLOR_RED}{major}{COLOR_RESET})")
@@ -6488,7 +6547,7 @@ def generate_sarif_run(results):
             "driver": {
                 "name": "Kevlar CheckDeps",
                 "version": VERSION,
-                "informationUri": "https://github.com/brunoevn/kevlar-checkdeps",
+                "informationUri": "https://kevlar-checkdeps.dev",
                 "rules": []
             }
         },
@@ -7253,6 +7312,24 @@ def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ve
             match_prefix = match_opt.group(1)
             match_version = match_opt.group(2)
             
+    effective_prefix = match_prefix
+    if re.match(r'^[~^>=<!]', latest_ver.strip()):
+        effective_prefix = ""
+        
+    upgraded_str = effective_prefix + latest_ver
+
+    # Do not generate a diff if target version is identical to current version
+    def _clean_v(v):
+        if not v:
+            return ""
+        v = v.strip().lower()
+        if v.startswith('v'):
+            v = v[1:]
+        return re.sub(r'^[~^>=<!\s]+', '', v)
+
+    if target_text and latest_ver and _clean_v(target_text) == _clean_v(latest_ver):
+        return None
+            
     start_ctx = max(0, line_idx_to_change - 2)
     end_ctx = min(len(lines), line_idx_to_change + 3)
     
@@ -7267,27 +7344,25 @@ def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ve
             escaped_orig = escape_html(orig_line)
             if target_text and target_text in orig_line:
                 escaped_target = escape_html(target_text)
-                escaped_prefix = escape_html(match_prefix)
+                escaped_prefix = escape_html(effective_prefix)
                 escaped_version = escape_html(match_version)
                 
                 html_orig = escaped_orig.replace(
                     escaped_target, 
-                    f'{escaped_prefix}<span class="diff-remove-chunk">{escaped_version}</span>'
+                    f'<span class="diff-remove-chunk">{escaped_target}</span>'
                 )
-                new_line = orig_line.replace(target_text, match_prefix + latest_ver)
+                new_line = orig_line.replace(target_text, upgraded_str)
             else:
                 html_orig = escaped_orig
                 new_line = orig_line + f" -> {latest_ver}"
                 
             escaped_new = escape_html(new_line)
-            escaped_upgraded = escape_html(match_prefix + latest_ver)
-            escaped_prefix = escape_html(match_prefix)
-            escaped_latest = escape_html(latest_ver)
+            escaped_upgraded = escape_html(upgraded_str)
             
-            if (match_prefix + latest_ver) in new_line:
+            if upgraded_str in new_line:
                 html_new = escaped_new.replace(
                     escaped_upgraded, 
-                    f'{escaped_prefix}<span class="diff-add-chunk">{escaped_latest}</span>'
+                    f'<span class="diff-add-chunk">{escaped_upgraded}</span>'
                 )
             else:
                 html_new = escaped_new
@@ -7322,6 +7397,40 @@ def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ve
         "suggested_code": suggested_block
     }
 
+def format_remediation_option_label(ver_str: str) -> str:
+    """Formats a version/constraint string into a user-friendly tab label.
+    Examples:
+        ">=24.0.0" -> "Version 24"
+        ">=26.0.0" -> "Version 26"
+        ">=24.0.0 or >=26.0.0" -> "Version 24 o 26"
+    """
+    if not ver_str:
+        return ""
+        
+    def _clean_single_ver(s: str) -> str:
+        s = s.strip()
+        m = re.search(r'(?:>=|>|<=|<|~|\^|v)?\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?', s)
+        if m:
+            major = m.group(1)
+            minor = m.group(2)
+            patch = m.group(3)
+            if (not minor or minor == '0') and (not patch or patch == '0'):
+                return major
+            elif minor and patch:
+                return f"{major}.{minor}.{patch}"
+            elif minor:
+                return f"{major}.{minor}"
+            return major
+        return s.lstrip("v>=").strip()
+
+    if " or " in ver_str:
+        parts = [p.strip() for p in ver_str.split(" or ") if p.strip()]
+        clean_parts = [_clean_single_ver(p) for p in parts]
+        return f"Version {' o '.join(clean_parts)}"
+    else:
+        clean_v = _clean_single_ver(ver_str)
+        return f"Version {clean_v}"
+
 def populate_remediation_recommendations(results, default_project_path):
     """Calculates and attaches remediation info to each result if possible."""
     for r in results:
@@ -7349,15 +7458,16 @@ def populate_remediation_recommendations(results, default_project_path):
         latest_sm = r.get("latest_same_major")
         latest_abs = r.get("latest_absolute") or r.get("latest")
         
-        # If latest_same_major is identical to installed, there's no safe update.
-        if latest_sm == clean_installed:
+        # If latest_same_major is identical to installed or declared, there's no safe update.
+        if latest_sm in (clean_installed, declared):
             latest_sm = None
-        # If latest_absolute is identical to latest_same_major, we don't need a separate major remediation.
-        if latest_abs == latest_sm:
+        # If latest_absolute is identical to installed, declared, or latest_same_major, there's no separate major remediation.
+        if latest_abs in (clean_installed, declared) or latest_abs == latest_sm:
             latest_abs = None
             
         remediation_safe = None
         remediation_major = None
+        remediation_options = None
         
         manifest_files = []
         if r.get("is_engine", False):
@@ -7391,6 +7501,27 @@ def populate_remediation_recommendations(results, default_project_path):
                 # Try to generate diffs for this manifest file
                 temp_safe = None
                 temp_major = None
+                temp_options = []
+                
+                target_string = latest_abs or r.get("latest") or ""
+                if " or " in target_string:
+                    parts = [p.strip() for p in target_string.split(" or ") if p.strip()]
+                    if len(parts) >= 2:
+                        for p in parts:
+                            diff_p = generate_remediation_diff(
+                                manifest_path, found_line_idx, declared, p, tech, name
+                            )
+                            if diff_p:
+                                lbl = format_remediation_option_label(p)
+                                temp_options.append({"label": lbl, "diff": diff_p})
+                        # Add the combined choice ("A or B")
+                        diff_comb = generate_remediation_diff(
+                            manifest_path, found_line_idx, declared, target_string, tech, name
+                        )
+                        if diff_comb:
+                            lbl_comb = format_remediation_option_label(target_string)
+                            temp_options.append({"label": lbl_comb, "diff": diff_comb})
+
                 if latest_sm:
                     temp_safe = generate_remediation_diff(
                         manifest_path, found_line_idx, declared, latest_sm, tech, name
@@ -7401,15 +7532,19 @@ def populate_remediation_recommendations(results, default_project_path):
                     )
                 
                 # If we succeeded in generating at least one valid diff, we stop searching
-                if temp_safe or temp_major:
+                if temp_safe or temp_major or temp_options:
                     remediation_safe = temp_safe
                     remediation_major = temp_major
+                    remediation_options = temp_options
                     break
                 
-        if remediation_safe or remediation_major:
+        if remediation_safe or remediation_major or remediation_options:
+            fallback_safe = remediation_options[0]["diff"] if remediation_options else None
+            fallback_major = remediation_options[-1]["diff"] if remediation_options else None
             r["remediation"] = {
-                "safe": remediation_safe,
-                "major": remediation_major
+                "safe": remediation_safe or fallback_safe,
+                "major": remediation_major or fallback_major,
+                "options": remediation_options if remediation_options else None
             }
 
 class HTMLReportTemplateProvider:
@@ -7892,22 +8027,35 @@ class HTMLReportTemplateProvider:
             font-size: 10px;
             background-color: #1e293b;
             color: var(--text-muted);
-            padding: 2px 6px;
-            border-radius: 4px;
+            padding: 0 6px;
+            height: 20px;
+            box-sizing: border-box;
+            border-radius: 5px;
             text-transform: uppercase;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            line-height: 1;
         }
         
         .pkg-badges {
             display: flex;
             gap: 6px;
             flex-wrap: wrap;
+            align-items: center;
         }
         
         .badge {
             font-size: 11px;
-            padding: 2px 8px;
-            border-radius: 6px;
+            padding: 0 7px;
+            height: 20px;
+            box-sizing: border-box;
+            border-radius: 5px;
             font-weight: 600;
+            line-height: 1;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
         }
         
         .badge-success { background-color: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
@@ -7920,26 +8068,43 @@ class HTMLReportTemplateProvider:
         .badge-project { background-color: rgba(55, 65, 81, 0.4); color: #9ca3af; border: 1px solid rgba(75, 85, 99, 0.4); }
         
         .badge-vuln-stats {
-            background-color: rgba(239, 68, 68, 0.1);
-            border: 1px solid rgba(239, 68, 68, 0.2);
+            background-color: rgba(239, 68, 68, 0.12);
+            border: 1px solid rgba(239, 68, 68, 0.25);
             color: #ef4444;
             display: inline-flex;
             align-items: center;
-            gap: 4px;
+            justify-content: center;
+            gap: 5px;
+            padding: 0 7px;
+            height: 20px;
+            box-sizing: border-box;
             font-weight: 700;
+            line-height: 1;
+        }
+        .badge-vuln-stats .vuln-severity-pills-inner {
+            display: inline-flex;
+            gap: 3px;
+            align-items: center;
+            justify-content: center;
+            margin-left: 2px;
         }
         .vuln-severity-pills {
             display: inline-flex;
-            gap: 4px;
+            gap: 3px;
             align-items: center;
+            justify-content: center;
         }
         .sev-pill {
-            font-size: 10px;
-            padding: 2px 6px;
-            border-radius: 5px;
+            font-size: 9px;
+            padding: 0 4px;
+            height: 14px;
+            line-height: 14px;
+            box-sizing: border-box;
+            border-radius: 3px;
             font-weight: 700;
             display: inline-flex;
             align-items: center;
+            justify-content: center;
         }
         .sev-pill.sev-mal { background-color: rgba(127, 29, 29, 0.4); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.5); }
         .sev-pill.sev-c { background-color: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
@@ -8451,7 +8616,9 @@ class HTMLReportTemplateProvider:
             cursor: pointer;
             display: inline-flex;
             align-items: center;
+            justify-content: center;
             gap: 6px;
+            line-height: 1;
             transition: filter 0.2s ease;
         }
         
@@ -8470,7 +8637,9 @@ class HTMLReportTemplateProvider:
             cursor: pointer;
             display: inline-flex;
             align-items: center;
+            justify-content: center;
             gap: 6px;
+            line-height: 1;
             transition: filter 0.2s ease;
             box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
         }
@@ -8804,14 +8973,6 @@ class HTMLReportTemplateProvider:
                         }
                     });
                     
-                    const total_v = pkg_vulns.length;
-                    const badge_html = 
-                        '<span class="badge badge-vuln-stats" title="' + total_v + ' Vulnerabilities">' +
-                            '<svg class="icon-shield" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px; vertical-align: middle;"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>' +
-                            '<span>' + total_v + ' vuls</span>' +
-                        '</span>';
-                    badges.push(badge_html);
-                    
                     let pills = [];
                     if (mal_cnt > 0) pills.push('<span class="sev-pill sev-mal" title="Malicious Code">☠️ ' + mal_cnt + '</span>');
                     if (c_cnt > 0) pills.push('<span class="sev-pill sev-c">' + c_cnt + ' C</span>');
@@ -8819,10 +8980,20 @@ class HTMLReportTemplateProvider:
                     if (m_cnt > 0) pills.push('<span class="sev-pill sev-m">' + m_cnt + ' M</span>');
                     if (l_cnt > 0) pills.push('<span class="sev-pill sev-l">' + l_cnt + ' L</span>');
                     if (u_cnt > 0) pills.push('<span class="sev-pill sev-u">' + u_cnt + ' U</span>');
-                    
+
+                    let pills_html = '';
                     if (pills.length > 0) {
-                        badges.push('<div class="vuln-severity-pills">' + pills.join('') + '</div>');
+                        pills_html = '<span class="vuln-severity-pills-inner">' + pills.join('') + '</span>';
                     }
+
+                    const total_v = pkg_vulns.length;
+                    const badge_html = 
+                        '<span class="badge badge-vuln-stats" title="' + total_v + ' Vulnerabilities">' +
+                            '<svg class="icon-shield" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px; vertical-align: middle;"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>' +
+                            '<span>' + total_v + ' vuls</span>' +
+                            pills_html +
+                        '</span>';
+                    badges.push(badge_html);
                 }
                 
                 if (is_suppressed) {
@@ -8966,7 +9137,7 @@ class HTMLReportTemplateProvider:
                                 ' Notes & Warnings' +
                             '</div>' +
                             '<div class="notes-warnings-body">' +
-                                notes_warnings_list.join('\\n') +
+                                notes_warnings_list.join('') +
                             '</div>' +
                         '</div>';
                 }
@@ -8978,7 +9149,7 @@ class HTMLReportTemplateProvider:
                 }
                 
                 let remediation_button_html = '';
-                const has_remediation = r.remediation && (r.remediation.safe || r.remediation.major);
+                const has_remediation = r.remediation && (r.remediation.safe || r.remediation.major || (r.remediation.options && r.remediation.options.length));
                 if (has_remediation && is_direct) {
                     remediation_button_html = 
                         '<div class="remediation-section">' +
@@ -9017,7 +9188,7 @@ class HTMLReportTemplateProvider:
                         changelog_html = 
                             '<div class="changelog-section">' +
                                 '<div style="font-size: 12px; font-weight: 700; color: var(--warning); margin-bottom: 8px;">Analysis & Migration Links:</div>' +
-                                buttons.join('\\n') +
+                                buttons.join('') +
                             '</div>';
                     }
                 }
@@ -9162,10 +9333,18 @@ class HTMLReportTemplateProvider:
                 pkg_vulns.forEach(vid => {
                     const v = KEVLAR_VULNERABILITY_STORE[vid];
                     if (v) {
-                        vuln_strings.push(vid + ': ' + (v.summary || ''));
+                        let str = vid + ': ' + (v.summary || '');
+                        if (v.details) {
+                            let det = String(v.details).trim();
+                            if (det.length > 1000) {
+                                det = det.substring(0, 1000) + '...';
+                            }
+                            str += '\\\\n   Description/Details: ' + det;
+                        }
+                        vuln_strings.push(str);
                     }
                 });
-                details_parts.push("Vulnerabilities: " + vuln_strings.join('; '));
+                details_parts.push("Vulnerabilities:\\\\n" + vuln_strings.join('\\\\n\\\\n'));
             }
             if (is_deprecated) {
                 alert_types.push("Deprecation");
@@ -9578,24 +9757,49 @@ class HTMLReportTemplateProvider:
             
             activeRemediationInfo = info;
             
-            const firstValid = info.safe || info.major;
-            document.getElementById('modal-filepath').textContent = firstValid.display_path || (firstValid.manifest_path + ':' + firstValid.line_number);
-            
             const tabsContainer = document.getElementById('modal-tabs-container');
-            const safeTab = document.getElementById('tab-safe');
-            const majorTab = document.getElementById('tab-major');
             
-            if (info.safe && info.major) {
+            if (info.options && info.options.length > 0) {
+                const firstValid = info.options[0].diff;
+                if (firstValid) {
+                    document.getElementById('modal-filepath').textContent = firstValid.display_path || (firstValid.manifest_path + ':' + firstValid.line_number);
+                }
+                
+                tabsContainer.innerHTML = '';
                 tabsContainer.style.display = 'flex';
-                safeTab.style.display = 'block';
-                majorTab.style.display = 'block';
-                switchRemediationTab('safe');
+                
+                info.options.forEach((opt, idx) => {
+                    const btn = document.createElement('button');
+                    btn.className = 'modal-tab' + (idx === 0 ? ' active' : '');
+                    btn.textContent = opt.label;
+                    btn.onclick = function() {
+                        const allTabs = tabsContainer.querySelectorAll('.modal-tab');
+                        allTabs.forEach(t => t.classList.remove('active'));
+                        btn.classList.add('active');
+                        renderDiff(opt.diff);
+                    };
+                    tabsContainer.appendChild(btn);
+                });
+                
+                renderDiff(info.options[0].diff);
             } else {
-                tabsContainer.style.display = 'none';
-                if (info.safe) {
-                    renderDiff(info.safe);
-                } else if (info.major) {
-                    renderDiff(info.major);
+                const firstValid = info.safe || info.major;
+                if (firstValid) {
+                    document.getElementById('modal-filepath').textContent = firstValid.display_path || (firstValid.manifest_path + ':' + firstValid.line_number);
+                }
+                
+                if (info.safe && info.major) {
+                    tabsContainer.innerHTML = '<button id="tab-safe" class="modal-tab active" onclick="switchRemediationTab(&quot;safe&quot;)">Safe Update</button>' +
+                                              '<button id="tab-major" class="modal-tab" onclick="switchRemediationTab(&quot;major&quot;)">Major Upgrade</button>';
+                    tabsContainer.style.display = 'flex';
+                    switchRemediationTab('safe');
+                } else {
+                    tabsContainer.style.display = 'none';
+                    if (info.safe) {
+                        renderDiff(info.safe);
+                    } else if (info.major) {
+                        renderDiff(info.major);
+                    }
                 }
             }
             
@@ -9645,50 +9849,78 @@ class HTMLReportTemplateProvider:
                 window.event.stopPropagation();
             }
             
-            let targetText = latestAbsolute;
-            let tasksIntro = `I want to update this package to version "$${latestAbsolute}". Please perform the following tasks in a detailed and professional manner:`;
+            function cleanV(v) {
+                if (!v) return '';
+                v = String(v).trim().toLowerCase();
+                if (v.startsWith('v')) v = v.slice(1);
+                return v.replace(/^[~^>=<!\\s]+/, '');
+            }
+
+            const currClean = cleanV(currentVer);
+            const latestSmClean = cleanV(latestSameMajor);
+            const latestAbsClean = cleanV(latestAbsolute);
+
+            let hasNewerVersion = false;
+            let targetText = "";
+            let tasksIntro = "";
             
-            if (latestSameMajor && latestAbsolute && latestSameMajor !== latestAbsolute) {
-                if (latestSameMajor === currentVer) {
-                    targetText = latestAbsolute;
-                    tasksIntro = `I want to update this package to version "$${targetText}". Please perform the following tasks in a detailed and professional manner:`;
+            if (latestAbsClean && latestAbsClean !== currClean) {
+                hasNewerVersion = true;
+                if (latestSmClean && latestAbsClean && latestSmClean !== latestAbsClean && latestSmClean !== currClean) {
+                    targetText = `${latestSameMajor} or ${latestAbsolute}`;
+                    tasksIntro = `I want to update this package to version "${targetText}". Please perform the following tasks in a detailed and professional manner (taking into account the minor update to "${latestSameMajor}" vs the major update to "${latestAbsolute}" in your analysis):`;
                 } else {
-                    targetText = `$${latestSameMajor} or $${latestAbsolute}`;
-                    tasksIntro = `I want to update this package to version "$${targetText}". Please perform the following tasks in a detailed and professional manner (taking into account the minor update to "$${latestSameMajor}" vs the major update to "$${latestAbsolute}" in your analysis):`;
+                    targetText = latestAbsolute;
+                    tasksIntro = `I want to update this package to version "${targetText}". Please perform the following tasks in a detailed and professional manner:`;
                 }
-            } else if (latestSameMajor && latestSameMajor !== currentVer) {
+            } else if (latestSmClean && latestSmClean !== currClean) {
+                hasNewerVersion = true;
                 targetText = latestSameMajor;
-                tasksIntro = `I want to update this package to version "$${targetText}". Please perform the following tasks in a detailed and professional manner:`;
+                tasksIntro = `I want to update this package to version "${targetText}". Please perform the following tasks in a detailed and professional manner:`;
+            } else {
+                hasNewerVersion = false;
+                targetText = currentVer;
+                tasksIntro = `The package "${pkgName}" is currently on version "${currentVer}", which is the latest available version under this artifact/package coordinate, but security vulnerabilities or deprecation issues have been identified. Please perform the following tasks in a detailed and professional manner:`;
             }
             
-            let pkgDesc = `the package "$${pkgName}"`;
+            let pkgDesc = `the package "${pkgName}"`;
             if (depType === 'Transitive' && requiredBy) {
-                pkgDesc = `the transitive dependency package "$${pkgName}" (which is required by $${requiredBy})`;
+                pkgDesc = `the transitive dependency package "${pkgName}" (which is required by ${requiredBy})`;
             }
             
             let projectContext = "";
             if (projName && projDir) {
-                projectContext = ` (name: $${projName} directory: $${projDir})`;
+                projectContext = ` (name: ${projName} directory: ${projDir})`;
             }
             
             let manifestContext = "";
             if (manifestFile) {
-                manifestContext = `\nThe version is declared/configured in manifest file: "$${manifestFile}"` + (manifestLine ? ` at line $${manifestLine}` : "");
+                manifestContext = `\nThe version is declared/configured in manifest file: "${manifestFile}"` + (manifestLine ? ` at line ${manifestLine}` : "");
             }
             
-            const promptTexto = `Act as a Senior AppSec Expert and Principal Software Engineer specialized in the $${ecosystem} ecosystem.
-
-I have $${pkgDesc} in my project$${projectContext}, which is currently on version "$${currentVer}".$${manifestContext}
-An alert of type "$${alertType}" has been detected.
-Detailed information/Associated alerts:
-$${details}
-
-$${tasksIntro}
-
-1. Critically analyze any potential 'Breaking Changes' or destructive impacts when upgrading from version "$${currentVer}" to "$${targetText}".
-2. Verify if the target version "$${targetText}" safely resolves the issues and vulnerabilities described in the details above.
-3. Provide a step-by-step action plan with the exact console commands to perform the upgrade or mitigate risks if there are disruptive changes or incompatibilities.
+            let taskList = "";
+            if (hasNewerVersion) {
+                taskList = `1. Critically analyze any potential 'Breaking Changes' or destructive impacts when upgrading from version "${currentVer}" to "${targetText}".
+2. Verify if the target version "${targetText}" safely resolves the issues and vulnerabilities described in the details above, or if a package migration to an alternative library (e.g., new groupId/artifactId) is advised in the advisory text.
+3. Provide a step-by-step action plan with the exact console commands and code/manifest updates to perform the upgrade or migration.
 4. Check if any other libraries or transitive dependencies will become obsolete, unused, or orphaned as a result of this upgrade, and suggest how to safely clean them up (e.g., pruning unused packages).`;
+            } else {
+                taskList = `1. Investigate if this package coordinate ("${pkgName}") is End-Of-Life (EOL), unmaintained, or deprecated, and determine if a migration to a replacement package/library (e.g., a successor library, new groupId/artifactId such as org.apache.logging.log4j:log4j-core for log4j, or alternative framework) is required or recommended.
+2. If a package migration is recommended (or mentioned in the advisory details above), provide the exact code/manifest changes to replace "${pkgName}" with the recommended replacement library.
+3. If no package migration is needed or available, provide step-by-step mitigation workarounds, code patches, or configuration changes to neutralize the vulnerabilities in version "${currentVer}".
+4. Check if any other libraries or transitive dependencies will become obsolete, unused, or orphaned as a result, and suggest how to safely clean them up.`;
+            }
+            
+            const promptTexto = `Act as a Senior AppSec Expert and Principal Software Engineer specialized in the ${ecosystem} ecosystem.
+
+I have ${pkgDesc} in my project${projectContext}, which is currently on version "${currentVer}".${manifestContext}
+An alert of type "${alertType}" has been detected.
+Detailed information/Associated alerts:
+${details}
+
+${tasksIntro}
+
+${taskList}`;
 
             navigator.clipboard.writeText(promptTexto).then(() => {
                 let btn = null;
@@ -10572,7 +10804,7 @@ Examples:
         print("=" * 80)
         print("CONSOLIDATED SUMMARY")
         print("=" * 80)
-        print_summary(combined_results, total_elapsed, args.vuls)
+        print_summary(combined_results, total_elapsed, args.vuls, projects_count=len(projects))
         
         if args.format == "sarif" and sarif_runs:
             consolidated_path = "report-consolidated.sarif"
