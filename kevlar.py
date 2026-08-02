@@ -49,7 +49,7 @@ sys.stderr = SafeWriter(sys.stderr)
 # Global lock to protect concurrent console writes (sys.stdout, sys.stderr, print)
 console_lock = threading.Lock()
 
-VERSION = "1.10.2"
+VERSION = "1.10.3"
 
 # External APIs Configuration
 URL_NPM_REGISTRY = "https://registry.npmjs.org/"
