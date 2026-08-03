@@ -28,6 +28,7 @@ import traceback
 import unicodedata
 import ctypes
 import tomllib
+import random
 
 # Safe terminal output wrapping to prevent UnicodeEncodeError on Windows
 class SafeWriter:
@@ -49,7 +50,7 @@ sys.stderr = SafeWriter(sys.stderr)
 # Global lock to protect concurrent console writes (sys.stdout, sys.stderr, print)
 console_lock = threading.Lock()
 
-VERSION = "1.10.3"
+VERSION = "1.10.4"
 
 # External APIs Configuration
 URL_NPM_REGISTRY = "https://registry.npmjs.org/"
@@ -380,9 +381,9 @@ def get_severity_level(vuln):
     # 1. Exact matches or plain text checks first
     if "CRITICAL" in sev_upper:
         return "critical"
-    if "HIGH" in sev_upper:
+    if "HIGH" in sev_upper or "UNSOUND" in sev_upper:
         return "high"
-    if "MEDIUM" in sev_upper or "MODERATE" in sev_upper:
+    if "MEDIUM" in sev_upper or "MODERATE" in sev_upper or "UNMAINTAINED" in sev_upper or "WARNING" in sev_upper or "NOTICE" in sev_upper or "INFORMATIONAL" in sev_upper:
         return "medium"
     if "LOW" in sev_upper:
         return "low"
@@ -632,8 +633,8 @@ def _sanitize_error_message(exc, target_name):
         
     return "Unexpected execution error during analysis"
 
-def safe_urlopen(req, timeout=10, max_retries=3, backoff=0.5):
-    """Safely opens a URL with retries, exponential backoff, and default headers."""
+def safe_urlopen(req, timeout=10, max_retries=5, backoff=0.5):
+    """Safely opens a URL with retries, exponential backoff, Retry-After handling, and default headers."""
     # 1. Extraer la URL de forma segura
     if isinstance(req, str):
         url_str = req
@@ -671,17 +672,31 @@ def safe_urlopen(req, timeout=10, max_retries=3, backoff=0.5):
         try:
             return urllib.request.urlopen(req, timeout=timeout)
         except urllib.error.HTTPError as e:
-            # Do not retry on client errors (4xx) except possibly rate limits (429)
             if e.code == 404:
                 raise e
-            if e.code < 500 and e.code != 429:
+            if e.code == 429:
+                last_err = e
+                if attempt < max_retries - 1:
+                    retry_after = e.headers.get("Retry-After") if hasattr(e, "headers") and e.headers else None
+                    wait_sec = None
+                    if retry_after:
+                        try:
+                            wait_sec = float(retry_after)
+                        except ValueError:
+                            pass
+                    if wait_sec is None:
+                        wait_sec = backoff * (2 ** attempt) + random.uniform(0.5, 1.5)
+                    time.sleep(wait_sec)
+                    continue
+                raise e
+            if e.code < 500:
                 raise e
             last_err = e
         except (urllib.error.URLError, ConnectionResetError, TimeoutError, OSError) as e:
             last_err = e
             
         if attempt < max_retries - 1:
-            time.sleep(backoff * (2 ** attempt))
+            time.sleep(backoff * (2 ** attempt) + random.uniform(0.1, 0.5))
             
     if last_err:
         raise last_err
@@ -1745,9 +1760,15 @@ def parse_pnpm_lock(filepath):
                 
                 indent = len(line) - len(line.lstrip())
                 
-                # Maintain the indentation stack: pop states that are at the same or deeper indentation
-                while stack and indent <= stack[-1][0]:
-                    stack.pop()
+                # Maintain the indentation stack: pop states that are at deeper indentation (preserving DEPENDENCIES at equal indent)
+                while stack:
+                    top_indent, top_state, _ = stack[-1]
+                    if top_state in ('DEPENDENCIES', 'IMPORTER_DEPS') and indent == top_indent:
+                        break
+                    if indent <= top_indent:
+                        stack.pop()
+                    else:
+                        break
                 
                 current_state = stack[-1][1] if stack else 'ROOT'
                 current_pkg = None
@@ -1757,12 +1778,36 @@ def parse_pnpm_lock(filepath):
                         current_pkg, current_version = item[2]
                         break
                 
-                # Check transition out/in of the packages or snapshots block at root level
-                if stripped.startswith("packages:") or stripped.startswith("snapshots:"):
+                # Check transition out/in of importers, packages, or snapshots block at root level
+                if stripped.startswith("importers:"):
+                    stack.append((indent, 'IMPORTERS', None))
+                    continue
+                elif stripped.startswith("packages:") or stripped.startswith("snapshots:"):
                     stack.append((indent, 'PACKAGES', None))
                     continue
                 
-                if current_state == 'PACKAGES':
+                if current_state in ('IMPORTERS', 'IMPORTER_ITEM', 'IMPORTER_DEPS'):
+                    if stripped.startswith(("dependencies:", "devDependencies:", "optionalDependencies:", "peerDependencies:")):
+                        while stack and stack[-1][1] in ('IMPORTER_DEPS', 'IMPORTER_DEP_ITEM'):
+                            stack.pop()
+                        stack.append((indent, 'IMPORTER_DEPS', None))
+                        continue
+                    elif stripped.endswith(":") and current_state in ('IMPORTERS', 'IMPORTER_ITEM'):
+                        imp_name = stripped.rstrip(":").strip("'\"")
+                        base_name = imp_name.rsplit("/", 1)[-1]
+                        parents.setdefault(imp_name, set()).add("root")
+                        parents.setdefault(base_name, set()).add("root")
+                        stack.append((indent, 'IMPORTER_ITEM', imp_name))
+                        continue
+                
+                if current_state == 'IMPORTER_DEPS':
+                    if ":" in stripped:
+                        dep_name = stripped.split(":", 1)[0].strip().strip("'\"")
+                        if dep_name and dep_name not in ("specifier", "version") and dep_name not in ("node", "npm", "pnpm", "yarn", "bun", "python"):
+                            parents.setdefault(dep_name, set()).add("root")
+                            stack.append((indent, 'IMPORTER_DEP_ITEM', dep_name))
+                
+                elif current_state == 'PACKAGES':
                     # We are expecting package definitions as keys, e.g., '/direct-dep@1.0.1:'
                     # Remove trailing empty object if present, e.g. "key: {}" -> "key:"
                     raw_line = stripped
@@ -1771,6 +1816,8 @@ def parse_pnpm_lock(filepath):
                     raw_pkg = raw_line.rstrip(":").strip("'\"")
                     if raw_pkg.startswith("/"):
                         raw_pkg = raw_pkg[1:]
+                    if "node_modules/" in raw_pkg:
+                        raw_pkg = raw_pkg.split("node_modules/")[-1]
                     if "/" in raw_pkg and not raw_pkg.startswith("@"):
                         first_part = raw_pkg.split("/", 1)[0]
                         if "." in first_part or "localhost" in first_part:
@@ -1802,13 +1849,20 @@ def parse_pnpm_lock(filepath):
                     if version and "(" in version:
                         version = version.split("(", 1)[0]
                     
-                    if pkg_name and version:
+                    if pkg_name and version and pkg_name not in ("node", "npm", "pnpm", "yarn", "bun", "python"):
                         resolved.setdefault(pkg_name, set()).add(version)
                         # Push this package's context onto the stack
                         stack.append((indent, 'PACKAGE_BODY', (pkg_name, version)))
                 
-                elif current_state == 'PACKAGE_BODY':
-                    # Inside a package block. We check for integrity and dependency subsections.
+                if current_state in ('PACKAGE_BODY', 'DEPENDENCIES'):
+                    if stripped.startswith(("dependencies:", "devDependencies:", "optionalDependencies:", "peerDependencies:")):
+                        while stack and stack[-1][1] in ('DEPENDENCIES', 'DEPENDENCY_ITEM'):
+                            stack.pop()
+                        stack.append((indent, 'DEPENDENCIES', None))
+                        continue
+
+                if current_state == 'PACKAGE_BODY':
+                    # Inside a package block. We check for integrity.
                     if "integrity" in stripped and current_version:
                         parts = stripped.split("integrity", 1)
                         if len(parts) == 2:
@@ -1819,9 +1873,6 @@ def parse_pnpm_lock(filepath):
                             val = val.split()[0].strip(",}'\"")
                             if val:
                                 integrity_dict[(current_pkg, current_version)] = val
-                                
-                    if stripped.startswith("dependencies:") or stripped.startswith("optionalDependencies:") or stripped.startswith("peerDependencies:"):
-                        stack.append((indent, 'DEPENDENCIES', None))
                 
                 elif current_state == 'DEPENDENCIES':
                     # We are in a list of dependencies under a package.
@@ -1829,8 +1880,9 @@ def parse_pnpm_lock(filepath):
                     if ":" in stripped:
                         dep_name, dep_ver = stripped.split(":", 1)
                         dep_name = dep_name.strip().strip("'\"")
-                        if dep_name and current_pkg:
+                        if dep_name and current_pkg and dep_name not in ("node", "npm", "pnpm", "yarn", "bun", "python") and dep_name not in ("specifier", "version", "integrity", "optional", "transitivePeerDependencies"):
                             parents.setdefault(dep_name, set()).add(current_pkg)
+                            stack.append((indent, 'DEPENDENCY_ITEM', dep_name))
                             
         parents_clean = {k: list(v) for k, v in parents.items()}
         resolved_clean = {k: list(v) for k, v in resolved.items()}
@@ -1909,16 +1961,17 @@ def parse_package_lock(filepath):
                     for child_name in all_deps.keys():
                         parents.setdefault(child_name, set()).add(pkg_name)
                         
-            # Root package dependencies
-            root_info = data["packages"].get("") or {}
-            root_deps = {
-                **root_info.get("dependencies", {}),
-                **root_info.get("devDependencies", {}),
-                **root_info.get("peerDependencies", {}),
-                **root_info.get("optionalDependencies", {})
-            }
-            for child_name in root_deps.keys():
-                parents.setdefault(child_name, set()).add("root")
+            # Root & workspace package dependencies
+            for pkg_path, pkg_info in data["packages"].items():
+                if isinstance(pkg_info, dict) and "node_modules/" not in pkg_path:
+                    ws_deps = {
+                        **pkg_info.get("dependencies", {}),
+                        **pkg_info.get("devDependencies", {}),
+                        **pkg_info.get("peerDependencies", {}),
+                        **pkg_info.get("optionalDependencies", {})
+                    }
+                    for child_name in ws_deps.keys():
+                        parents.setdefault(child_name, set()).add("root")
                         
         # 2. Parse dependencies key (v1 and v2 fallback)
         if "dependencies" in data and isinstance(data["dependencies"], dict):
@@ -2363,24 +2416,41 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
         vuln_list = []
         for vid in vids:
             vuln_data = hydrated_details.get(vid, {})
+            def _extract_osv_severity(data_dict):
+                sev = "UNKNOWN"
+                if "severity" in data_dict and isinstance(data_dict["severity"], list):
+                    for s in data_dict["severity"]:
+                        if s.get("type") in ("CVSS_V4", "CVSS_V3", "CVSS_V2"):
+                            score = s.get('score')
+                            if score:
+                                score_str = str(score)
+                                if score_str.startswith("CVSS"):
+                                    sev = score_str
+                                else:
+                                    prefix = "CVSS:4.0/" if s.get("type") == "CVSS_V4" else ("CVSS:3.0/" if s.get("type") == "CVSS_V3" else "CVSS:2.0/")
+                                    sev = f"{prefix}{score_str}"
+                            break
+                if sev == "UNKNOWN":
+                    db_specs = []
+                    if isinstance(data_dict.get("database_specific"), dict):
+                        db_specs.append(data_dict["database_specific"])
+                    if isinstance(data_dict.get("affected"), list):
+                        for aff in data_dict["affected"]:
+                            if isinstance(aff, dict) and isinstance(aff.get("database_specific"), dict):
+                                db_specs.append(aff["database_specific"])
+                    for db_spec in db_specs:
+                        sev_val = db_spec.get("severity") or db_spec.get("cvss")
+                        if sev_val:
+                            sev = str(sev_val)
+                            break
+                        info_val = db_spec.get("informational")
+                        if info_val:
+                            sev = str(info_val).upper()
+                            break
+                return sev
+
             # Determine severity
-            severity = "UNKNOWN"
-            if "severity" in vuln_data and isinstance(vuln_data["severity"], list):
-                for sev in vuln_data["severity"]:
-                    if sev.get("type") in ("CVSS_V4", "CVSS_V3", "CVSS_V2"):
-                        score = sev.get('score')
-                        if score:
-                            score_str = str(score)
-                            if score_str.startswith("CVSS"):
-                                severity = score_str
-                            else:
-                                prefix = "CVSS:4.0/" if sev.get("type") == "CVSS_V4" else ("CVSS:3.0/" if sev.get("type") == "CVSS_V3" else "CVSS:2.0/")
-                                severity = f"{prefix}{score_str}"
-                        break
-            if severity == "UNKNOWN":
-                db_spec = vuln_data.get("database_specific")
-                if db_spec and isinstance(db_spec, dict):
-                    severity = db_spec.get("severity") or "UNKNOWN"
+            severity = _extract_osv_severity(vuln_data)
             
             summary = vuln_data.get("summary")
             details = vuln_data.get("details", "")
@@ -2391,22 +2461,7 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
                     alias_data = hydrated_details.get(alias)
                     if alias_data:
                         if severity == "UNKNOWN":
-                            if "severity" in alias_data and isinstance(alias_data["severity"], list):
-                                for sev in alias_data["severity"]:
-                                    if sev.get("type") in ("CVSS_V4", "CVSS_V3", "CVSS_V2"):
-                                        score = sev.get('score')
-                                        if score:
-                                            score_str = str(score)
-                                            if score_str.startswith("CVSS"):
-                                                severity = score_str
-                                            else:
-                                                prefix = "CVSS:4.0/" if sev.get("type") == "CVSS_V4" else ("CVSS:3.0/" if sev.get("type") == "CVSS_V3" else "CVSS:2.0/")
-                                                severity = f"{prefix}{score_str}"
-                                        break
-                            if severity == "UNKNOWN":
-                                db_spec = alias_data.get("database_specific")
-                                if db_spec and isinstance(db_spec, dict):
-                                    severity = db_spec.get("severity") or "UNKNOWN"
+                            severity = _extract_osv_severity(alias_data)
                         
                         if not summary or summary == "No summary provided":
                             summary = alias_data.get("summary")
@@ -2644,10 +2699,11 @@ def find_direct_parents(name, parents_map, direct_packages):
         
         curr_parents = parents_map.get(current, [])
         for p in curr_parents:
-            if p == "root":
-                continue
             if p in direct_packages:
                 direct_parents.add(p)
+            elif p == "root":
+                if current != name:
+                    direct_parents.add(current)
             else:
                 queue.append(p)
                 
@@ -2784,13 +2840,24 @@ def run_npm_checker(args):
             "is_engine": True
         })
             
-    # Resolve transitive dependency parents
-    direct_packages = set(pkg_data["all_direct"].keys()) if pkg_data else set()
+    # Resolve transitive dependency parents & dependency types
+    direct_packages = set(pkg_data["all_direct"].keys()) if pkg_data and "all_direct" in pkg_data else set()
+    if parents_data:
+        root_parents = {name for name, pts in parents_data.items() if "root" in pts}
+        direct_packages.update(root_parents)
+        
     for r in results:
         if not r.get("is_engine", False):
-            direct_parents = find_direct_parents(r["name"], parents_data, direct_packages)
-            r["required_by"] = sorted(list(direct_parents - {r["name"]}))
+            if r["name"] in direct_packages:
+                dev_deps = pkg_data.get("devDependencies", {}) if pkg_data else {}
+                r["dep_type"] = "Dev" if r["name"] in dev_deps else "Direct"
+                r["required_by"] = []
+            else:
+                r["dep_type"] = "Transitive"
+                direct_parents = find_direct_parents(r["name"], parents_data, direct_packages)
+                r["required_by"] = sorted(list(direct_parents - {r["name"]}))
         else:
+            r["dep_type"] = "Engine"
             r["required_by"] = []
             
     elapsed = time.time() - start_time
@@ -3022,8 +3089,16 @@ def get_env_markers():
         "extra": "",
     }
 
-def parse_requirements_txt(filepath):
-    """Parses requirements.txt to extract dependencies and parent traces, supporting PEP 508."""
+def parse_requirements_txt(filepath, seen_files=None):
+    """Parses requirements.txt to extract dependencies and parent traces, supporting PEP 508 and file inclusions."""
+    if seen_files is None:
+        seen_files = set()
+        
+    abs_filepath = os.path.abspath(filepath)
+    if abs_filepath in seen_files:
+        return {}, {}
+    seen_files.add(abs_filepath)
+    
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             lines = f.readlines()
@@ -3071,6 +3146,23 @@ def parse_requirements_txt(filepath):
                 stripped_line = parts[0].strip()
                 comment = parts[1].strip()
                 
+            # Handle file inclusions like '-r requirements.txt', '-c constraints.txt', or relative paths like '../requirements.txt'
+            inc_target = None
+            is_url = any(s in stripped_line for s in ("http://", "https://", "git+", "svn+", "hg+", "@"))
+            if stripped_line.startswith(("-r ", "-c ", "--requirement ", "--constraint ")):
+                inc_target = stripped_line.split(maxsplit=1)[1].strip()
+            elif not is_url and (stripped_line.startswith((".", "/", "\\")) or stripped_line.endswith((".txt", ".in"))):
+                inc_target = stripped_line.lstrip("-e ").strip()
+                
+            if inc_target:
+                inc_path = os.path.abspath(os.path.join(os.path.dirname(abs_filepath), inc_target))
+                if os.path.exists(inc_path) and os.path.isfile(inc_path) and inc_path not in seen_files:
+                    inc_deps, inc_parents = parse_requirements_txt(inc_path, seen_files)
+                    dependencies.update(inc_deps)
+                    for k, v in inc_parents.items():
+                        parents.setdefault(k, set()).update(v)
+                continue
+                
             if stripped_line.startswith("-"):
                 continue
                 
@@ -3083,9 +3175,9 @@ def parse_requirements_txt(filepath):
                 req_part = stripped_line
                 marker_part = None
                 
-            # Parse package name, optional extras, and specifier/URL
+            # Parse package name, optional extras, and specifier/URL (PEP 508 names must start with alphanumeric)
             match = re.match(
-                r'^\s*([A-Za-z0-9_.-]+)(?:\s*\[\s*([A-Za-z0-9_,.-]+)\s*\])?\s*(.*)$',
+                r'^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)(?:\s*\[\s*([A-Za-z0-9_,.-]+)\s*\])?\s*(.*)$',
                 req_part
             )
             if not match:
@@ -3710,7 +3802,7 @@ def parse_sln_file(sln_path):
                         norm_path = rel_p.replace("\\", "/")
                         if norm_path.endswith((".csproj", ".vbproj", ".fsproj")):
                             full_path = os.path.abspath(os.path.join(sln_dir, norm_path))
-                            if os.path.exists(full_path):
+                            if _is_safe_path(sln_dir, full_path) and os.path.exists(full_path):
                                 project_paths.append(full_path)
             except Exception:
                 with open(sln_path, "r", encoding="utf-8-sig", errors="ignore") as f:
@@ -3720,7 +3812,7 @@ def parse_sln_file(sln_path):
                     norm_path = m.replace("\\", "/")
                     if norm_path.endswith((".csproj", ".vbproj", ".fsproj")):
                         full_path = os.path.abspath(os.path.join(sln_dir, norm_path))
-                        if os.path.exists(full_path):
+                        if _is_safe_path(sln_dir, full_path) and os.path.exists(full_path):
                             project_paths.append(full_path)
         else:
             with open(sln_path, "r", encoding="utf-8-sig", errors="ignore") as f:
@@ -3733,7 +3825,7 @@ def parse_sln_file(sln_path):
                 norm_path = m.replace("\\", "/")
                 if norm_path.endswith((".csproj", ".vbproj", ".fsproj")):
                     full_path = os.path.abspath(os.path.join(sln_dir, norm_path))
-                    if os.path.exists(full_path):
+                    if _is_safe_path(sln_dir, full_path) and os.path.exists(full_path):
                         project_paths.append(full_path)
     except Exception as e:
         print(f"{COLOR_YELLOW}{ICON_WARN} Warning reading solution file: {e}{COLOR_RESET}")
@@ -5401,6 +5493,7 @@ def parse_cargo_toml(filepath):
         return dependencies
         
     current_section = None
+    is_specific_pkg_section = False
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             for line in f:
@@ -5408,27 +5501,36 @@ def parse_cargo_toml(filepath):
                 if not line or line.startswith("#"):
                     continue
                     
-                # Detect sections, e.g. [dependencies] or [dependencies.tokio]
+                # Detect sections, e.g. [dependencies], [dependencies.tokio], [target.'...'.dependencies.plist]
                 m_sec = re.match(r'^\[([^\]]+)\]', line)
                 if m_sec:
                     current_section = m_sec.group(1).strip()
+                    is_specific_pkg_section = False
+                    
+                    # Extract package name from section header like [dependencies.clap] or [target.'...'.dependencies.clap]
+                    m_sub = re.search(r'(?:dependencies|dev-dependencies|build-dependencies)\.([a-zA-Z0-9_-]+)$', current_section)
+                    if m_sub:
+                        dependencies.add(m_sub.group(1))
+                        is_specific_pkg_section = True
                     continue
                     
                 # Check dependency sections
                 is_dep_section = (
                     current_section in ("dependencies", "dev-dependencies", "build-dependencies")
                     or (current_section and (
-                        current_section.startswith("dependencies.")
-                        or current_section.startswith("dev-dependencies.")
-                        or current_section.startswith("build-dependencies.")
+                        "dependencies" in current_section
+                        or "dev-dependencies" in current_section
+                        or "build-dependencies" in current_section
                     ))
                 )
                 
-                if is_dep_section:
+                if is_dep_section and not is_specific_pkg_section:
                     # Match name = "version" or name = { ... }
                     m_dep = re.match(r'^([a-zA-Z0-9_-]+)\s*=', line)
                     if m_dep:
-                        dependencies.add(m_dep.group(1).strip())
+                        dep_name = m_dep.group(1).strip()
+                        if dep_name not in ("version", "optional", "features", "default-features", "path"):
+                            dependencies.add(dep_name)
     except Exception as e:
         print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Cargo.toml: {e}{COLOR_RESET}")
         
@@ -5475,8 +5577,22 @@ def parse_cargo_lock(filepath):
     parents_clean = {k: list(v) for k, v in parents.items()}
     return resolved_clean, parents_clean
 
+def get_crates_index_url(crate_name):
+    """Generates the official Cargo sparse index CDN URL for a crate."""
+    name = crate_name.lower()
+    length = len(name)
+    if length == 1:
+        prefix = f"1/{name}"
+    elif length == 2:
+        prefix = f"2/{name}"
+    elif length == 3:
+        prefix = f"3/{name[0]}/{name}"
+    else:
+        prefix = f"{name[:2]}/{name[2:4]}/{name}"
+    return f"https://index.crates.io/{prefix}"
+
 def check_rust_package(target):
-    """Queries crates.io API for crate metadata and checks target version."""
+    """Queries crates.io index/API for crate metadata and checks target version."""
     name = target["name"]
     declared = target["declared"]
     installed_versions = target["installed"]
@@ -5485,25 +5601,55 @@ def check_rust_package(target):
     results = []
     
     try:
-        url = f"{URL_RUST_REGISTRY}{urllib.parse.quote(name)}"
-        req = urllib.request.Request(url)
-        # crates.io requires a User-Agent
-        req.add_header("User-Agent", f"Kevlar-CheckDeps/{VERSION}")
-        
-        with safe_urlopen(req, timeout=10) as response:
-            data = json.loads(response.read().decode("utf-8"))
-            
-        crate_info = data.get("crate", {})
-        latest_version = crate_info.get("max_stable_version") or crate_info.get("max_version")
-        
-        versions_meta = data.get("versions", [])
+        all_versions = []
         yanked_versions = set()
-        for v_meta in versions_meta:
-            if v_meta.get("yanked"):
-                yanked_versions.add(v_meta.get("num"))
-                
-        all_versions = [v.get("num") for v in versions_meta if v.get("num")]
+        repo_url_raw = None
+        latest_version = None
         
+        # 1. Primary: Fast official CDN Cargo sparse index (no rate limits)
+        url_index = get_crates_index_url(name)
+        req_index = urllib.request.Request(url_index)
+        fetched_index = False
+        try:
+            with safe_urlopen(req_index, timeout=10) as response:
+                content = response.read().decode("utf-8", errors="ignore")
+                for line in content.strip().split("\n"):
+                    if not line.strip():
+                        continue
+                    try:
+                        v_data = json.loads(line)
+                        v_num = v_data.get("vers")
+                        if v_num:
+                            all_versions.append(v_num)
+                            if v_data.get("yanked"):
+                                yanked_versions.add(v_num)
+                    except Exception:
+                        pass
+                if all_versions:
+                    fetched_index = True
+        except Exception:
+            pass
+            
+        # 2. Fallback: REST API if sparse index call failed or returned no versions
+        if not fetched_index:
+            url = f"{URL_RUST_REGISTRY}{urllib.parse.quote(name)}"
+            req = urllib.request.Request(url)
+            req.add_header("User-Agent", f"Kevlar-CheckDeps/{VERSION}")
+            
+            with safe_urlopen(req, timeout=10) as response:
+                data = json.loads(response.read().decode("utf-8"))
+                
+            crate_info = data.get("crate", {})
+            latest_version = crate_info.get("max_stable_version") or crate_info.get("max_version")
+            repo_url_raw = crate_info.get("repository") or crate_info.get("homepage")
+            
+            versions_meta = data.get("versions", [])
+            for v_meta in versions_meta:
+                if v_meta.get("yanked"):
+                    yanked_versions.add(v_meta.get("num"))
+                    
+            all_versions = [v.get("num") for v in versions_meta if v.get("num")]
+            
         for ver_str in versions_to_check:
             clean_ver = re.sub(r'^[^\d]*', '', ver_str) if ver_str else "0.0.0"
             if not clean_ver:
@@ -5523,8 +5669,9 @@ def check_rust_package(target):
             compare_url = None
             releases_url = None
             if status in ("major", "minor-major", "patch-major"):
-                raw_url = crate_info.get("repository") or crate_info.get("homepage")
-                repo_url = clean_repo_url(raw_url)
+                if not repo_url_raw:
+                    repo_url_raw = f"https://github.com/rust-lang/{name}" if is_github_url(f"https://github.com/rust-lang/{name}") else None
+                repo_url = clean_repo_url(repo_url_raw)
                 if repo_url:
                     compare_url = get_compare_url(repo_url, clean_ver, latest_absolute)
                     releases_url = f"{repo_url}/releases" if is_github_url(repo_url) else repo_url
@@ -5560,7 +5707,8 @@ def check_rust_package(target):
 
 def check_all_rust_targets(targets, max_workers):
     """Checks all Rust target crates in parallel."""
-    return _check_all_targets_unified(targets, check_rust_package, "[Rust] Checking registry", max_workers)
+    rust_workers = min(max_workers, 5) if max_workers else 5
+    return _check_all_targets_unified(targets, check_rust_package, "[Rust] Checking registry", rust_workers)
 
 def run_rust_checker(args):
     """Main orchestrator for Rust Cargo checker."""
@@ -5611,8 +5759,13 @@ def run_rust_checker(args):
         for r in results:
             r["vulnerabilities"] = []
             
-    # Resolve transitive dependency parents
+    # Resolve transitive dependency parents & dep_type
     for r in results:
+        if r["name"] in direct:
+            r["dep_type"] = "Direct"
+        else:
+            r["dep_type"] = "Transitive"
+            r["declared"] = None
         direct_parents = find_direct_parents(r["name"], parents, direct)
         r["required_by"] = sorted(list(direct_parents - {r["name"]}))
             
@@ -6251,8 +6404,11 @@ class TerminalTextFormatter:
             right = diff - left
             return (" " * left) + text + (" " * right)
 
-def print_results_table(results, pkg_data, show_all, vuls_enabled=False):
+def print_results_table(results, pkg_data, show_all, vuls_enabled=False, no_show_console=False):
     """Draws a beautiful styled console report table with precise alignment."""
+    if no_show_console:
+        return
+        
     filtered_results = []
     for r in results:
         is_issue = (
@@ -6593,12 +6749,23 @@ def generate_sarif_run(results):
                                 manifest_lines_cache[path] = []
                         
                         lines = manifest_lines_cache[path]
+                        best_score = -1
                         for idx, line in enumerate(lines):
                             if match_line_for_dependency(line, name, tech):
-                                manifest_path = path
-                                line_number = idx + 1
-                                found_line = True
-                                break
+                                score = 1
+                                if declared:
+                                    ver_digits = re.search(r'\d+\.\d+', str(declared))
+                                    if ver_digits and ver_digits.group(0) in line:
+                                        score = 2
+                                    elif str(declared).strip() in line:
+                                        score = 2
+                                if score > best_score:
+                                    best_score = score
+                                    manifest_path = path
+                                    line_number = idx + 1
+                                    if score == 2:
+                                        found_line = True
+                                        break
                         if found_line:
                             break
                     if not manifest_path:
@@ -6986,9 +7153,10 @@ def _match_npm_php(line_lower, pkg_lower):
     return re.search(pattern, line_lower) is not None
 
 def _match_pip(line_lower, pkg_lower):
-    pattern_req = r'^\s*' + re.escape(pkg_lower) + r'\s*(==|>=|<=|~=|!=|>|<|@|;|$)'
+    extras = r'(\[[^\]]+\])?'
+    pattern_req = r'^\s*' + re.escape(pkg_lower) + extras + r'\s*(==|>=|<=|~=|!=|>|<|@|;|[\'"]|$)'
     pattern_toml = r'^\s*' + re.escape(pkg_lower) + r'\s*=\s*'
-    pattern_setup = r'[\'"]' + re.escape(pkg_lower) + r'([>=<!~]+|[\'"]\s*,)'
+    pattern_setup = r'[\'"]' + re.escape(pkg_lower) + extras + r'([>=<!~^@;]+|[\'"]\s*[,\]])'
     return (re.search(pattern_req, line_lower) is not None or 
             re.search(pattern_toml, line_lower) is not None or
             re.search(pattern_setup, line_lower) is not None)
@@ -7008,8 +7176,10 @@ def _match_go(line_lower, pkg_lower):
     return re.search(pattern, line_lower) is not None
 
 def _match_rust(line_lower, pkg_lower):
-    pattern = r'^\s*' + re.escape(pkg_lower) + r'\s*=\s*'
-    return re.search(pattern, line_lower) is not None
+    pattern_eq = r'^\s*' + re.escape(pkg_lower) + r'\s*=\s*'
+    pattern_sec = r'\[\s*(?:target\.[^\]]+\.)?(?:dependencies|dev-dependencies|build-dependencies)\.' + re.escape(pkg_lower) + r'\s*\]'
+    return (re.search(pattern_eq, line_lower) is not None or
+            re.search(pattern_sec, line_lower) is not None)
 
 def _match_ruby(line_lower, pkg_lower):
     pattern = r'gem\s+[\'"]' + re.escape(pkg_lower) + r'[\'"]'
@@ -7300,7 +7470,19 @@ def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ve
                     v = v[1:]
                 v = re.sub(r'^[~^>=<!\s]+', '', v)
                 return v
-            if clean_ver(declared_ver) != clean_ver(resolved_version):
+            def is_version_compatible(v1, v2):
+                c1 = clean_ver(v1)
+                c2 = clean_ver(v2)
+                if not c1 or not c2:
+                    return True
+                if c1 == c2 or c1.startswith(c2) or c2.startswith(c1):
+                    return True
+                m1 = re.match(r'^(\d+)', c1)
+                m2 = re.match(r'^(\d+)', c2)
+                if m1 and m2 and m1.group(1) == m2.group(1):
+                    return True
+                return False
+            if not is_version_compatible(declared_ver, resolved_version):
                 return None
     # --- End of property placeholder logic ---
 
@@ -7488,15 +7670,43 @@ def populate_remediation_recommendations(results, default_project_path):
                 continue
                 
             found_line_idx = None
+            best_score = -1
             for idx, line in enumerate(lines):
                 if r.get("is_engine", False):
                     matched = f'"{name}"' in line or '"engines"' in line
                 else:
                     matched = match_line_for_dependency(line, name, tech)
                 if matched:
-                    found_line_idx = idx + 1
-                    break
+                    score = 1
+                    if declared:
+                        ver_digits = re.search(r'\d+\.\d+', str(declared))
+                        if ver_digits and ver_digits.group(0) in line:
+                            score = 2
+                        elif str(declared).strip() in line:
+                            score = 2
+                    if score > best_score:
+                        best_score = score
+                        found_line_idx = idx + 1
+                        if score == 2:
+                            break
                     
+            diff_name = name
+            diff_declared = declared
+            
+            if found_line_idx is None and r.get("required_by"):
+                # For transitive dependencies, locate the direct parent package in the manifest file
+                for parent_name in r.get("required_by", []):
+                    for idx, line in enumerate(lines):
+                        if match_line_for_dependency(line, parent_name, tech):
+                            found_line_idx = idx + 1
+                            diff_name = parent_name
+                            parent_r = next((item for item in results if item["name"] == parent_name), None)
+                            if parent_r and parent_r.get("declared"):
+                                diff_declared = parent_r["declared"]
+                            break
+                    if found_line_idx is not None:
+                        break
+                        
             if found_line_idx is not None:
                 # Try to generate diffs for this manifest file
                 temp_safe = None
@@ -7509,14 +7719,14 @@ def populate_remediation_recommendations(results, default_project_path):
                     if len(parts) >= 2:
                         for p in parts:
                             diff_p = generate_remediation_diff(
-                                manifest_path, found_line_idx, declared, p, tech, name
+                                manifest_path, found_line_idx, diff_declared, p, tech, diff_name
                             )
                             if diff_p:
                                 lbl = format_remediation_option_label(p)
                                 temp_options.append({"label": lbl, "diff": diff_p})
                         # Add the combined choice ("A or B")
                         diff_comb = generate_remediation_diff(
-                            manifest_path, found_line_idx, declared, target_string, tech, name
+                            manifest_path, found_line_idx, diff_declared, target_string, tech, diff_name
                         )
                         if diff_comb:
                             lbl_comb = format_remediation_option_label(target_string)
@@ -7524,11 +7734,11 @@ def populate_remediation_recommendations(results, default_project_path):
 
                 if latest_sm:
                     temp_safe = generate_remediation_diff(
-                        manifest_path, found_line_idx, declared, latest_sm, tech, name
+                        manifest_path, found_line_idx, diff_declared, latest_sm, tech, diff_name
                     )
                 if latest_abs:
                     temp_major = generate_remediation_diff(
-                        manifest_path, found_line_idx, declared, latest_abs, tech, name
+                        manifest_path, found_line_idx, diff_declared, latest_abs, tech, diff_name
                     )
                 
                 # If we succeeded in generating at least one valid diff, we stop searching
@@ -10575,6 +10785,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Kevlar CheckDeps: Generic Dependency Checker & SCA Tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        add_help=False,
         epilog="""
 Examples:
   python kevlar.py --tech npm --path ./Backend
@@ -10583,6 +10794,12 @@ Examples:
         """
     )
     
+    parser.add_argument(
+        "--help", "-h",
+        action="help",
+        default=argparse.SUPPRESS,
+        help="Show this help message and exit."
+    )
     parser.add_argument(
         "--version", "-V",
         action="version",
@@ -10667,6 +10884,11 @@ Examples:
         help="Output report format when using --scan-all. 'both' generates HTML and JSON."
     )
     parser.add_argument(
+        "--no-show-console", "-n",
+        action="store_true",
+        help="Suppress printing detailed dependency tables and vulnerability lists in the console, displaying only progress logs, project headers, and summary reports."
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Print detailed stack trace and internal error messages to stdout during execution."
@@ -10719,6 +10941,8 @@ Examples:
         original_path = args.path
         original_tech = getattr(args, "tech", None)
         
+        generated_report_basenames = set()
+        
         for project_path, techs in projects:
             for tech in techs:
                 tech_info = TECHNOLOGIES.get(tech)
@@ -10747,10 +10971,10 @@ Examples:
                     apply_vulnerability_suppressions(results, args.suppress, project_path=project_path)
                     results = sorted(results, key=lambda x: x["name"].lower())
                     
-                    print_results_table(results, pkg_data, args.show_all, args.vuls)
+                    print_results_table(results, pkg_data, args.show_all, args.vuls, getattr(args, "no_show_console", False))
                     print_summary(results, elapsed, args.vuls)
                     
-                    # Generate report file(s) for this project folder
+                    # Generate report file(s) for this project folder with unique filename collision resolution
                     rel_path = os.path.relpath(project_path, original_path)
                     if rel_path == ".":
                         proj_dirname = os.path.basename(os.path.abspath(project_path))
@@ -10762,6 +10986,19 @@ Examples:
                     proj_dirname = proj_dirname.replace("/", "_").replace("\\", "_")
                     safe_proj_dirname = re.sub(r'[^\w\-]', '_', proj_dirname)
                     safe_proj_dirname = re.sub(r'_{2,}', '_', safe_proj_dirname).strip("_")
+                    
+                    base_safe_name = safe_proj_dirname
+                    if base_safe_name in generated_report_basenames:
+                        candidate = f"{base_safe_name}-{tech}"
+                        if candidate in generated_report_basenames:
+                            counter = 2
+                            while f"{candidate}-{counter}" in generated_report_basenames:
+                                counter += 1
+                            safe_proj_dirname = f"{candidate}-{counter}"
+                        else:
+                            safe_proj_dirname = candidate
+                            
+                    generated_report_basenames.add(safe_proj_dirname)
                     
                     if args.format in ("html", "both"):
                         proj_html_filepath = f"report-{safe_proj_dirname}.html"
@@ -10906,14 +11143,14 @@ Examples:
         if "technology" not in r:
             r["technology"] = args.tech if args.tech != "auto" else r.get("technology")
             
-    sys.stdout.write(f"{COLOR_GRAY}{ICON_INFO} Processing results and generating report table...{COLOR_RESET}\n")
+    sys.stdout.write(f"{COLOR_GRAY}{ICON_INFO} Processing results...{COLOR_RESET}\n")
     sys.stdout.flush()
     populate_remediation_recommendations(results, args.path)
     validate_configuration_drift(results)
     apply_vulnerability_suppressions(results, args.suppress, project_path=args.path)
     results = sorted(results, key=lambda x: x["name"].lower())
     
-    print_results_table(results, pkg_data, args.show_all, args.vuls)
+    print_results_table(results, pkg_data, args.show_all, args.vuls, getattr(args, "no_show_console", False))
     print_summary(results, elapsed, args.vuls)
     
     if args.output:
