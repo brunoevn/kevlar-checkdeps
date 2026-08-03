@@ -12,14 +12,14 @@ Designed with a modular and extensible architecture, it supports checking direct
 
 - **Multi-Ecosystem Support**: Audits:
   - **Node.js (`npm`) & Engines**: supporting `package.json` (including `peerDependencies` and `optionalDependencies`), `package-lock.json`, Yarn `yarn.lock` (supporting both Yarn Classic v1 and Yarn Berry v2/v3/v4 modern formats with checksum normalization), and pnpm `pnpm-lock.yaml` (supporting lockfile v5, v6, and v9). Audits declared Node.js version constraints (`engines.node`, `.nvmrc`, `.node-version`) against EOL and maintenance schedules fetched dynamically from official sources.
-  - **Python (`pip`)**: supporting `requirements.txt` (with PEP 508 environment markers and direct `@` URLs), Poetry `poetry.lock` + `pyproject.toml`, Pipenv `Pipfile.lock`, and PDM `pdm.lock`.
+  - **Python (`pip`)**: supporting `requirements.txt` (including `-r` file inclusions, PEP 508 environment markers, and direct `@` URLs), Poetry `poetry.lock` + `pyproject.toml`, Pipenv `Pipfile.lock`, and PDM `pdm.lock`.
   - **.NET (`nuget`)**: supporting C# `.csproj`, VB.NET `.vbproj`, F# `.fsproj`, Solution files (`.sln`), and Central Package Management (`Directory.Packages.props`).
   - **PHP (`php`)**: supporting `composer.json` and `composer.lock`.
   - **Java (`maven`)**: supporting multi-module `<modules>`, centralized `<dependencyManagement>`, and recursive parent POM properties/dependency inheritance.
   - **Java/Kotlin (`gradle`)**: supporting `build.gradle`, `build.gradle.kts`, `gradle.lockfile`, and Version Catalogs `libs.versions.toml`.
   - **Android (`android`)**: prioritizing Google's Maven Registry for Android libraries.
   - **Go (`go`)**: supporting `go.mod`, `go.sum`, and `go.work` workspaces (including module `replace` directives, `exclude`, `retract`, and Go 1.24+ `tool` executable directives).
-  - **Rust (`rust`)**: supporting `Cargo.toml` and `Cargo.lock` (including native v4 lockfile formats).
+  - **Rust (`rust`)**: supporting `Cargo.toml` (including inline dependencies, `[dependencies.<pkg>]` table sections, and target-specific dependencies) and `Cargo.lock` (including native v4 lockfiles). Integrates directly with the official CDN Cargo Sparse Index (`https://index.crates.io/`) for zero-rate-limit scanning.
   - **Ruby (`ruby`)**: supporting `Gemfile` and `Gemfile.lock`.
 - **Outdated Package Detection**: Compares installed versions against the latest versions in registries, classifying updates into `Major`, `Minor`, and `Patch` increments, as well as composite status like `Minor/Major` and `Patch/Major` when both a safe same-major update and a major version update are available.
 - **Configuration Drift Validation**: Automatically detects installed packages that violate declared semver constraint ranges, flagging them with an `error` status and detailed troubleshoot diagnostics. Supports Yarn Berry workspace dependencies (`workspace:`), alias overrides (`npm:`), patch protocols (`patch:`, `portal:`, `link:`), and central catalogs (`catalog:`), ignoring local-only/configuration protocols to eliminate false positives.
@@ -30,7 +30,7 @@ Designed with a modular and extensible architecture, it supports checking direct
 - **Security Vulnerability Audits**: Queries the public Google OSV database to identify active vulnerabilities, including CVE/GHSA IDs, CVSS vectors, and advisory summaries.
 - **Malicious Code Detection (`MAL-`)**: Automatically classifies packages flagged with `MAL-` vulnerability IDs (indicating known malicious payload distributions) under a high-priority `malicious` severity. These threats are prioritized at the top of all reports, decorated with dedicated UI indicators (such as `☠️ MALICIOUS CODE` badges, custom glow filters in HTML reports, and a dedicated **`Malicious`** stat card positioned directly above `Outdated`), tracked separately in final summaries, and can be isolated via interactive dashboard filters.
 - **Transitive Parent Tracing**:
-  - For `npm`: Recursively builds a dependency graph from `package-lock.json`, Yarn `yarn.lock`, or pnpm `pnpm-lock.yaml`.
+  - For `npm`: Recursively builds a dependency graph from `package-lock.json`, Yarn `yarn.lock`, or pnpm `pnpm-lock.yaml` (including workspace `importers` blocks).
   - For `pip`: Parses transitives from lockfiles (`poetry.lock`, `Pipfile.lock`, `pdm.lock`) or `# via parent_name` comments inside `requirements.txt`.
   - For `nuget`: Reconstructs the parent-child graph from `obj/project.assets.json`.
   - For `php`: Reconstructs the parent-child graph from `composer.lock`.
@@ -53,6 +53,7 @@ Designed with a modular and extensible architecture, it supports checking direct
   - **Auto-closing & Smart Resetting**: Auto-closes menus when clicking outside and resets checkboxes when switching to *All* or *Clean*.
   - **Multi-Stage Remediation Diffs & AI Prompts**:
     - **Visual Diff Previews**: Generates standard unified diff format views directly in the HTML report for both same-major (safe) and absolute latest (major) version upgrades.
+    - **Transitive Parent Diff Fallback**: Automatically targets the direct parent package in manifest files (e.g. `Cargo.toml`, `package.json`) when viewing remediation for transitive dependencies.
     - **AI Prompt Helper**: Copy-to-clipboard button (`📋 AI Prompt`) that generates context-rich LLM prompts with same-major/major suggestion details, project scopes, transitive relations, and cleanup instructions.
 
 ---
@@ -211,8 +212,10 @@ python kevlar.py --update
 | `--fail-on-vulns` | | `None` | Break the build (exit code 1) on security issues. Accepts threshold limits (e.g., `"critical:2,high:4"`). |
 | `--fail-on-deprecated` | | `None` | Break the build (exit code 1) if deprecated packages are found. Optionally specify count threshold (e.g., `3`). |
 | `--fail-on-outdated` | | `None` | Break the build (exit code 1) if outdated packages are found. Optionally specify count threshold (e.g., `3`) or specific status levels (e.g., `major:2,minor:4`). |
+| `--no-show-console` | `-n` | `False` | Suppress detailed dependency tables and vulnerability lists in console output, displaying only progress indicators and summary reports. |
 | `--suppress` | `-s` | `None` | Path to a JSON file containing vulnerability suppressions (default: look for `kevlar-suppressions.json` in the project path or current directory). |
 | `--update` | | `False` | Check for updates from GitHub. |
+| `--debug` | | `False` | Print detailed stack traces and internal error diagnostics to stdout during execution. |
 ---
 
 ## CI/CD Pipeline Integration & Build Breaking
