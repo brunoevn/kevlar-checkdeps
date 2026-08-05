@@ -1308,20 +1308,18 @@ def determine_update_type(installed_ver, latest_same_major, latest_absolute):
                 
     return abs_type
 
-def find_latest_same_major(installed_ver, all_versions):
-    """Finds the latest version in all_versions that shares the same major version as installed_ver.
+def find_latest_semver_tiers(installed_ver, all_versions):
+    """Finds the latest patch, same-major (minor), and absolute (major) versions.
     Returns:
-        (latest_same_major, latest_absolute)
+        (latest_patch, latest_same_major, latest_absolute)
     """
     if not installed_ver or not all_versions:
-        return (None, None)
+        return (None, None, None)
     
-    # Strip common non-numeric prefix from installed version
     clean_inst = re.sub(r'^[^\d]*', '', installed_ver).split('+')[0]
-    _, inst_major, _, _, _, inst_prerelease = parse_semver(clean_inst)
+    _, inst_major, inst_minor, _, _, inst_prerelease = parse_semver(clean_inst)
     installed_is_prerelease = bool(inst_prerelease)
     
-    # Filter out prerelease versions if the installed version is stable
     filtered_versions = []
     for v in all_versions:
         clean_v = re.sub(r'^[^\d]*', '', v).split('+')[0]
@@ -1330,11 +1328,9 @@ def find_latest_same_major(installed_ver, all_versions):
             continue
         filtered_versions.append(v)
         
-    # If filtering left us with nothing, fall back to all versions
     if not filtered_versions:
         filtered_versions = all_versions
     
-    # helper for sorting
     def semver_sort_key(v_str):
         clean = re.sub(r'^[^\d]*', '', v_str).split('+')[0]
         epoch, major, minor, patch, revision, prerelease = parse_semver(clean)
@@ -1343,19 +1339,31 @@ def find_latest_same_major(installed_ver, all_versions):
         
     sorted_all = sorted(filtered_versions, key=semver_sort_key)
     if not sorted_all:
-        return (None, None)
+        return (None, None, None)
         
     latest_absolute = sorted_all[-1]
     
     same_major_versions = []
+    same_patch_versions = []
     for v in sorted_all:
         clean_v = re.sub(r'^[^\d]*', '', v).split('+')[0]
-        _, v_major, _, _, _, _ = parse_semver(clean_v)
+        _, v_major, v_minor, _, _, _ = parse_semver(clean_v)
         if v_major == inst_major:
             same_major_versions.append(v)
+            if v_minor == inst_minor:
+                same_patch_versions.append(v)
             
+    latest_patch = same_patch_versions[-1] if same_patch_versions else None
     latest_same_major = same_major_versions[-1] if same_major_versions else None
     
+    return (latest_patch, latest_same_major, latest_absolute)
+
+def find_latest_same_major(installed_ver, all_versions):
+    """Finds the latest version in all_versions that shares the same major version as installed_ver.
+    Returns:
+        (latest_same_major, latest_absolute)
+    """
+    _, latest_same_major, latest_absolute = find_latest_semver_tiers(installed_ver, all_versions)
     return (latest_same_major, latest_absolute)
 
 def format_latest_versions(latest_same_major, latest_absolute):
@@ -7579,6 +7587,211 @@ def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ve
         "suggested_code": suggested_block
     }
 
+def generate_addition_remediation_diff(manifest_path, package_name, target_ver, tech):
+    """Generates remediation diff showing an addition to the manifest file when missing."""
+    try:
+        with open(manifest_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+    except Exception:
+        return None
+        
+    if not lines:
+        return None
+
+    insert_line_idx = None
+    indent = "    "
+    line_to_add = ""
+
+    clean_target = str(target_ver).strip()
+    if not re.match(r'^[~^>=<!]', clean_target):
+        clean_target = f"^{clean_target}"
+
+    if tech == "npm" or tech == "php":
+        deps_match_idx = None
+        dev_deps_match_idx = None
+        root_open_idx = None
+
+        for idx, line in enumerate(lines):
+            if re.search(r'"dependencies"\s*:\s*\{', line):
+                deps_match_idx = idx
+                break
+            elif re.search(r'"devDependencies"\s*:\s*\{', line):
+                dev_deps_match_idx = idx
+            elif root_open_idx is None and '{' in line:
+                root_open_idx = idx
+
+        if deps_match_idx is not None:
+            insert_line_idx = deps_match_idx + 1
+            line_to_add = f'{indent}"{package_name}": "{clean_target}",'
+        elif dev_deps_match_idx is not None:
+            insert_line_idx = dev_deps_match_idx + 1
+            line_to_add = f'{indent}"{package_name}": "{clean_target}",'
+        elif root_open_idx is not None:
+            insert_line_idx = root_open_idx + 1
+            line_to_add = f'{indent}"dependencies": {{\n{indent}  "{package_name}": "{clean_target}"\n{indent}}},'
+    elif tech == "pip":
+        insert_line_idx = len(lines)
+        line_to_add = f"{package_name}=={clean_target.lstrip('^~>=<!')}"
+    elif tech == "rust":
+        dep_sec_idx = None
+        for idx, line in enumerate(lines):
+            if re.search(r'^\[dependencies\]', line.strip()):
+                dep_sec_idx = idx
+                break
+        if dep_sec_idx is not None:
+            insert_line_idx = dep_sec_idx + 1
+            line_to_add = f'{package_name} = "{clean_target.lstrip("^~>=<!")}"'
+        else:
+            insert_line_idx = len(lines)
+            line_to_add = f'\n[dependencies]\n{package_name} = "{clean_target.lstrip("^~>=<!")}"'
+
+    if insert_line_idx is None:
+        insert_line_idx = len(lines)
+        line_to_add = f"{package_name}: {clean_target}"
+
+    start_ctx = max(0, insert_line_idx - 2)
+    end_ctx = min(len(lines), insert_line_idx + 3)
+
+    current_block = []
+    suggested_block = []
+
+    for i in range(start_ctx, end_ctx):
+        line_num = i + 1
+        orig_line = lines[i].rstrip('\r\n')
+        escaped_orig = escape_html(orig_line)
+
+        if i == insert_line_idx:
+            escaped_add = escape_html(line_to_add)
+            suggested_block.append({
+                "line_num": "+",
+                "html": f'<span class="diff-add-chunk">{escaped_add}</span>',
+                "is_changed": True
+            })
+
+        current_block.append({
+            "line_num": line_num,
+            "html": escaped_orig,
+            "is_changed": False
+        })
+        suggested_block.append({
+            "line_num": line_num,
+            "html": escaped_orig,
+            "is_changed": False
+        })
+
+    if insert_line_idx >= len(lines):
+        escaped_add = escape_html(line_to_add)
+        suggested_block.append({
+            "line_num": "+",
+            "html": f'<span class="diff-add-chunk">{escaped_add}</span>',
+            "is_changed": True
+        })
+
+    return {
+        "manifest_path": manifest_path,
+        "line_number": insert_line_idx + 1,
+        "current_code": current_block,
+        "suggested_code": suggested_block,
+        "is_addition": True
+    }
+
+def generate_override_remediation_diff(manifest_path, package_name, target_ver, tech):
+    """Generates remediation diff for forcing a transitive dependency override in manifest_path."""
+    try:
+        with open(manifest_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+    except Exception:
+        return None
+        
+    if not lines:
+        return None
+
+    clean_target = str(target_ver).strip()
+    if not re.match(r'^[~^>=<!]', clean_target):
+        clean_target = f"^{clean_target}"
+
+    indent = "    "
+    insert_line_idx = None
+    line_to_add = ""
+    
+    if tech in ("npm", "pnpm"):
+        overrides_line_idx = None
+        for idx, line in enumerate(lines):
+            if re.search(r'"overrides"\s*:\s*\{', line):
+                overrides_line_idx = idx
+                break
+        
+        if overrides_line_idx is not None:
+            insert_line_idx = overrides_line_idx + 1
+            line_to_add = f'{indent}  "{package_name}": "{clean_target}",'
+        else:
+            root_open_idx = None
+            for idx, line in enumerate(lines):
+                if '{' in line:
+                    root_open_idx = idx
+                    break
+            insert_line_idx = (root_open_idx + 1) if root_open_idx is not None else 1
+            line_to_add = f'{indent}"overrides": {{\n{indent}  "{package_name}": "{clean_target}"\n{indent}}},'
+    elif tech == "yarn":
+        resolutions_line_idx = None
+        for idx, line in enumerate(lines):
+            if re.search(r'"resolutions"\s*:\s*\{', line):
+                resolutions_line_idx = idx
+                break
+        if resolutions_line_idx is not None:
+            insert_line_idx = resolutions_line_idx + 1
+            line_to_add = f'{indent}  "{package_name}": "{clean_target}",'
+        else:
+            root_open_idx = None
+            for idx, line in enumerate(lines):
+                if '{' in line:
+                    root_open_idx = idx
+                    break
+            insert_line_idx = (root_open_idx + 1) if root_open_idx is not None else 1
+            line_to_add = f'{indent}"resolutions": {{\n{indent}  "{package_name}": "{clean_target}"\n{indent}}},'
+    else:
+        return generate_addition_remediation_diff(manifest_path, package_name, target_ver, tech)
+
+    start_ctx = max(0, insert_line_idx - 2)
+    end_ctx = min(len(lines), insert_line_idx + 3)
+
+    current_block = []
+    suggested_block = []
+
+    for i in range(start_ctx, end_ctx):
+        line_num = i + 1
+        orig_line = lines[i].rstrip('\r\n')
+        escaped_orig = escape_html(orig_line)
+
+        if i == insert_line_idx:
+            escaped_add = escape_html(line_to_add)
+            suggested_block.append({
+                "line_num": "+",
+                "html": f'<span class="diff-add-chunk">{escaped_add}</span>',
+                "is_changed": True
+            })
+
+        current_block.append({
+            "line_num": line_num,
+            "html": escaped_orig,
+            "is_changed": False
+        })
+        suggested_block.append({
+            "line_num": line_num,
+            "html": escaped_orig,
+            "is_changed": False
+        })
+
+    return {
+        "manifest_path": manifest_path,
+        "line_number": insert_line_idx + 1,
+        "current_code": current_block,
+        "suggested_code": suggested_block,
+        "is_addition": True
+    }
+
+
+
 def format_remediation_option_label(ver_str: str) -> str:
     """Formats a version/constraint string into a user-friendly tab label.
     Examples:
@@ -7614,7 +7827,16 @@ def format_remediation_option_label(ver_str: str) -> str:
         return f"Version {clean_v}"
 
 def populate_remediation_recommendations(results, default_project_path):
-    """Calculates and attaches remediation info to each result if possible."""
+    """Calculates and attaches remediation info with multi-level strategies (Patch, Minor, Major, Parent Upgrade, Override) to each result."""
+    
+    def _clean_v(v):
+        if not v:
+            return ""
+        v = str(v).strip().lower()
+        if v.startswith('v'):
+            v = v[1:]
+        return re.sub(r'^[~^>=<!\s]+', '', v)
+
     for r in results:
         r["remediation"] = None
         
@@ -7633,24 +7855,25 @@ def populate_remediation_recommendations(results, default_project_path):
         name = r.get("name")
         declared = r.get("declared")
         installed = r.get("installed")
+        dep_type = r.get("dep_type")
         
-        # Resolve clean installed version string
         clean_installed = installed[0] if (isinstance(installed, list) and installed) else installed
         
+        latest_patch = r.get("latest_patch")
         latest_sm = r.get("latest_same_major")
         latest_abs = r.get("latest_absolute") or r.get("latest")
         
-        # If latest_same_major is identical to installed or declared, there's no safe update.
-        if latest_sm in (clean_installed, declared):
-            latest_sm = None
-        # If latest_absolute is identical to installed, declared, or latest_same_major, there's no separate major remediation.
-        if latest_abs in (clean_installed, declared) or latest_abs == latest_sm:
-            latest_abs = None
-            
-        remediation_safe = None
-        remediation_major = None
-        remediation_options = None
+        clean_inst_v = _clean_v(clean_installed)
+        clean_decl_v = _clean_v(declared)
         
+        if latest_patch and _clean_v(latest_patch) in (clean_inst_v, clean_decl_v):
+            latest_patch = None
+        if latest_sm and (_clean_v(latest_sm) in (clean_inst_v, clean_decl_v) or _clean_v(latest_sm) == _clean_v(latest_patch)):
+            latest_sm = None
+        if latest_abs and " or " not in str(latest_abs):
+            if _clean_v(latest_abs) in (clean_inst_v, clean_decl_v) or _clean_v(latest_abs) == _clean_v(latest_sm) or _clean_v(latest_abs) == _clean_v(latest_patch):
+                latest_abs = None
+
         manifest_files = []
         if r.get("is_engine", False):
             package_json_path = os.path.join(project_path, "package.json")
@@ -7662,100 +7885,230 @@ def populate_remediation_recommendations(results, default_project_path):
         if not manifest_files:
             continue
             
-        for manifest_path in manifest_files:
-            try:
-                with open(manifest_path, "r", encoding="utf-8", errors="ignore") as f:
-                    lines = f.readlines()
-            except Exception:
-                continue
-                
-            found_line_idx = None
-            best_score = -1
-            for idx, line in enumerate(lines):
-                if r.get("is_engine", False):
-                    matched = f'"{name}"' in line or '"engines"' in line
-                else:
-                    matched = match_line_for_dependency(line, name, tech)
-                if matched:
-                    score = 1
-                    if declared:
-                        ver_digits = re.search(r'\d+\.\d+', str(declared))
-                        if ver_digits and ver_digits.group(0) in line:
-                            score = 2
-                        elif str(declared).strip() in line:
-                            score = 2
-                    if score > best_score:
-                        best_score = score
-                        found_line_idx = idx + 1
-                        if score == 2:
-                            break
-                    
-            diff_name = name
-            diff_declared = declared
+        manifest_path = manifest_files[0]
+        try:
+            with open(manifest_path, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
+        except Exception:
+            continue
             
-            if found_line_idx is None and r.get("required_by"):
-                # For transitive dependencies, locate the direct parent package in the manifest file
-                for parent_name in r.get("required_by", []):
+        found_line_idx = None
+        best_score = -1
+        for idx, line in enumerate(lines):
+            if r.get("is_engine", False):
+                matched = f'"{name}"' in line or '"engines"' in line
+            else:
+                matched = match_line_for_dependency(line, name, tech)
+            if matched:
+                score = 1
+                if declared:
+                    ver_digits = re.search(r'\d+\.\d+', str(declared))
+                    if ver_digits and ver_digits.group(0) in line:
+                        score = 2
+                    elif str(declared).strip() in line:
+                        score = 2
+                if score > best_score:
+                    best_score = score
+                    found_line_idx = idx + 1
+                    if score == 2:
+                        break
+
+        parent_r = None
+        parent_line_idx = None
+        if r.get("required_by"):
+            for parent_name in r.get("required_by", []):
+                parent_candidate = next((item for item in results if item.get("name") == parent_name and item.get("project_path") == r.get("project_path")), None)
+                if parent_candidate:
                     for idx, line in enumerate(lines):
                         if match_line_for_dependency(line, parent_name, tech):
-                            found_line_idx = idx + 1
-                            diff_name = parent_name
-                            parent_r = next((item for item in results if item["name"] == parent_name), None)
-                            if parent_r and parent_r.get("declared"):
-                                diff_declared = parent_r["declared"]
+                            parent_r = parent_candidate
+                            parent_line_idx = idx + 1
                             break
-                    if found_line_idx is not None:
-                        break
-                        
-            if found_line_idx is not None:
-                # Try to generate diffs for this manifest file
-                temp_safe = None
-                temp_major = None
-                temp_options = []
-                
-                target_string = latest_abs or r.get("latest") or ""
-                if " or " in target_string:
-                    parts = [p.strip() for p in target_string.split(" or ") if p.strip()]
-                    if len(parts) >= 2:
-                        for p in parts:
-                            diff_p = generate_remediation_diff(
-                                manifest_path, found_line_idx, diff_declared, p, tech, diff_name
-                            )
-                            if diff_p:
-                                lbl = format_remediation_option_label(p)
-                                temp_options.append({"label": lbl, "diff": diff_p})
-                        # Add the combined choice ("A or B")
-                        diff_comb = generate_remediation_diff(
-                            manifest_path, found_line_idx, diff_declared, target_string, tech, diff_name
-                        )
-                        if diff_comb:
-                            lbl_comb = format_remediation_option_label(target_string)
-                            temp_options.append({"label": lbl_comb, "diff": diff_comb})
-
-                if latest_sm:
-                    temp_safe = generate_remediation_diff(
-                        manifest_path, found_line_idx, diff_declared, latest_sm, tech, diff_name
-                    )
-                if latest_abs:
-                    temp_major = generate_remediation_diff(
-                        manifest_path, found_line_idx, diff_declared, latest_abs, tech, diff_name
-                    )
-                
-                # If we succeeded in generating at least one valid diff, we stop searching
-                if temp_safe or temp_major or temp_options:
-                    remediation_safe = temp_safe
-                    remediation_major = temp_major
-                    remediation_options = temp_options
+                if parent_line_idx is not None:
                     break
+
+        manifest_missing = False
+        if found_line_idx is None and dep_type != "Transitive" and not r.get("required_by"):
+            manifest_missing = True
+
+        strategies = []
+
+        if dep_type != "Transitive" or found_line_idx is not None:
+            # Direct/Dev dependency or explicit package in manifest
+            direct_options = []
+            target_string = latest_abs or (r.get("latest") if r.get("name") == name else "") or ""
+            if " or " in target_string:
+                parts = [p.strip() for p in target_string.split(" or ") if p.strip()]
+                if len(parts) >= 2:
+                    for p in parts:
+                        diff_p = generate_remediation_diff(manifest_path, found_line_idx, declared, p, tech, name) if found_line_idx else generate_addition_remediation_diff(manifest_path, name, p, tech)
+                        if diff_p:
+                            lbl = format_remediation_option_label(p)
+                            direct_options.append({
+                                "id": f"option_{p}",
+                                "label": lbl,
+                                "badge": "Option",
+                                "badge_class": "v-chip-safe",
+                                "diff": diff_p
+                            })
+                    diff_comb = generate_remediation_diff(manifest_path, found_line_idx, declared, target_string, tech, name) if found_line_idx else generate_addition_remediation_diff(manifest_path, name, target_string, tech)
+                    if diff_comb:
+                        lbl_comb = format_remediation_option_label(target_string)
+                        direct_options.append({
+                            "id": f"option_{target_string}",
+                            "label": lbl_comb,
+                            "badge": "Option",
+                            "badge_class": "v-chip-major",
+                            "diff": diff_comb
+                        })
+
+            if latest_patch:
+                diff_patch = generate_remediation_diff(manifest_path, found_line_idx, declared, latest_patch, tech, name) if found_line_idx else generate_addition_remediation_diff(manifest_path, name, latest_patch, tech)
+                if diff_patch:
+                    direct_options.append({
+                        "id": "patch",
+                        "label": f"Patch: v{_clean_v(latest_patch)}",
+                        "badge": "Patch / Bugfix",
+                        "badge_class": "v-chip-ok",
+                        "diff": diff_patch
+                    })
+
+            if latest_sm:
+                diff_sm = generate_remediation_diff(manifest_path, found_line_idx, declared, latest_sm, tech, name) if found_line_idx else generate_addition_remediation_diff(manifest_path, name, latest_sm, tech)
+                if diff_sm:
+                    direct_options.append({
+                        "id": "minor",
+                        "label": f"Minor: v{_clean_v(latest_sm)}",
+                        "badge": "Minor / Feature",
+                        "badge_class": "v-chip-safe",
+                        "diff": diff_sm
+                    })
+
+            if latest_abs and " or " not in str(latest_abs):
+                diff_abs = generate_remediation_diff(manifest_path, found_line_idx, declared, latest_abs, tech, name) if found_line_idx else generate_addition_remediation_diff(manifest_path, name, latest_abs, tech)
+                if diff_abs:
+                    direct_options.append({
+                        "id": "major",
+                        "label": f"Major: v{_clean_v(latest_abs)}",
+                        "badge": "Major / Breaking",
+                        "badge_class": "v-chip-major",
+                        "diff": diff_abs
+                    })
+
+            if direct_options:
+                strategies.append({
+                    "id": "direct_upgrade",
+                    "title": f"Update Direct Dependency ({name})",
+                    "description": f"Updates '{name}' in manifest file.",
+                    "is_recommended": True,
+                    "options": direct_options
+                })
+
+        if dep_type == "Transitive":
+            # Strategy 1: Upgrade Parent Package
+            if parent_r and parent_line_idx is not None:
+                p_name = parent_r.get("name")
+                p_inst = parent_r.get("installed")
+                p_clean_inst = p_inst[0] if (isinstance(p_inst, list) and p_inst) else p_inst
+                p_decl = parent_r.get("declared")
+                p_patch = parent_r.get("latest_patch")
+                p_sm = parent_r.get("latest_same_major")
+                p_abs = parent_r.get("latest_absolute") or parent_r.get("latest")
                 
-        if remediation_safe or remediation_major or remediation_options:
-            fallback_safe = remediation_options[0]["diff"] if remediation_options else None
-            fallback_major = remediation_options[-1]["diff"] if remediation_options else None
+                p_clean_inst_v = _clean_v(p_clean_inst)
+                p_clean_decl_v = _clean_v(p_decl)
+
+                if p_patch and _clean_v(p_patch) in (p_clean_inst_v, p_clean_decl_v):
+                    p_patch = None
+                if p_sm and (_clean_v(p_sm) in (p_clean_inst_v, p_clean_decl_v) or _clean_v(p_sm) == _clean_v(p_patch)):
+                    p_sm = None
+                if p_abs and (_clean_v(p_abs) in (p_clean_inst_v, p_clean_decl_v) or _clean_v(p_abs) == _clean_v(p_sm) or _clean_v(p_abs) == _clean_v(p_patch)):
+                    p_abs = None
+
+                parent_options = []
+                if p_patch:
+                    p_diff = generate_remediation_diff(manifest_path, parent_line_idx, p_decl, p_patch, tech, p_name)
+                    if p_diff:
+                        parent_options.append({
+                            "id": "patch",
+                            "label": f"Patch {p_name}: v{_clean_v(p_patch)}",
+                            "badge": "Patch / Bugfix",
+                            "badge_class": "v-chip-ok",
+                            "diff": p_diff
+                        })
+                if p_sm:
+                    p_diff = generate_remediation_diff(manifest_path, parent_line_idx, p_decl, p_sm, tech, p_name)
+                    if p_diff:
+                        parent_options.append({
+                            "id": "minor",
+                            "label": f"Minor {p_name}: v{_clean_v(p_sm)}",
+                            "badge": "Minor / Feature",
+                            "badge_class": "v-chip-safe",
+                            "diff": p_diff
+                        })
+                if p_abs:
+                    p_diff = generate_remediation_diff(manifest_path, parent_line_idx, p_decl, p_abs, tech, p_name)
+                    if p_diff:
+                        parent_options.append({
+                            "id": "major",
+                            "label": f"Major {p_name}: v{_clean_v(p_abs)}",
+                            "badge": "Major / Breaking",
+                            "badge_class": "v-chip-major",
+                            "diff": p_diff
+                        })
+
+                if parent_options:
+                    strategies.append({
+                        "id": "parent_upgrade",
+                        "title": f"Upgrade Parent Package ({p_name})",
+                        "description": f"Recommended. Upgrades parent package '{p_name}' which requires '{name}'.",
+                        "is_recommended": True,
+                        "options": parent_options
+                    })
+
+            # Strategy 2: Force Transitive Override / Resolution
+            target_ver_str = latest_patch or latest_sm or latest_abs or clean_installed
+            if target_ver_str:
+                ov_diff = generate_override_remediation_diff(manifest_path, name, target_ver_str, tech)
+                if ov_diff:
+                    ov_badge = "Patch" if target_ver_str == latest_patch else "Minor" if target_ver_str == latest_sm else "Major"
+                    ov_badge_class = "v-chip-ok" if ov_badge == "Patch" else "v-chip-safe" if ov_badge == "Minor" else "v-chip-major"
+                    override_options = [{
+                        "id": "override",
+                        "label": f"Override {name}: v{_clean_v(target_ver_str)}",
+                        "badge": ov_badge,
+                        "badge_class": ov_badge_class,
+                        "diff": ov_diff
+                    }]
+                    strategies.append({
+                        "id": "override",
+                        "title": f"Force Transitive Override ({name})",
+                        "description": f"Adds explicit override / resolution for '{name}' in manifest.",
+                        "is_recommended": len(strategies) == 0,
+                        "options": override_options
+                    })
+
+        all_flat_options = []
+        for st in strategies:
+            all_flat_options.extend(st.get("options", []))
+
+        remediation_safe = next((opt["diff"] for opt in all_flat_options if opt["id"] in ("patch", "minor")), None)
+        remediation_major = next((opt["diff"] for opt in all_flat_options if opt["id"] == "major"), None)
+        remediation_options = [{"label": opt["label"], "diff": opt["diff"]} for opt in all_flat_options] if all_flat_options else None
+
+        if strategies:
+            first_diff = all_flat_options[0]["diff"] if all_flat_options else None
+            last_diff = all_flat_options[-1]["diff"] if all_flat_options else None
             r["remediation"] = {
-                "safe": remediation_safe or fallback_safe,
-                "major": remediation_major or fallback_major,
-                "options": remediation_options if remediation_options else None
+                "safe": remediation_safe or first_diff,
+                "major": remediation_major or last_diff,
+                "options": remediation_options,
+                "manifest_missing": manifest_missing,
+                "strategies": strategies
             }
+            if manifest_missing:
+                r["manifest_missing"] = True
+
 
 class HTMLReportTemplateProvider:
     @staticmethod
@@ -8705,6 +9058,52 @@ class HTMLReportTemplateProvider:
             color: var(--primary);
             border-bottom-color: var(--primary);
         }
+
+        .modal-strategy-tab {
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 8px 14px;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-muted);
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .modal-strategy-tab:hover {
+            color: var(--text-main);
+            border-color: var(--primary);
+        }
+        .modal-strategy-tab.active {
+            background-color: rgba(56, 189, 248, 0.15);
+            color: var(--primary);
+            border-color: var(--primary);
+        }
+
+        .modal-level-tab {
+            background-color: #1e293b;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 6px 12px;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-muted);
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            transition: all 0.2s ease;
+        }
+        .modal-level-tab:hover {
+            color: var(--text-main);
+            border-color: var(--primary);
+        }
+        .modal-level-tab.active {
+            background-color: var(--card-bg);
+            color: #ffffff;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 1px var(--primary);
+        }
         
         .modal-info-bar {
             display: flex;
@@ -9309,7 +9708,7 @@ class HTMLReportTemplateProvider:
                 
                 let required_by_html = '';
                 const required_by = r.required_by || [];
-                const is_direct = (declared && dep_type !== 'Transitive');
+                const is_direct = (dep_type !== 'Transitive');
                 if (required_by.length > 0 && !is_direct) {
                     const required_by_esc = required_by.map(rb => escapeHtml(rb));
                     required_by_html = 
@@ -9338,6 +9737,17 @@ class HTMLReportTemplateProvider:
                 if (r.excluded_warning) {
                     notes_warnings_list.push('<div class="note-warning-item"><span class="note-warning-icon">⚠️</span> <div><strong>Excluded Version Alert:</strong> ' + escapeHtml(r.excluded_warning) + '</div></div>');
                 }
+                if (r.manifest_missing || (r.remediation && r.remediation.manifest_missing)) {
+                    notes_warnings_list.push(
+                        '<div class="note-warning-item"><span class="note-warning-icon">⚠️</span> ' +
+                        '<div><strong>Manifest / Lockfile Discrepancy (Lockfile Drift):</strong> Package is resolved in lockfile as direct dependency but is missing from <code>package.json</code>.<br/>' +
+                        '<span style="font-size: 11.5px; opacity: 0.9; display: block; margin-top: 4px;"><strong>Potential causes to analyze:</strong><br/>' +
+                        '• <em>Lockfile Drift:</em> <code>package.json</code> was edited or merged manually without running <code>npm install</code>.<br/>' +
+                        '• <em>Branch Switch:</em> Switched Git branches without updating dependencies.<br/>' +
+                        '• <em>Tool Conflict:</em> Mixed usage of <code>npm</code> and <code>pnpm</code> in workspace.</span>' +
+                        '</div></div>'
+                    );
+                }
                 
                 if (notes_warnings_list.length > 0) {
                     notes_warnings_html = 
@@ -9360,10 +9770,10 @@ class HTMLReportTemplateProvider:
                 
                 let remediation_button_html = '';
                 const has_remediation = r.remediation && (r.remediation.safe || r.remediation.major || (r.remediation.options && r.remediation.options.length));
-                if (has_remediation && is_direct) {
+                if (has_remediation) {
                     remediation_button_html = 
                         '<div class="remediation-section">' +
-                            '<div style="font-size: 12px; font-weight: 700; color: var(--success); margin-bottom: 8px;">Remediation:</div>' +
+                            '<div style="font-size: 12px; font-weight: 700; color: var(--success); margin-bottom: 8px;">Remediation Support:</div>' +
                             '<div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">' +
                                 '<button class="btn-remediation" onclick="openRemediationModalByIndex(' + i + '); event.stopPropagation();">' +
                                     '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;">' +
@@ -9431,7 +9841,6 @@ class HTMLReportTemplateProvider:
                                     const latest_abs = r.latest_absolute || installed;
                                     
                                     const clean_ver_str = (val) => (val ? val.toString().replace(/^v/i, '') : '');
-                                    const installed_clean = clean_ver_str(installed);
                                     const latest_sm_clean = clean_ver_str(latest_sm);
                                     const latest_abs_clean = clean_ver_str(latest_abs);
                                     
@@ -9447,7 +9856,7 @@ class HTMLReportTemplateProvider:
                                         declared_html +
                                         '<div class="version-installed">' +
                                             '<span class="label">Installed:</span>' +
-                                            '<span>v' + escapeHtml(installed_clean) + '</span>' +
+                                            '<span>' + escapeHtml(installed || 'N/A') + '</span>' +
                                         '</div>' +
                                         '<div class="version-chips">';
                                     
@@ -9902,6 +10311,8 @@ class HTMLReportTemplateProvider:
         }
         
         let activeRemediationInfo = null;
+        let activeStrategyIndex = 0;
+        let activeOptionIndex = 0;
 
         function renderDiff(diff) {
             if (!diff) return;
@@ -9945,66 +10356,99 @@ class HTMLReportTemplateProvider:
             });
         }
 
-        function switchRemediationTab(type) {
-            if (!activeRemediationInfo) return;
-            
-            const safeTab = document.getElementById('tab-safe');
-            const majorTab = document.getElementById('tab-major');
-            
-            if (type === 'safe') {
-                safeTab.classList.add('active');
-                majorTab.classList.remove('active');
-                renderDiff(activeRemediationInfo.safe);
-            } else {
-                majorTab.classList.add('active');
-                safeTab.classList.remove('active');
-                renderDiff(activeRemediationInfo.major);
-            }
-        }
-
-        function openRemediationModal(info) {
+        function renderRemediationModalContent(info) {
             if (!info) return;
-            
-            activeRemediationInfo = info;
-            
-            const tabsContainer = document.getElementById('modal-tabs-container');
-            
-            if (info.options && info.options.length > 0) {
+
+            const strategyContainer = document.getElementById('modal-strategy-tabs-container');
+            const levelContainer = document.getElementById('modal-level-tabs-container');
+            const legacyTabsContainer = document.getElementById('modal-tabs-container');
+
+            if (info.strategies && info.strategies.length > 0) {
+                legacyTabsContainer.style.display = 'none';
+                
+                if (activeStrategyIndex >= info.strategies.length) {
+                    activeStrategyIndex = 0;
+                }
+                const st = info.strategies[activeStrategyIndex];
+
+                // Render Strategy Tabs
+                if (info.strategies.length > 1) {
+                    strategyContainer.style.display = 'flex';
+                    strategyContainer.innerHTML = info.strategies.map((s, idx) => {
+                        const activeCls = (idx === activeStrategyIndex) ? ' active' : '';
+                        const star = s.is_recommended ? ' ★' : '';
+                        return '<button class="modal-strategy-tab' + activeCls + '" onclick="switchRemediationStrategy(' + idx + ')">' + escapeHtml(s.title) + star + '</button>';
+                    }).join('');
+                } else {
+                    strategyContainer.style.display = 'none';
+                }
+
+                // Render Level Options for active strategy
+                const options = st.options || [];
+                if (activeOptionIndex >= options.length) {
+                    activeOptionIndex = 0;
+                }
+
+                if (options.length > 0) {
+                    levelContainer.style.display = 'flex';
+                    levelContainer.innerHTML = options.map((opt, oIdx) => {
+                        const activeCls = (oIdx === activeOptionIndex) ? ' active' : '';
+                        const bCls = opt.badge_class || 'v-chip-safe';
+                        const badgeHtml = '<span class="v-chip ' + bCls + '" style="font-size: 10px; padding: 2px 6px; margin-right: 4px;">' + escapeHtml(opt.badge || opt.id) + '</span>';
+                        return '<button class="modal-level-tab' + activeCls + '" onclick="switchRemediationLevel(' + oIdx + ')">' + badgeHtml + ' ' + escapeHtml(opt.label) + '</button>';
+                    }).join('');
+
+                    const activeOpt = options[activeOptionIndex];
+                    if (activeOpt && activeOpt.diff) {
+                        const filepathEl = document.getElementById('modal-filepath');
+                        if (filepathEl) {
+                            filepathEl.textContent = activeOpt.diff.display_path || (activeOpt.diff.manifest_path + ':' + activeOpt.diff.line_number);
+                        }
+                        renderDiff(activeOpt.diff);
+                    }
+                } else {
+                    levelContainer.style.display = 'none';
+                }
+            } else if (info.options && info.options.length > 0) {
+                strategyContainer.style.display = 'none';
+                levelContainer.style.display = 'none';
+                legacyTabsContainer.style.display = 'flex';
+                
                 const firstValid = info.options[0].diff;
                 if (firstValid) {
                     document.getElementById('modal-filepath').textContent = firstValid.display_path || (firstValid.manifest_path + ':' + firstValid.line_number);
                 }
                 
-                tabsContainer.innerHTML = '';
-                tabsContainer.style.display = 'flex';
-                
+                legacyTabsContainer.innerHTML = '';
                 info.options.forEach((opt, idx) => {
                     const btn = document.createElement('button');
                     btn.className = 'modal-tab' + (idx === 0 ? ' active' : '');
                     btn.textContent = opt.label;
                     btn.onclick = function() {
-                        const allTabs = tabsContainer.querySelectorAll('.modal-tab');
+                        const allTabs = legacyTabsContainer.querySelectorAll('.modal-tab');
                         allTabs.forEach(t => t.classList.remove('active'));
                         btn.classList.add('active');
                         renderDiff(opt.diff);
                     };
-                    tabsContainer.appendChild(btn);
+                    legacyTabsContainer.appendChild(btn);
                 });
-                
                 renderDiff(info.options[0].diff);
             } else {
+                strategyContainer.style.display = 'none';
+                levelContainer.style.display = 'none';
+                
                 const firstValid = info.safe || info.major;
                 if (firstValid) {
                     document.getElementById('modal-filepath').textContent = firstValid.display_path || (firstValid.manifest_path + ':' + firstValid.line_number);
                 }
                 
                 if (info.safe && info.major) {
-                    tabsContainer.innerHTML = '<button id="tab-safe" class="modal-tab active" onclick="switchRemediationTab(&quot;safe&quot;)">Safe Update</button>' +
+                    legacyTabsContainer.innerHTML = '<button id="tab-safe" class="modal-tab active" onclick="switchRemediationTab(&quot;safe&quot;)">Safe Update</button>' +
                                               '<button id="tab-major" class="modal-tab" onclick="switchRemediationTab(&quot;major&quot;)">Major Upgrade</button>';
-                    tabsContainer.style.display = 'flex';
+                    legacyTabsContainer.style.display = 'flex';
                     switchRemediationTab('safe');
                 } else {
-                    tabsContainer.style.display = 'none';
+                    legacyTabsContainer.style.display = 'none';
                     if (info.safe) {
                         renderDiff(info.safe);
                     } else if (info.major) {
@@ -10012,6 +10456,43 @@ class HTMLReportTemplateProvider:
                     }
                 }
             }
+        }
+
+        function switchRemediationStrategy(idx) {
+            activeStrategyIndex = idx;
+            activeOptionIndex = 0;
+            renderRemediationModalContent(activeRemediationInfo);
+        }
+
+        function switchRemediationLevel(idx) {
+            activeOptionIndex = idx;
+            renderRemediationModalContent(activeRemediationInfo);
+        }
+
+        function switchRemediationTab(type) {
+            if (!activeRemediationInfo) return;
+            
+            const safeTab = document.getElementById('tab-safe');
+            const majorTab = document.getElementById('tab-major');
+            
+            if (type === 'safe') {
+                if (safeTab) safeTab.classList.add('active');
+                if (majorTab) majorTab.classList.remove('active');
+                renderDiff(activeRemediationInfo.safe);
+            } else {
+                if (majorTab) majorTab.classList.add('active');
+                if (safeTab) safeTab.classList.remove('active');
+                renderDiff(activeRemediationInfo.major);
+            }
+        }
+
+        function openRemediationModal(info) {
+            if (!info) return;
+            activeRemediationInfo = info;
+            activeStrategyIndex = 0;
+            activeOptionIndex = 0;
+            
+            renderRemediationModalContent(info);
             
             // Synchronize scrolling between current and suggested code views
             const leftScroll = document.getElementById('modal-current-code');
@@ -10174,11 +10655,10 @@ ${taskList}`;
                 <span id="modal-filepath"></span>
             </div>
             
-            <!-- Tabs container -->
-            <div id="modal-tabs-container" class="modal-tabs" style="display: none;">
-                <button id="tab-safe" class="modal-tab" onclick="switchRemediationTab('safe')">Safe Update</button>
-                <button id="tab-major" class="modal-tab" onclick="switchRemediationTab('major')">Major Upgrade</button>
-            </div>
+            <!-- Strategy & Level Tabs containers -->
+            <div id="modal-strategy-tabs-container" style="display: none; gap: 8px; margin-top: 14px; margin-bottom: 12px; flex-wrap: wrap;"></div>
+            <div id="modal-level-tabs-container" style="display: none; gap: 8px; margin-bottom: 16px; flex-wrap: wrap;"></div>
+            <div id="modal-tabs-container" class="modal-tabs" style="display: none;"></div>
             
             <div class="modal-diff-container">
                 <div class="diff-box">

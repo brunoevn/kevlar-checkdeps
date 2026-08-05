@@ -2776,7 +2776,47 @@ class TestKevlar(unittest.TestCase):
         finally:
             sys.stdout = old_stdout
 
+    def test_remediation_diff_missing_manifest_entry(self):
+        """Test that populate_remediation_recommendations generates an addition diff for direct dependencies missing from manifest."""
+        import tempfile
+        import shutil
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            pkg_json = '{\n  "name": "test-pkg",\n  "dependencies": {\n    "express": "^4.18.0"\n  }\n}\n'
+            pkg_json_path = os.path.join(temp_dir, "package.json")
+            with open(pkg_json_path, "w", encoding="utf-8") as f:
+                f.write(pkg_json)
+
+            results = [{
+                "name": "drizzle-orm",
+                "declared": "",
+                "installed": "0.38.4",
+                "latest_same_major": "0.45.2",
+                "latest_absolute": "0.45.2",
+                "latest": "0.45.2",
+                "status": "minor",
+                "vulnerabilities": ["GHSA-gpj5-g38j-94v9"],
+                "technology": "npm",
+                "dep_type": "Direct",
+                "project_path": temp_dir
+            }]
+
+            kevlar.populate_remediation_recommendations(results, temp_dir)
+
+            rem = results[0].get("remediation")
+            self.assertIsNotNone(rem)
+            self.assertTrue(results[0].get("manifest_missing"))
+            self.assertTrue(rem.get("manifest_missing"))
+            safe_diff = rem.get("safe") or rem.get("major")
+            self.assertIsNotNone(safe_diff)
+            self.assertTrue(safe_diff.get("is_addition"))
+            self.assertIn("drizzle-orm", str(safe_diff.get("suggested_code")))
+        finally:
+            shutil.rmtree(temp_dir)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
