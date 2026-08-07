@@ -4600,6 +4600,166 @@ def parse_maven_pom(filepath, parent_dep_mgmt=None, base_dir=None):
     deps, _, _ = parse_maven_pom_recursive(filepath, parent_dep_mgmt, base_dir=base_dir)
     return deps
 
+_MAVEN_REMOTE_POM_CACHE = {}
+
+def fetch_remote_maven_pom(group_id, artifact_id, version):
+    """Fetches and parses a .pom XML file for a Maven artifact from remote registries."""
+    if not group_id or not artifact_id or not version or version == "*":
+        return None
+    cache_key = (group_id, artifact_id, version)
+    if cache_key in _MAVEN_REMOTE_POM_CACHE:
+        return _MAVEN_REMOTE_POM_CACHE[cache_key]
+        
+    group_path = group_id.replace(".", "/")
+    use_google_maven = (
+        group_id.startswith(("androidx.", "com.google.android.", "com.android.", "android.arch."))
+        or "android" in group_id
+    )
+    registries = [URL_GOOGLE_MAVEN, URL_MAVEN_REGISTRY] if use_google_maven else [URL_MAVEN_REGISTRY, URL_GOOGLE_MAVEN]
+    
+    root = None
+    for registry_url in registries:
+        url = f"{registry_url}{group_path}/{artifact_id}/{version}/{artifact_id}-{version}.pom"
+        try:
+            root = _fetch_registry_json_or_xml(url, format="xml")
+            if root is not None:
+                break
+        except Exception:
+            continue
+            
+    _MAVEN_REMOTE_POM_CACHE[cache_key] = root
+    return root
+
+def resolve_maven_transitive_dependencies(direct_deps, max_depth=3, max_workers=10):
+    """
+    Recursively fetches remote .pom files for Maven dependencies to extract transitive dependencies
+    and build required_by parent relationships.
+    """
+    all_deps = dict(direct_deps)
+    required_by_map = {coord: set() for coord in direct_deps}
+    dep_types = {coord: "Direct" for coord in direct_deps}
+    visited = set()
+    
+    current_level = []
+    for coord, ver in direct_deps.items():
+        if ":" in coord and ver and ver != "*":
+            current_level.append((coord, ver))
+            
+    depth = 0
+    while current_level and depth < max_depth:
+        next_level_items = []
+        
+        def _process_item(item):
+            parent_coord, version = item
+            if (parent_coord, version) in visited:
+                return []
+            visited.add((parent_coord, version))
+            
+            if ":" not in parent_coord:
+                return []
+                
+            group_id, artifact_id = parent_coord.split(":", 1)
+            pom_root = fetch_remote_maven_pom(group_id, artifact_id, version)
+            if pom_root is None:
+                return []
+                
+            ns = ""
+            if "}" in pom_root.tag:
+                ns = pom_root.tag.split("}")[0].lstrip("{")
+            prefix = f"{{{ns}}}" if ns else ""
+            
+            # Extract local properties for interpolation
+            properties = {}
+            props_elem = pom_root.find(f"{prefix}properties")
+            if props_elem is not None:
+                for elem in props_elem:
+                    tag_local = elem.tag.split("}")[-1]
+                    properties[f"${{{tag_local}}}"] = (elem.text or "").strip()
+                    
+            properties["${project.version}"] = version
+            properties["${project.groupId}"] = group_id
+            properties["${pom.version}"] = version
+            
+            parent_dep_mgmt = {}
+            parent_elem = pom_root.find(f"{prefix}parent")
+            if parent_elem is not None:
+                p_group = parent_elem.findtext(f"{prefix}groupId") or ""
+                p_artifact = parent_elem.findtext(f"{prefix}artifactId") or ""
+                p_version = parent_elem.findtext(f"{prefix}version") or ""
+                p_group, p_artifact, p_version = p_group.strip(), p_artifact.strip(), p_version.strip()
+                if p_group and p_artifact and p_version:
+                    parent_pom_root = fetch_remote_maven_pom(p_group, p_artifact, p_version)
+                    if parent_pom_root is not None:
+                        p_ns = parent_pom_root.tag.split("}")[0].lstrip("{") if "}" in parent_pom_root.tag else ""
+                        p_prefix = f"{{{p_ns}}}" if p_ns else ""
+                        p_props_elem = parent_pom_root.find(f"{p_prefix}properties")
+                        if p_props_elem is not None:
+                            for elem in p_props_elem:
+                                tag_local = elem.tag.split("}")[-1]
+                                properties[f"${{{tag_local}}}"] = (elem.text or "").strip()
+                        parent_dep_mgmt = parse_maven_dependency_management(parent_pom_root, p_prefix, properties)
+                        
+            local_dep_mgmt = parse_maven_dependency_management(pom_root, prefix, properties)
+            parent_dep_mgmt.update(local_dep_mgmt)
+            
+            deps_elem = pom_root.find(f"{prefix}dependencies")
+            extracted = []
+            if deps_elem is not None:
+                for dep in deps_elem.findall(f"{prefix}dependency"):
+                    g_elem = dep.find(f"{prefix}groupId")
+                    a_elem = dep.find(f"{prefix}artifactId")
+                    v_elem = dep.find(f"{prefix}version")
+                    s_elem = dep.find(f"{prefix}scope")
+                    opt_elem = dep.find(f"{prefix}optional")
+                    
+                    scope = (s_elem.text.strip() if (s_elem is not None and s_elem.text) else "compile").lower()
+                    if scope in ("test", "provided", "system"):
+                        continue
+                        
+                    if opt_elem is not None and opt_elem.text and opt_elem.text.strip().lower() == "true":
+                        continue
+                        
+                    if g_elem is not None and a_elem is not None:
+                        c_group = g_elem.text.strip() if g_elem.text else ""
+                        c_artifact = a_elem.text.strip() if a_elem.text else ""
+                        c_version = v_elem.text.strip() if (v_elem is not None and v_elem.text) else "*"
+                        
+                        for prop_k, prop_v in properties.items():
+                            if prop_v:
+                                c_group = c_group.replace(prop_k, prop_v)
+                                c_artifact = c_artifact.replace(prop_k, prop_v)
+                                c_version = c_version.replace(prop_k, prop_v)
+                                
+                        c_coord = f"{c_group}:{c_artifact}"
+                        if (c_version == "*" or c_version.startswith("${")) and c_coord in parent_dep_mgmt:
+                            c_version = parent_dep_mgmt[c_coord]
+                            
+                        if c_group and c_artifact and not c_version.startswith("${"):
+                            extracted.append((parent_coord, c_coord, c_version))
+                            
+            return extracted
+
+        workers = min(max_workers, max(1, len(current_level)))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            results_lists = list(executor.map(_process_item, current_level))
+            
+        for item_results in results_lists:
+            for parent_coord, child_coord, child_version in item_results:
+                if child_coord not in required_by_map:
+                    required_by_map[child_coord] = set()
+                required_by_map[child_coord].add(parent_coord)
+                
+                if child_coord not in all_deps:
+                    all_deps[child_coord] = child_version
+                    dep_types[child_coord] = "Transitive"
+                    if child_version and child_version != "*":
+                        next_level_items.append((child_coord, child_version))
+                        
+        current_level = next_level_items
+        depth += 1
+        
+    return all_deps, required_by_map, dep_types
+
 def check_maven_package(target):
     """Queries Maven Central Repository for package metadata."""
     name = target["name"]
@@ -4615,7 +4775,6 @@ def check_maven_package(target):
             
         group_id, artifact_id = name.split(":", 1)
         group_path = group_id.replace(".", "/")
-        # Determine registry search order (prioritize Google Maven for Android/Google groups)
         use_google_maven = (
             group_id.startswith(("androidx.", "com.google.android.", "com.android.", "android.arch."))
             or "android" in group_id
@@ -4639,20 +4798,35 @@ def check_maven_package(target):
                 last_error = e
                 continue
                 
-        if xml_data is None:
+        versions_list = []
+        if xml_data is not None:
+            root = safe_et_fromstring(xml_data)
+            versioning_elem = root.find("versioning")
+            if versioning_elem is not None:
+                versions_elem = versioning_elem.find("versions")
+                if versions_elem is not None:
+                    for v in versions_elem.findall("version"):
+                        if v.text:
+                            versions_list.append(v.text.strip())
+        else:
+            # Fallback to search.maven.org API for legacy packages lacking maven-metadata.xml
+            try:
+                solr_url = f"https://search.maven.org/solrsearch/select?q=g:%22{group_id}%22+AND+a:%22{artifact_id}%22&wt=json"
+                req = urllib.request.Request(solr_url)
+                req.add_header("User-Agent", f"Kevlar-CheckDeps/{VERSION}")
+                with safe_urlopen(req, timeout=10) as response:
+                    solr_data = json.loads(response.read().decode("utf-8"))
+                docs = solr_data.get("response", {}).get("docs", [])
+                for doc in docs:
+                    v_val = doc.get("v") or doc.get("latestVersion")
+                    if v_val:
+                        versions_list.append(str(v_val))
+            except Exception as solr_err:
+                last_error = solr_err
+                
+        if not versions_list:
             raise ValueError(f"Failed to fetch metadata from Maven or Google registries: {last_error or 'Not found'}")
             
-        root = safe_et_fromstring(xml_data)
-        
-        versions_list = []
-        versioning_elem = root.find("versioning")
-        if versioning_elem is not None:
-            versions_elem = versioning_elem.find("versions")
-            if versions_elem is not None:
-                for v in versions_elem.findall("version"):
-                    if v.text:
-                        versions_list.append(v.text.strip())
-                        
         stable_versions = []
         prerelease_pattern = re.compile(
             r'[-.]?(alpha|beta|rc|cr|m|preview|dev|snapshot|milestone)\d*\b',
@@ -4793,12 +4967,27 @@ def run_maven_checker(args):
         pom_deps = parse_maven_pom(pom, root_dep_mgmt, base_dir=manifest_dir)
         pkg_data.update(pom_deps)
         
+    direct_deps = dict(pkg_data)
+    
+    # 3. Resolve transitive dependencies via remote POM resolution
+    print(f"{COLOR_GRAY}{ICON_INFO} Resolving Maven transitive dependency tree...{COLOR_RESET}")
+    all_deps, required_by_map, dep_types = resolve_maven_transitive_dependencies(
+        direct_deps,
+        max_depth=3,
+        max_workers=getattr(args, "concurrent", 10)
+    )
+        
     targets = []
-    for name, declared_ver in pkg_data.items():
+    for name, version in all_deps.items():
+        is_direct = (name in direct_deps)
+        if not getattr(args, "all", True) and not is_direct:
+            continue
+        declared_ver = direct_deps.get(name, "Transitive")
+        installed_ver = version if version != "*" else (direct_deps.get(name) or "*")
         targets.append({
             "name": name,
             "declared": declared_ver,
-            "installed": [declared_ver] if declared_ver != "*" else []
+            "installed": [installed_ver] if installed_ver != "*" else []
         })
         
     if not targets:
@@ -4821,11 +5010,14 @@ def run_maven_checker(args):
             r["vulnerabilities"] = []
             
     for r in results:
-        r["required_by"] = []
+        name = r["name"]
+        parents = sorted(list(required_by_map.get(name, set())))
+        r["required_by"] = parents
+        r["dep_type"] = dep_types.get(name, "Transitive" if parents else "Direct")
         
     elapsed = time.time() - start_time
     
-    return results, {"dependencies": pkg_data, "devDependencies": {}, "all_direct": pkg_data}, elapsed
+    return results, {"dependencies": all_deps, "devDependencies": {}, "all_direct": direct_deps}, elapsed
 
 # ==============================================================================
 # Go Modules Checker Logic
@@ -6330,7 +6522,9 @@ def validate_configuration_drift(results):
         
         if not declared or not installed:
             continue
-        if str(declared).strip().lower() in ("n/a", "unknown", ""):
+        if str(declared).strip().lower() in ("n/a", "unknown", "", "transitive"):
+            continue
+        if r.get("dep_type") == "Transitive" or (r.get("required_by") and not r.get("is_direct", False)):
             continue
         if str(installed).strip().lower() in ("n/a", "unknown", ""):
             continue
@@ -6480,16 +6674,18 @@ def print_results_table(results, pkg_data, show_all, vuls_enabled=False, no_show
     print(border_mid)
     
     for r in filtered_results:
-        dep_type = "Transitive"
-        if r.get("is_engine", False):
-            dep_type = "Engine"
-        elif pkg_data:
-            if r["name"] in pkg_data.get("dependencies", {}):
-                dep_type = "Direct"
-            elif r["name"] in pkg_data.get("devDependencies", {}):
-                dep_type = "Dev"
-        if dep_type == "Transitive" and r.get("required_by") and not r.get("is_engine", False):
+        dep_type = r.get("dep_type")
+        if not dep_type:
             dep_type = "Transitive"
+            if r.get("is_engine", False):
+                dep_type = "Engine"
+            elif pkg_data:
+                if r["name"] in pkg_data.get("all_direct", {}):
+                    dep_type = "Direct"
+                elif r["name"] in pkg_data.get("devDependencies", {}):
+                    dep_type = "Dev"
+                elif r["name"] in pkg_data.get("dependencies", {}):
+                    dep_type = "Direct"
                 
         status_str = r["status"]
         color = COLOR_RESET

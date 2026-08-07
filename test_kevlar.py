@@ -2730,6 +2730,49 @@ class TestKevlar(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_maven_transitive_dependency_resolution(self):
+        """Test that resolve_maven_transitive_dependencies fetches remote POMs and resolves child transitive dependencies."""
+        from unittest.mock import patch
+        import xml.etree.ElementTree as ET
+
+        parent_pom_xml = (
+            '<project>\n'
+            '  <groupId>org.example</groupId>\n'
+            '  <artifactId>parent-lib</artifactId>\n'
+            '  <version>1.0.0</version>\n'
+            '  <dependencies>\n'
+            '    <dependency>\n'
+            '      <groupId>org.example</groupId>\n'
+            '      <artifactId>child-lib</artifactId>\n'
+            '      <version>2.0.0</version>\n'
+            '      <scope>compile</scope>\n'
+            '    </dependency>\n'
+            '    <dependency>\n'
+            '      <groupId>org.example</groupId>\n'
+            '      <artifactId>test-lib</artifactId>\n'
+            '      <version>1.0.0</version>\n'
+            '      <scope>test</scope>\n'
+            '    </dependency>\n'
+            '  </dependencies>\n'
+            '</project>'
+        )
+
+        def mock_fetch(group_id, artifact_id, version):
+            if group_id == "org.example" and artifact_id == "parent-lib":
+                return ET.fromstring(parent_pom_xml)
+            return None
+
+        with patch("kevlar.fetch_remote_maven_pom", side_effect=mock_fetch):
+            direct_deps = {"org.example:parent-lib": "1.0.0"}
+            all_deps, required_by, dep_types = kevlar.resolve_maven_transitive_dependencies(direct_deps)
+
+            self.assertIn("org.example:parent-lib", all_deps)
+            self.assertIn("org.example:child-lib", all_deps)
+            self.assertNotIn("org.example:test-lib", all_deps)
+            self.assertEqual(dep_types["org.example:parent-lib"], "Direct")
+            self.assertEqual(dep_types["org.example:child-lib"], "Transitive")
+            self.assertIn("org.example:parent-lib", required_by["org.example:child-lib"])
+
     def test_parse_requirements_txt_relative_inclusion(self):
         """Test that parse_requirements_txt resolves included requirements files and ignores path strings like '..'."""
         import tempfile
