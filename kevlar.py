@@ -4415,6 +4415,35 @@ def parse_maven_dependency_management(root, prefix, properties):
                         dep_mgmt[f"{group}:{artifact}"] = version
     return dep_mgmt
 
+def find_root_maven_pom(manifest_path):
+    """Climbs parent pom.xml files via <relativePath> or parent directories to find top-level monorepo pom.xml."""
+    curr = os.path.abspath(manifest_path)
+    visited = set()
+    root_pom = curr
+    
+    while curr and os.path.exists(curr) and curr not in visited:
+        visited.add(curr)
+        root_pom = curr
+        try:
+            tree = safe_et_parse(curr)
+            root = tree.getroot()
+            ns = root.tag.split("}")[0].lstrip("{") if "}" in root.tag else ""
+            prefix = f"{{{ns}}}" if ns else ""
+            
+            parent_elem = root.find(f"{prefix}parent")
+            if parent_elem is not None:
+                rel_elem = parent_elem.find(f"{prefix}relativePath")
+                rel_path = rel_elem.text.strip() if (rel_elem is not None and rel_elem.text) else "../pom.xml"
+                parent_pom_path = os.path.abspath(os.path.join(os.path.dirname(curr), rel_path))
+                if os.path.exists(parent_pom_path):
+                    curr = parent_pom_path
+                    continue
+            break
+        except Exception:
+            break
+            
+    return root_pom
+
 def find_all_maven_poms(root_pom_path, base_dir=None, visited=None):
     """Recursively finds all module pom.xml files declared in a parent pom.xml."""
     if visited is None:
@@ -4602,7 +4631,7 @@ def parse_maven_pom(filepath, parent_dep_mgmt=None, base_dir=None):
 
 _MAVEN_REMOTE_POM_CACHE = {}
 
-def fetch_remote_maven_pom(group_id, artifact_id, version):
+def fetch_remote_maven_pom(group_id, artifact_id, version, custom_registries=None):
     """Fetches and parses a .pom XML file for a Maven artifact from remote registries."""
     if not group_id or not artifact_id or not version or version == "*":
         return None
@@ -4615,7 +4644,15 @@ def fetch_remote_maven_pom(group_id, artifact_id, version):
         group_id.startswith(("androidx.", "com.google.android.", "com.android.", "android.arch."))
         or "android" in group_id
     )
-    registries = [URL_GOOGLE_MAVEN, URL_MAVEN_REGISTRY] if use_google_maven else [URL_MAVEN_REGISTRY, URL_GOOGLE_MAVEN]
+    base_registries = [URL_GOOGLE_MAVEN, URL_MAVEN_REGISTRY] if use_google_maven else [URL_MAVEN_REGISTRY, URL_GOOGLE_MAVEN]
+    registries = []
+    if custom_registries:
+        for r in custom_registries:
+            if r not in registries:
+                registries.append(r)
+    for r in base_registries:
+        if r not in registries:
+            registries.append(r)
     
     root = None
     for registry_url in registries:
@@ -4630,7 +4667,7 @@ def fetch_remote_maven_pom(group_id, artifact_id, version):
     _MAVEN_REMOTE_POM_CACHE[cache_key] = root
     return root
 
-def resolve_maven_transitive_dependencies(direct_deps, max_depth=3, max_workers=10):
+def resolve_maven_transitive_dependencies(direct_deps, max_depth=3, max_workers=10, custom_registries=None):
     """
     Recursively fetches remote .pom files for Maven dependencies to extract transitive dependencies
     and build required_by parent relationships.
@@ -4659,7 +4696,7 @@ def resolve_maven_transitive_dependencies(direct_deps, max_depth=3, max_workers=
                 return []
                 
             group_id, artifact_id = parent_coord.split(":", 1)
-            pom_root = fetch_remote_maven_pom(group_id, artifact_id, version)
+            pom_root = fetch_remote_maven_pom(group_id, artifact_id, version, custom_registries=custom_registries)
             if pom_root is None:
                 return []
                 
@@ -4688,7 +4725,7 @@ def resolve_maven_transitive_dependencies(direct_deps, max_depth=3, max_workers=
                 p_version = parent_elem.findtext(f"{prefix}version") or ""
                 p_group, p_artifact, p_version = p_group.strip(), p_artifact.strip(), p_version.strip()
                 if p_group and p_artifact and p_version:
-                    parent_pom_root = fetch_remote_maven_pom(p_group, p_artifact, p_version)
+                    parent_pom_root = fetch_remote_maven_pom(p_group, p_artifact, p_version, custom_registries=custom_registries)
                     if parent_pom_root is not None:
                         p_ns = parent_pom_root.tag.split("}")[0].lstrip("{") if "}" in parent_pom_root.tag else ""
                         p_prefix = f"{{{p_ns}}}" if p_ns else ""
@@ -4765,6 +4802,7 @@ def check_maven_package(target):
     name = target["name"]
     declared = target["declared"]
     installed_versions = target["installed"]
+    custom_registries = target.get("custom_registries", [])
     
     versions_to_check = installed_versions if installed_versions else [declared]
     results = []
@@ -4781,7 +4819,15 @@ def check_maven_package(target):
         )
         
         xml_data = None
-        registries = [URL_GOOGLE_MAVEN, URL_MAVEN_REGISTRY] if use_google_maven else [URL_MAVEN_REGISTRY, URL_GOOGLE_MAVEN]
+        base_registries = [URL_GOOGLE_MAVEN, URL_MAVEN_REGISTRY] if use_google_maven else [URL_MAVEN_REGISTRY, URL_GOOGLE_MAVEN]
+        registries = []
+        if custom_registries:
+            for r in custom_registries:
+                if r not in registries:
+                    registries.append(r)
+        for r in base_registries:
+            if r not in registries:
+                registries.append(r)
         
         last_error = None
         successful_registry = URL_MAVEN_REGISTRY
@@ -4931,7 +4977,11 @@ def run_maven_checker(args):
         
     manifest_dir = os.path.dirname(os.path.abspath(manifest))
     print(f"{COLOR_GRAY}{ICON_INFO} Resolving Maven module tree...{COLOR_RESET}")
-    all_poms = find_all_maven_poms(manifest, base_dir=manifest_dir)
+    root_manifest = find_root_maven_pom(manifest)
+    root_manifest_dir = os.path.dirname(os.path.abspath(root_manifest))
+    all_poms = find_all_maven_poms(root_manifest, base_dir=root_manifest_dir)
+    if os.path.abspath(manifest) not in [os.path.abspath(p) for p in all_poms]:
+        all_poms.append(os.path.abspath(manifest))
     
     if len(all_poms) > 1:
         print(f"{COLOR_GRAY}{ICON_INFO} Multi-module project detected. Found {len(all_poms)} modules.{COLOR_RESET}")
@@ -4960,7 +5010,46 @@ def run_maven_checker(args):
     except Exception as e:
         print(f"{COLOR_YELLOW}{ICON_WARN} Warning reading root dependencyManagement: {e}{COLOR_RESET}")
         
-    # 2. Parse all module poms and merge active dependencies
+    # 2. Extract local monorepo module coordinates, project groupIds, and custom repositories
+    local_modules = set()
+    local_group_ids = set()
+    custom_registries = []
+    
+    for pom_path in all_poms:
+        try:
+            tree = safe_et_parse(pom_path)
+            root_elem = tree.getroot()
+            m_ns = root_elem.tag.split("}")[0].lstrip("{") if "}" in root_elem.tag else ""
+            m_prefix = f"{{{m_ns}}}" if m_ns else ""
+            
+            g_elem = root_elem.find(f"{m_prefix}groupId")
+            if g_elem is None or not g_elem.text:
+                parent_elem = root_elem.find(f"{m_prefix}parent")
+                if parent_elem is not None:
+                    g_elem = parent_elem.find(f"{m_prefix}groupId")
+            a_elem = root_elem.find(f"{m_prefix}artifactId")
+            
+            group = g_elem.text.strip() if (g_elem is not None and g_elem.text) else ""
+            artifact = a_elem.text.strip() if (a_elem is not None and a_elem.text) else ""
+            if group:
+                local_group_ids.add(group)
+            if group and artifact:
+                local_modules.add(f"{group}:{artifact}")
+                
+            repos_elem = root_elem.find(f"{m_prefix}repositories")
+            if repos_elem is not None:
+                for repo in repos_elem.findall(f"{m_prefix}repository"):
+                    url_elem = repo.find(f"{m_prefix}url")
+                    if url_elem is not None and url_elem.text:
+                        u = url_elem.text.strip()
+                        if not u.endswith("/"):
+                            u += "/"
+                        if u.startswith(("http://", "https://")) and u not in custom_registries:
+                            custom_registries.append(u)
+        except Exception:
+            pass
+
+    # 3. Parse all module poms and merge active dependencies
     pkg_data = {}
     print(f"{COLOR_GRAY}{ICON_INFO} Reading Maven pom.xml modules...{COLOR_RESET}")
     for pom in all_poms:
@@ -4969,42 +5058,70 @@ def run_maven_checker(args):
         
     direct_deps = dict(pkg_data)
     
-    # 3. Resolve transitive dependencies via remote POM resolution
+    # 4. Resolve transitive dependencies via remote POM resolution
     print(f"{COLOR_GRAY}{ICON_INFO} Resolving Maven transitive dependency tree...{COLOR_RESET}")
     all_deps, required_by_map, dep_types = resolve_maven_transitive_dependencies(
         direct_deps,
         max_depth=3,
-        max_workers=getattr(args, "concurrent", 10)
+        max_workers=getattr(args, "concurrent", 10),
+        custom_registries=custom_registries
     )
         
-    targets = []
+    remote_targets = []
+    local_results = []
+    
     for name, version in all_deps.items():
         is_direct = (name in direct_deps)
         if not getattr(args, "all", True) and not is_direct:
             continue
         declared_ver = direct_deps.get(name, "Transitive")
         installed_ver = version if version != "*" else (direct_deps.get(name) or "*")
-        targets.append({
-            "name": name,
-            "declared": declared_ver,
-            "installed": [installed_ver] if installed_ver != "*" else []
-        })
         
-    if not targets:
+        g_id = name.split(":", 1)[0] if ":" in name else ""
+        is_internal_module = (name in local_modules) or (g_id and g_id in local_group_ids)
+        
+        if is_internal_module:
+            local_results.append({
+                "name": name,
+                "declared": declared_ver,
+                "installed": installed_ver,
+                "latest": installed_ver,
+                "latest_same_major": installed_ver,
+                "latest_absolute": installed_ver,
+                "status": "local",
+                "deprecated": None,
+                "error": None,
+                "repo_url": None,
+                "compare_url": None,
+                "releases_url": None
+            })
+        else:
+            remote_targets.append({
+                "name": name,
+                "declared": declared_ver,
+                "installed": [installed_ver] if installed_ver != "*" else [],
+                "custom_registries": custom_registries
+            })
+            
+    if not remote_targets and not local_results:
         print(f"{COLOR_YELLOW}{ICON_WARN} No packages identified to check.{COLOR_RESET}")
         return None, None, 0
         
     start_time = time.time()
-    results = check_all_maven_targets(targets, args.concurrent)
+    results = check_all_maven_targets(remote_targets, args.concurrent) if remote_targets else []
+    results.extend(local_results)
     
     # Check vulnerabilities via OSV if requested
-    if getattr(args, "vuls", False):
+    if getattr(args, "vuls", False) and remote_targets:
         tech_info = TECHNOLOGIES["maven"]
-        osv_vulns = check_osv_vulnerabilities(targets, tech_info["osv_ecosystem"], args.concurrent)
+        osv_vulns = check_osv_vulnerabilities(remote_targets, tech_info["osv_ecosystem"], args.concurrent)
         
         for r in results:
-            key = (r["name"], r["installed"])
-            r["vulnerabilities"] = osv_vulns.get(key, [])
+            if r["status"] != "local":
+                key = (r["name"], r["installed"])
+                r["vulnerabilities"] = osv_vulns.get(key, [])
+            else:
+                r["vulnerabilities"] = []
     else:
         for r in results:
             r["vulnerabilities"] = []

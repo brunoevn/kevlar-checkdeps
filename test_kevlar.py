@@ -2757,7 +2757,7 @@ class TestKevlar(unittest.TestCase):
             '</project>'
         )
 
-        def mock_fetch(group_id, artifact_id, version):
+        def mock_fetch(group_id, artifact_id, version, *args, **kwargs):
             if group_id == "org.example" and artifact_id == "parent-lib":
                 return ET.fromstring(parent_pom_xml)
             return None
