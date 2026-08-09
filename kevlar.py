@@ -158,6 +158,31 @@ SEMVER_REGEX = re.compile(
     r'(?:\+(?P<buildmetadata>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$'
 )
 
+RE_MARKER_TOKEN = re.compile(
+    r'\s*('
+    r'\bnot\s+in\b|\bin\b|'
+    r'==|!=|<=|>=|<|>|===|~=|'
+    r'\band\b|\bor\b|\bnot\b|'
+    r'\(|\)|'
+    r'"[^"]*"|\'[^\']*\'|'
+    r'[a-zA-Z_][a-zA-Z0-9_]*'
+    r')\s*'
+)
+RE_CSPROJ_SLN = re.compile(r'Project\([^)]+\)\s*=\s*"[^"]+"\s*,\s*"([^"]+)"')
+RE_MAVEN_PRERELEASE = re.compile(
+    r'[-.]?(alpha|beta|rc|cr|m|preview|dev|snapshot|milestone)\d*\b',
+    re.IGNORECASE
+)
+RE_GRADLE_CONFIG = re.compile(
+    r'(?:implementation|api|compile|runtimeOnly|testImplementation|testCompile|compileOnly)\s*\(?\s*[\'"]([^\'":]+):([^\'":]+):([^\'":]+)[\'"]'
+)
+RE_GRADLE_MAP1 = re.compile(
+    r'group\s*:\s*[\'"]([^\'"]+)[\'"]\s*,\s*name\s*:\s*[\'"]([^\'"]+)[\'"]\s*,\s*version\s*:\s*[\'"]([^\'"]+)[\'"]'
+)
+RE_GRADLE_MAP2 = re.compile(
+    r'group\s*=\s*[\'"]([^\'"]+)[\'"]\s*,\s*name\s*=\s*[\'"]([^\'"]+)[\'"]\s*,\s*version\s*=\s*[\'"]([^\'"]+)[\'"]'
+)
+
 def init_colors_and_encoding():
     """Enable ANSI escape sequences and adjust icons for stdout encoding compatibility."""
     # 1. Enable virtual terminal processing on Windows for ANSI colors
@@ -2931,20 +2956,10 @@ def compare_versions_marker(left, op, right):
 
 def tokenize_marker(marker_str):
     """Tokenizes a PEP 508 environment marker string."""
-    token_re = re.compile(
-        r'\s*('
-        r'\bnot\s+in\b|\bin\b|'
-        r'==|!=|<=|>=|<|>|===|~=|'
-        r'\band\b|\bor\b|\bnot\b|'
-        r'\(|\)|'
-        r'"[^"]*"|\'[^\']*\'|'
-        r'[a-zA-Z_][a-zA-Z0-9_]*'
-        r')\s*'
-    )
     tokens = []
     pos = 0
     while pos < len(marker_str):
-        match = token_re.match(marker_str, pos)
+        match = RE_MARKER_TOKEN.match(marker_str, pos)
         if not match:
             char = marker_str[pos]
             if char.isspace():
@@ -3826,8 +3841,7 @@ def parse_sln_file(sln_path):
             with open(sln_path, "r", encoding="utf-8-sig", errors="ignore") as f:
                 content = f.read()
                 
-            proj_re = re.compile(r'Project\([^)]+\)\s*=\s*"[^"]+"\s*,\s*"([^"]+)"')
-            matches = proj_re.findall(content)
+            matches = RE_CSPROJ_SLN.findall(content)
             
             for m in matches:
                 norm_path = m.replace("\\", "/")
@@ -4874,17 +4888,13 @@ def check_maven_package(target):
             raise ValueError(f"Failed to fetch metadata from Maven or Google registries: {last_error or 'Not found'}")
             
         stable_versions = []
-        prerelease_pattern = re.compile(
-            r'[-.]?(alpha|beta|rc|cr|m|preview|dev|snapshot|milestone)\d*\b',
-            re.IGNORECASE
-        )
         for v in versions_list:
             v_lower = v.lower()
             is_prerelease = False
             if "snapshot" in v_lower:
                 is_prerelease = True
             else:
-                m = prerelease_pattern.search(v_lower)
+                m = RE_MAVEN_PRERELEASE.search(v_lower)
                 if m:
                     is_prerelease = True
             if not is_prerelease:
@@ -6488,30 +6498,21 @@ def parse_gradle_build(filepath):
             content = f.read()
             
         # Pattern 1: group:artifact:version in configuration calls
-        p1 = re.compile(
-            r'(?:implementation|api|compile|runtimeOnly|testImplementation|testCompile|compileOnly)\s*\(?\s*[\'"]([^\'":]+):([^\'":]+):([^\'":]+)[\'"]'
-        )
-        for m in p1.finditer(content):
+        for m in RE_GRADLE_CONFIG.finditer(content):
             group = m.group(1).strip()
             artifact = m.group(2).strip()
             version = m.group(3).strip()
             dependencies[f"{group}:{artifact}"] = version
             
         # Pattern 2: group: "...", name: "...", version: "..."
-        p2 = re.compile(
-            r'group\s*:\s*[\'"]([^\'"]+)[\'"]\s*,\s*name\s*:\s*[\'"]([^\'"]+)[\'"]\s*,\s*version\s*:\s*[\'"]([^\'"]+)[\'"]'
-        )
-        for m in p2.finditer(content):
+        for m in RE_GRADLE_MAP1.finditer(content):
             group = m.group(1).strip()
             artifact = m.group(2).strip()
             version = m.group(3).strip()
             dependencies[f"{group}:{artifact}"] = version
             
         # Pattern 3: group = "...", name = "...", version = "..."
-        p3 = re.compile(
-            r'group\s*=\s*[\'"]([^\'"]+)[\'"]\s*,\s*name\s*=\s*[\'"]([^\'"]+)[\'"]\s*,\s*version\s*=\s*[\'"]([^\'"]+)[\'"]'
-        )
-        for m in p3.finditer(content):
+        for m in RE_GRADLE_MAP2.finditer(content):
             group = m.group(1).strip()
             artifact = m.group(2).strip()
             version = m.group(3).strip()
