@@ -15,7 +15,7 @@ Designed with a modular and extensible architecture, it supports checking direct
   - **Python (`pip`)**: supporting `requirements.txt` (including `-r` file inclusions, PEP 508 environment markers, and direct `@` URLs), Poetry `poetry.lock` + `pyproject.toml`, Pipenv `Pipfile.lock`, and PDM `pdm.lock`.
   - **.NET (`nuget`)**: supporting C# `.csproj`, VB.NET `.vbproj`, F# `.fsproj`, Solution files (`.sln`), and Central Package Management (`Directory.Packages.props`).
   - **PHP (`php`)**: supporting `composer.json` and `composer.lock`.
-  - **Java (`maven`)**: supporting multi-module `<modules>`, centralized `<dependencyManagement>`, and recursive parent POM properties/dependency inheritance.
+  - **Java (`maven`)**: supporting multi-module `<modules>`, local monorepo module resolution, custom `<repositories>` declared in POMs, centralized `<dependencyManagement>`, recursive parent POM inheritance, and remote transitive resolution via Maven Central / Google Maven.
   - **Java/Kotlin (`gradle`)**: supporting `build.gradle`, `build.gradle.kts`, `gradle.lockfile`, and Version Catalogs `libs.versions.toml`.
   - **Android (`android`)**: prioritizing Google's Maven Registry for Android libraries.
   - **Go (`go`)**: supporting `go.mod`, `go.sum`, and `go.work` workspaces (including module `replace` directives, `exclude`, `retract`, and Go 1.24+ `tool` executable directives).
@@ -200,6 +200,8 @@ python kevlar.py --update
 
 | Argument | Short | Default | Description |
 | --- | --- | --- | --- |
+| `--version` | `-V` | | Show program's version number and exit. |
+| `--help` | `-h` | | Show help message and exit. |
 | `--tech` | `-t` | `"auto"` | The package manager / technology to check. Choices: `npm`, `pip`, `nuget`, `php`, `maven`, `go`, `rust`, `ruby`, `gradle`, `android`, `auto`. When omitted, it automatically detects the technology at the target `--path`. |
 | `--path` | `-p` | `.` | Directory containing the package files (e.g. `.csproj`, `composer.json`, `package.json`, `pom.xml`, `go.mod`, `requirements.txt`, `Cargo.toml`, `Gemfile`, `build.gradle`, `libs.versions.toml`, etc.). |
 | `--vuls` | `-v` | `False` | Enable security vulnerability queries via Google OSV API. |
