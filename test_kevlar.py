@@ -109,6 +109,18 @@ class TestKevlar(unittest.TestCase):
         # Up to date
         self.assertEqual(kevlar.determine_update_type("1.2.3", "1.2.3", "1.2.3"), "up-to-date")
 
+    def test_calculate_cvss2_score_exhaustive(self):
+        vectors = {
+            "AV:L/AC:H/Au:M/C:N/I:N/A:N": 0.0,
+            "AV:N/AC:L/Au:N/C:C/I:C/A:C": 10.0,
+            "AV:A/AC:M/Au:S/C:P/I:P/A:P": 4.9,
+            "AV:L/AC:L/Au:N/C:C/I:N/A:N": 4.9,
+            "AV:N/AC:M/Au:N/C:N/I:P/A:N": 4.3,
+            "AV:N/AC:L/Au:N/C:N/I:N/A:C": 7.8
+        }
+        for vector, expected_score in vectors.items():
+            self.assertEqual(kevlar.calculate_cvss2_score(vector), expected_score)
+
     def test_cvss_calculations(self):
         # CVSS v2
         cvss2_vector = "AV:N/AC:L/Au:N/C:P/I:P/A:P"
@@ -125,12 +137,36 @@ class TestKevlar(unittest.TestCase):
         score4 = kevlar.calculate_cvss4_score_approx(cvss4_vector)
         self.assertAlmostEqual(score4, 9.8, places=1)
 
+        # CVSS v3 edge cases and missing values
+        cvss3_vector_scope_c = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H"
+        score3_scope_c = kevlar.calculate_cvss3_score(cvss3_vector_scope_c)
+        self.assertAlmostEqual(score3_scope_c, 10.0, places=1)
+        self.assertAlmostEqual(kevlar.calculate_cvss3_score("CVSS:3.1/AV:P/AC:H/PR:H/UI:R/S:U/C:N/I:N/A:N"), 0.0, places=1)
+        # CVSS v4 approximation edge cases mapping to v3 equivalents
+        # AT:P -> AC:H
+        cvss4_at_p = "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"
+        self.assertAlmostEqual(kevlar.calculate_cvss4_score_approx(cvss4_at_p), 8.1, places=1)
+
+        # UI:A/R -> UI:R
+        cvss4_ui_a = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:A/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"
+        self.assertAlmostEqual(kevlar.calculate_cvss4_score_approx(cvss4_ui_a), 8.7, places=1)
+
+        # SC/SI/SA -> S:C
+        cvss4_sc_h = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:H/SI:N/SA:N"
+        self.assertAlmostEqual(kevlar.calculate_cvss4_score_approx(cvss4_sc_h), 10.0, places=1)
+
+        cvss4_si_l = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:L/SA:N"
+        self.assertAlmostEqual(kevlar.calculate_cvss4_score_approx(cvss4_si_l), 10.0, places=1)
+
+        self.assertIsNone(kevlar.calculate_cvss4_score_approx(None))
+
         # Malformed vector tests (no colons, multiple colons, safe ignore checks)
         self.assertEqual(kevlar.calculate_cvss2_score("AVN/AC:L/Au:N/C:P/I:P/A:P"), 7.5)  # AVN has no colon, ignored, AV falls back to 1.0 (N)
         self.assertEqual(kevlar.calculate_cvss2_score("AV:N:extra/AC:L/Au:N/C:P/I:P/A:P"), 7.5) # AV:N:extra has multiple colons, ignored, AV falls back to 1.0 (N)
         self.assertEqual(kevlar.calculate_cvss2_score("malformed_vector_with_no_colons"), 0.0) # all ignored, impact=0, score=0.0
         self.assertIsNone(kevlar.calculate_cvss2_score(None)) # Exception caught, returns None
 
+        # CVSS v3 malformed vector tests
         self.assertEqual(kevlar.calculate_cvss3_score("CVSS:3.1/AVN/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"), 9.8) # AVN ignored, AV falls back to 0.85 (N)
         self.assertEqual(kevlar.calculate_cvss3_score("CVSS:3.1/AV:N:extra/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"), 9.8) # AV:N:extra ignored, AV falls back to 0.85 (N)
         self.assertEqual(kevlar.calculate_cvss3_score("malformed_vector_with_no_colons"), 0.0) # all ignored, impact=0, score=0.0
