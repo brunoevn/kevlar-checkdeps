@@ -125,12 +125,19 @@ class TestKevlar(unittest.TestCase):
         score4 = kevlar.calculate_cvss4_score_approx(cvss4_vector)
         self.assertAlmostEqual(score4, 9.8, places=1)
 
+        # CVSS v3 edge cases and missing values
+        cvss3_vector_scope_c = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H"
+        score3_scope_c = kevlar.calculate_cvss3_score(cvss3_vector_scope_c)
+        self.assertAlmostEqual(score3_scope_c, 10.0, places=1)
+        self.assertAlmostEqual(kevlar.calculate_cvss3_score("CVSS:3.1/AV:P/AC:H/PR:H/UI:R/S:U/C:N/I:N/A:N"), 0.0, places=1)
+
         # Malformed vector tests (no colons, multiple colons, safe ignore checks)
         self.assertEqual(kevlar.calculate_cvss2_score("AVN/AC:L/Au:N/C:P/I:P/A:P"), 7.5)  # AVN has no colon, ignored, AV falls back to 1.0 (N)
         self.assertEqual(kevlar.calculate_cvss2_score("AV:N:extra/AC:L/Au:N/C:P/I:P/A:P"), 7.5) # AV:N:extra has multiple colons, ignored, AV falls back to 1.0 (N)
         self.assertEqual(kevlar.calculate_cvss2_score("malformed_vector_with_no_colons"), 0.0) # all ignored, impact=0, score=0.0
         self.assertIsNone(kevlar.calculate_cvss2_score(None)) # Exception caught, returns None
 
+        # CVSS v3 malformed vector tests
         self.assertEqual(kevlar.calculate_cvss3_score("CVSS:3.1/AVN/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"), 9.8) # AVN ignored, AV falls back to 0.85 (N)
         self.assertEqual(kevlar.calculate_cvss3_score("CVSS:3.1/AV:N:extra/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"), 9.8) # AV:N:extra ignored, AV falls back to 0.85 (N)
         self.assertEqual(kevlar.calculate_cvss3_score("malformed_vector_with_no_colons"), 0.0) # all ignored, impact=0, score=0.0
