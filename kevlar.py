@@ -11562,29 +11562,18 @@ def print_banner():
 """
     print(banner)
 
-def main():
-    init_colors_and_encoding()
-    
-    # Check for version/update flags first to avoid required arguments error
-    if "--version" in sys.argv or "-V" in sys.argv:
-        print(f"kevlar CheckDeps v{VERSION}")
-        sys.exit(0)
-    elif "--update" in sys.argv:
-        check_for_updates()
-        sys.exit(0)
-        
-    print_banner()
-    
+
+def setup_argparse():
     parser = argparse.ArgumentParser(
         description="Kevlar CheckDeps: Generic Dependency Checker & SCA Tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         add_help=False,
-        epilog="""
+        epilog='''
 Examples:
   python kevlar.py --tech npm --path ./Backend
   python kevlar.py --tech npm --path ./Frontend --all --show-all
   python kevlar.py --tech npm --output report.json
-        """
+        '''
     )
     
     parser.add_argument(
@@ -11687,246 +11676,211 @@ Examples:
         help="Print detailed stack trace and internal error messages to stdout during execution."
     )
     
-    args = parser.parse_args()
-    
-    global DEBUG_MODE
-    DEBUG_MODE = args.debug
-    
-    # CLI Validation
-    if not args.scan_all and not args.tech:
-        args.tech = "auto"
-        
-    if args.scan_all:
-        if args.output:
-            parser.error("cannot specify --output with --scan-all. The report is automatically generated, format is controlled via --format")
-        if not args.format:
-            parser.error("the following argument is required when using --scan-all: --format")
-    else:
-        if args.format:
-            parser.error("cannot specify --format without --scan-all. For single-project scan, specify output filename via --output")
-            
-    if args.scan_all:
-        print(f"{COLOR_GRAY}{ICON_INFO} Scanning recursively for projects in: {args.path}{COLOR_RESET}")
-        projects = find_projects_recursively(args.path)
-        if not projects:
-            print(f"{COLOR_YELLOW}{ICON_WARN} No projects detected in path: {args.path}{COLOR_RESET}")
-            sys.exit(0)
-            
-        if args.tech:
-            filtered_projects = []
-            for project_path, techs in projects:
-                if args.tech in techs:
-                    filtered_projects.append((project_path, [args.tech]))
-            projects = filtered_projects
-            if not projects:
-                print(f"{COLOR_YELLOW}{ICON_WARN} No projects matching technology '{args.tech}' found in path: {args.path}{COLOR_RESET}")
-                sys.exit(0)
-                
-        print(f"{COLOR_GRAY}{ICON_INFO} Found {len(projects)} project(s) to scan.{COLOR_RESET}")
-        
-        combined_results = []
-        combined_dependencies = {}
-        combined_devDependencies = {}
-        combined_all_direct = {}
-        total_elapsed = 0.0
-        sarif_runs = []
-        
-        original_path = args.path
-        original_tech = getattr(args, "tech", None)
-        
-        generated_report_basenames = set()
-        
-        for project_path, techs in projects:
-            for tech in techs:
-                tech_info = TECHNOLOGIES.get(tech)
-                if not tech_info:
-                    continue
-                
-                print()
-                print("=" * 80)
-                print(f"Project: {project_path} [{tech}]")
-                print("=" * 80)
-                
-                try:
-                    args.path = project_path
-                    args.tech = tech
-                    results, pkg_data, elapsed = tech_info["runner"](args)
-                    
-                    if not results:
-                        continue
-                        
-                    for r in results:
-                        r["project_path"] = project_path
-                        r["technology"] = tech
-                        
-                    populate_remediation_recommendations(results, project_path)
-                    validate_configuration_drift(results)
-                    apply_vulnerability_suppressions(results, args.suppress, project_path=project_path)
-                    results = sorted(results, key=lambda x: x["name"].lower())
-                    
-                    print_results_table(results, pkg_data, args.show_all, args.vuls, getattr(args, "no_show_console", False))
-                    print_summary(results, elapsed, args.vuls)
-                    
-                    # Generate report file(s) for this project folder with unique filename collision resolution
-                    rel_path = os.path.relpath(project_path, original_path)
-                    if rel_path == ".":
-                        proj_dirname = os.path.basename(os.path.abspath(project_path))
-                        if not proj_dirname:
-                            proj_dirname = "project"
-                    else:
-                        proj_dirname = rel_path
-                        
-                    proj_dirname = proj_dirname.replace("/", "_").replace("\\", "_")
-                    safe_proj_dirname = re.sub(r'[^\w\-]', '_', proj_dirname)
-                    safe_proj_dirname = re.sub(r'_{2,}', '_', safe_proj_dirname).strip("_")
-                    
-                    base_safe_name = safe_proj_dirname
-                    if base_safe_name in generated_report_basenames:
-                        candidate = f"{base_safe_name}-{tech}"
-                        if candidate in generated_report_basenames:
-                            counter = 2
-                            while f"{candidate}-{counter}" in generated_report_basenames:
-                                counter += 1
-                            safe_proj_dirname = f"{candidate}-{counter}"
-                        else:
-                            safe_proj_dirname = candidate
-                            
-                    generated_report_basenames.add(safe_proj_dirname)
-                    
-                    if args.format in ("html", "both"):
-                        proj_html_filepath = f"report-{safe_proj_dirname}.html"
-                        export_html_report(results, pkg_data, proj_html_filepath, args.vuls)
-                        
-                    if args.format in ("json", "both"):
-                        proj_json_filepath = f"report-{safe_proj_dirname}.json"
-                        export_json_report(results, proj_json_filepath)
-                        
-                    if args.format == "sarif":
-                        run_obj = generate_sarif_run(results)
-                        sarif_runs.append(run_obj)
-                    
-                    combined_results.extend(results)
-                    total_elapsed += elapsed
-                    
-                    if pkg_data:
-                        combined_dependencies.update(pkg_data.get("dependencies", {}))
-                        combined_devDependencies.update(pkg_data.get("devDependencies", {}))
-                        combined_all_direct.update(pkg_data.get("all_direct", {}))
-                except Exception as e:
-                    print(f"{COLOR_RED}{ICON_ERROR} Error scanning project {project_path} with {tech}: {e}{COLOR_RESET}")
-                finally:
-                    args.path = original_path
-                    args.tech = original_tech
-                    
-        if not combined_results:
-            print(f"{COLOR_YELLOW}{ICON_WARN} No dependency check results collected from projects.{COLOR_RESET}")
-            sys.exit(0)
-            
-        combined_pkg_data = {
-            "dependencies": combined_dependencies,
-            "devDependencies": combined_devDependencies,
-            "all_direct": combined_all_direct
-        }
-        
-        combined_results = sorted(combined_results, key=lambda x: x["name"].lower())
-        
-        print()
-        print("=" * 80)
-        print("CONSOLIDATED SUMMARY")
-        print("=" * 80)
-        print_summary(combined_results, total_elapsed, args.vuls, projects_count=len(projects))
-        
-        if args.format == "sarif" and sarif_runs:
-            consolidated_path = "report-consolidated.sarif"
-            try:
-                consolidated_log = {
-                    "$schema": "https://schemastore.org/json/schema/sarif-2.1.0-rtm.5.json",
-                    "version": "2.1.0",
-                    "runs": sarif_runs
-                }
-                with open(consolidated_path, "w", encoding="utf-8") as f:
-                    json.dump(consolidated_log, f, indent=2)
-                print(f"\n{COLOR_GREEN}{ICON_OK} Consolidated SARIF report successfully exported to {consolidated_path}{COLOR_RESET}")
-            except Exception as e:
-                print(f"\n{COLOR_RED}{ICON_ERROR} Failed to export consolidated SARIF report: {e}{COLOR_RESET}")
-        
-        failed = False
-        if args.fail_on_vulns and check_pipeline_failure(combined_results, args.fail_on_vulns):
-            failed = True
-        if args.fail_on_deprecated and check_pipeline_failure_deprecated(combined_results, args.fail_on_deprecated):
-            failed = True
-        if args.fail_on_outdated and check_pipeline_failure_outdated(combined_results, args.fail_on_outdated):
-            failed = True
-            
-        if failed:
-            sys.exit(1)
-            
+    return parser
+
+def run_scan_all(args, parser):
+    print(f"{COLOR_GRAY}{ICON_INFO} Scanning recursively for projects in: {args.path}{COLOR_RESET}")
+    projects = find_projects_recursively(args.path)
+    if not projects:
+        print(f"{COLOR_YELLOW}{ICON_WARN} No projects detected in path: {args.path}{COLOR_RESET}")
         sys.exit(0)
         
-    if args.tech == "auto":
-        detected_techs = detect_technologies(args.path)
-        if not detected_techs:
-            print(f"{COLOR_RED}{ICON_ERROR} No technology detected in path: {args.path}{COLOR_RESET}")
-            sys.exit(1)
+    if args.tech:
+        filtered_projects = []
+        for project_path, techs in projects:
+            if args.tech in techs:
+                filtered_projects.append((project_path, [args.tech]))
+        projects = filtered_projects
+        if not projects:
+            print(f"{COLOR_YELLOW}{ICON_WARN} No projects matching technology '{args.tech}' found in path: {args.path}{COLOR_RESET}")
+            sys.exit(0)
             
-        print(f"{COLOR_GRAY}{ICON_INFO} Automatically detected technology: {', '.join(detected_techs)}{COLOR_RESET}")
-        
-        combined_results = []
-        combined_dependencies = {}
-        combined_devDependencies = {}
-        combined_all_direct = {}
-        total_elapsed = 0.0
-        
-        original_tech = args.tech
-        try:
-            for tech in detected_techs:
-                tech_info = TECHNOLOGIES.get(tech)
-                if not tech_info:
-                    continue
-                
-                if len(detected_techs) > 1:
-                    print()
-                    print("-" * 50)
-                    print(f"Running check for: {tech}")
-                    print("-" * 50)
-                    
+    print(f"{COLOR_GRAY}{ICON_INFO} Found {len(projects)} project(s) to scan.{COLOR_RESET}")
+
+    combined_results = []
+    combined_dependencies = {}
+    combined_devDependencies = {}
+    combined_all_direct = {}
+    total_elapsed = 0.0
+    sarif_runs = []
+
+    original_path = args.path
+    original_tech = getattr(args, "tech", None)
+
+    generated_report_basenames = set()
+
+    for project_path, techs in projects:
+        for tech in techs:
+            tech_info = TECHNOLOGIES.get(tech)
+            if not tech_info:
+                continue
+
+            print()
+            print("=" * 80)
+            print(f"Project: {project_path} [{tech}]")
+            print("=" * 80)
+
+            try:
+                args.path = project_path
                 args.tech = tech
-                results_tech, pkg_data_tech, elapsed_tech = tech_info["runner"](args)
+                results, pkg_data, elapsed = tech_info["runner"](args)
                 
-                if not results_tech:
+                if not results:
                     continue
                     
-                for r in results_tech:
-                    r["project_path"] = args.path
+                for r in results:
+                    r["project_path"] = project_path
                     r["technology"] = tech
                     
-                combined_results.extend(results_tech)
-                total_elapsed += elapsed_tech
-                
-                if pkg_data_tech:
-                    combined_dependencies.update(pkg_data_tech.get("dependencies", {}))
-                    combined_devDependencies.update(pkg_data_tech.get("devDependencies", {}))
-                    combined_all_direct.update(pkg_data_tech.get("all_direct", {}))
-        finally:
-            args.tech = original_tech
-            
-        combined_pkg_data = {
-            "dependencies": combined_dependencies,
-            "devDependencies": combined_devDependencies,
-            "all_direct": combined_all_direct
-        }
+                populate_remediation_recommendations(results, project_path)
+                validate_configuration_drift(results)
+                apply_vulnerability_suppressions(results, args.suppress, project_path=project_path)
+                results = sorted(results, key=lambda x: x["name"].lower())
+
+                print_results_table(results, pkg_data, args.show_all, args.vuls, getattr(args, "no_show_console", False))
+                print_summary(results, elapsed, args.vuls)
+
+                rel_path = os.path.relpath(project_path, original_path)
+                if rel_path == ".":
+                    proj_dirname = os.path.basename(os.path.abspath(project_path))
+                    if not proj_dirname:
+                        proj_dirname = "project"
+                else:
+                    proj_dirname = rel_path
+                    
+                proj_dirname = proj_dirname.replace("/", "_").replace("\\", "_")
+                safe_proj_dirname = re.sub(r'[^\w\-]', '_', proj_dirname)
+                safe_proj_dirname = re.sub(r'_{2,}', '_', safe_proj_dirname).strip("_")
+
+                base_safe_name = safe_proj_dirname
+                if base_safe_name in generated_report_basenames:
+                    candidate = f"{base_safe_name}-{tech}"
+                    if candidate in generated_report_basenames:
+                        counter = 2
+                        while f"{candidate}-{counter}" in generated_report_basenames:
+                            counter += 1
+                        safe_proj_dirname = f"{candidate}-{counter}"
+                    else:
+                        safe_proj_dirname = candidate
+                        
+                generated_report_basenames.add(safe_proj_dirname)
+
+                if args.format in ("html", "both"):
+                    proj_html_filepath = f"report-{safe_proj_dirname}.html"
+                    export_html_report(results, pkg_data, proj_html_filepath, args.vuls)
+                    
+                if args.format in ("json", "both"):
+                    proj_json_filepath = f"report-{safe_proj_dirname}.json"
+                    export_json_report(results, proj_json_filepath)
+                    
+                if args.format == "sarif":
+                    run_obj = generate_sarif_run(results)
+                    sarif_runs.append(run_obj)
+
+                combined_results.extend(results)
+                total_elapsed += elapsed
+
+                if pkg_data:
+                    combined_dependencies.update(pkg_data.get("dependencies", {}))
+                    combined_devDependencies.update(pkg_data.get("devDependencies", {}))
+                    combined_all_direct.update(pkg_data.get("all_direct", {}))
+            except Exception as e:
+                print(f"{COLOR_RED}{ICON_ERROR} Error scanning project {project_path} with {tech}: {e}{COLOR_RESET}")
+            finally:
+                args.path = original_path
+                args.tech = original_tech
+
+    if not combined_results:
+        print(f"{COLOR_YELLOW}{ICON_WARN} No dependency check results collected from projects.{COLOR_RESET}")
+        sys.exit(0)
         
-        results = combined_results
-        pkg_data = combined_pkg_data
-        elapsed = total_elapsed
-    else:
-        tech_info = TECHNOLOGIES.get(args.tech)
-        if not tech_info:
-            print(f"{COLOR_RED}{ICON_ERROR} Unsupported technology: {args.tech}{COLOR_RESET}")
-            sys.exit(1)
+    combined_pkg_data = {
+        "dependencies": combined_dependencies,
+        "devDependencies": combined_devDependencies,
+        "all_direct": combined_all_direct
+    }
+
+    combined_results = sorted(combined_results, key=lambda x: x["name"].lower())
+
+    print()
+    print("=" * 80)
+    print("CONSOLIDATED SUMMARY")
+    print("=" * 80)
+    print_summary(combined_results, total_elapsed, args.vuls, projects_count=len(projects))
+
+    if args.format == "sarif" and sarif_runs:
+        consolidated_path = "report-consolidated.sarif"
+        try:
+            consolidated_log = {
+                "$schema": "https://schemastore.org/json/schema/sarif-2.1.0-rtm.5.json",
+                "version": "2.1.0",
+                "runs": sarif_runs
+            }
+            with open(consolidated_path, "w", encoding="utf-8") as f:
+                json.dump(consolidated_log, f, indent=2)
+            print(f"\n{COLOR_GREEN}{ICON_OK} Consolidated SARIF report successfully exported to {consolidated_path}{COLOR_RESET}")
+        except Exception as e:
+            print(f"\n{COLOR_RED}{ICON_ERROR} Failed to export consolidated SARIF report: {e}{COLOR_RESET}")
+
+    process_pipeline_failures(combined_results, args)
+    sys.exit(0)
+
+def run_auto_tech(args):
+    detected_techs = detect_technologies(args.path)
+    if not detected_techs:
+        print(f"{COLOR_RED}{ICON_ERROR} No technology detected in path: {args.path}{COLOR_RESET}")
+        sys.exit(1)
+
+    print(f"{COLOR_GRAY}{ICON_INFO} Automatically detected technology: {', '.join(detected_techs)}{COLOR_RESET}")
+
+    combined_results = []
+    combined_dependencies = {}
+    combined_devDependencies = {}
+    combined_all_direct = {}
+    total_elapsed = 0.0
+
+    original_tech = args.tech
+    try:
+        for tech in detected_techs:
+            tech_info = TECHNOLOGIES.get(tech)
+            if not tech_info:
+                continue
+
+            if len(detected_techs) > 1:
+                print()
+                print("-" * 50)
+                print(f"Running check for: {tech}")
+                print("-" * 50)
+                
+            args.tech = tech
+            results_tech, pkg_data_tech, elapsed_tech = tech_info["runner"](args)
+
+            if not results_tech:
+                continue
+                
+            for r in results_tech:
+                r["project_path"] = args.path
+                r["technology"] = tech
+                
+            combined_results.extend(results_tech)
+            total_elapsed += elapsed_tech
             
-        results, pkg_data, elapsed = tech_info["runner"](args)
+            if pkg_data_tech:
+                combined_dependencies.update(pkg_data_tech.get("dependencies", {}))
+                combined_devDependencies.update(pkg_data_tech.get("devDependencies", {}))
+                combined_all_direct.update(pkg_data_tech.get("all_direct", {}))
+    finally:
+        args.tech = original_tech
+        
+    combined_pkg_data = {
+        "dependencies": combined_dependencies,
+        "devDependencies": combined_devDependencies,
+        "all_direct": combined_all_direct
+    }
     
+    return combined_results, combined_pkg_data, total_elapsed
+
+def process_single_project_results(results, pkg_data, elapsed, args):
     if not results:
         sys.exit(0)
         
@@ -11958,6 +11912,9 @@ Examples:
         else:
             print(f"{COLOR_YELLOW}{ICON_WARN} Unknown output format. Export supports .json, .md, .html, or .sarif extension.{COLOR_RESET}")
             
+    process_pipeline_failures(results, args)
+
+def process_pipeline_failures(results, args):
     failed = False
     if args.fail_on_vulns and check_pipeline_failure(results, args.fail_on_vulns):
         failed = True
@@ -11968,6 +11925,52 @@ Examples:
         
     if failed:
         sys.exit(1)
+
+def main():
+    init_colors_and_encoding()
+
+    if "--version" in sys.argv or "-V" in sys.argv:
+        print(f"kevlar CheckDeps v{VERSION}")
+        sys.exit(0)
+    elif "--update" in sys.argv:
+        check_for_updates()
+        sys.exit(0)
+
+    print_banner()
+
+    parser = setup_argparse()
+    args = parser.parse_args()
+
+    global DEBUG_MODE
+    DEBUG_MODE = args.debug
+
+    if not args.scan_all and not args.tech:
+        args.tech = "auto"
+
+    if args.scan_all:
+        if args.output:
+            parser.error("cannot specify --output with --scan-all. The report is automatically generated, format is controlled via --format")
+        if not args.format:
+            parser.error("the following argument is required when using --scan-all: --format")
+    else:
+        if args.format:
+            parser.error("cannot specify --format without --scan-all. For single-project scan, specify output filename via --output")
+
+    if args.scan_all:
+        run_scan_all(args, parser)
+        return
+
+    if args.tech == "auto":
+        results, pkg_data, elapsed = run_auto_tech(args)
+    else:
+        tech_info = TECHNOLOGIES.get(args.tech)
+        if not tech_info:
+            print(f"{COLOR_RED}{ICON_ERROR} Unsupported technology: {args.tech}{COLOR_RESET}")
+            sys.exit(1)
+
+        results, pkg_data, elapsed = tech_info["runner"](args)
+
+    process_single_project_results(results, pkg_data, elapsed, args)
 
 if __name__ == "__main__":
     main()
