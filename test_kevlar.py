@@ -109,6 +109,18 @@ class TestKevlar(unittest.TestCase):
         # Up to date
         self.assertEqual(kevlar.determine_update_type("1.2.3", "1.2.3", "1.2.3"), "up-to-date")
 
+    def test_calculate_cvss2_score_exhaustive(self):
+        vectors = {
+            "AV:L/AC:H/Au:M/C:N/I:N/A:N": 0.0,
+            "AV:N/AC:L/Au:N/C:C/I:C/A:C": 10.0,
+            "AV:A/AC:M/Au:S/C:P/I:P/A:P": 4.9,
+            "AV:L/AC:L/Au:N/C:C/I:N/A:N": 4.9,
+            "AV:N/AC:M/Au:N/C:N/I:P/A:N": 4.3,
+            "AV:N/AC:L/Au:N/C:N/I:N/A:C": 7.8
+        }
+        for vector, expected_score in vectors.items():
+            self.assertEqual(kevlar.calculate_cvss2_score(vector), expected_score)
+
     def test_cvss_calculations(self):
         # CVSS v2
         cvss2_vector = "AV:N/AC:L/Au:N/C:P/I:P/A:P"
