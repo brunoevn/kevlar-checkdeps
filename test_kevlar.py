@@ -137,6 +137,24 @@ class TestKevlar(unittest.TestCase):
         score4 = kevlar.calculate_cvss4_score_approx(cvss4_vector)
         self.assertAlmostEqual(score4, 9.8, places=1)
 
+        # CVSS v4 approximation edge cases mapping to v3 equivalents
+        # AT:P -> AC:H
+        cvss4_at_p = "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"
+        self.assertAlmostEqual(kevlar.calculate_cvss4_score_approx(cvss4_at_p), 8.1, places=1)
+
+        # UI:A/R -> UI:R
+        cvss4_ui_a = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:A/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"
+        self.assertAlmostEqual(kevlar.calculate_cvss4_score_approx(cvss4_ui_a), 8.7, places=1)
+
+        # SC/SI/SA -> S:C
+        cvss4_sc_h = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:H/SI:N/SA:N"
+        self.assertAlmostEqual(kevlar.calculate_cvss4_score_approx(cvss4_sc_h), 10.0, places=1)
+
+        cvss4_si_l = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:L/SA:N"
+        self.assertAlmostEqual(kevlar.calculate_cvss4_score_approx(cvss4_si_l), 10.0, places=1)
+
+        self.assertIsNone(kevlar.calculate_cvss4_score_approx(None))
+
         # Malformed vector tests (no colons, multiple colons, safe ignore checks)
         self.assertEqual(kevlar.calculate_cvss2_score("AVN/AC:L/Au:N/C:P/I:P/A:P"), 7.5)  # AVN has no colon, ignored, AV falls back to 1.0 (N)
         self.assertEqual(kevlar.calculate_cvss2_score("AV:N:extra/AC:L/Au:N/C:P/I:P/A:P"), 7.5) # AV:N:extra has multiple colons, ignored, AV falls back to 1.0 (N)
