@@ -50,7 +50,7 @@ sys.stderr = SafeWriter(sys.stderr)
 # Global lock to protect concurrent console writes (sys.stdout, sys.stderr, print)
 console_lock = threading.Lock()
 
-VERSION = "1.10.5"
+VERSION = "1.10.6"
 
 # External APIs Configuration
 URL_NPM_REGISTRY = "https://registry.npmjs.org/"
@@ -156,6 +156,31 @@ SEMVER_REGEX = re.compile(
     r'^v?(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)'
     r'(?:-(?P<prerelease>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?'
     r'(?:\+(?P<buildmetadata>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$'
+)
+
+RE_MARKER_TOKEN = re.compile(
+    r'\s*('
+    r'\bnot\s+in\b|\bin\b|'
+    r'==|!=|<=|>=|<|>|===|~=|'
+    r'\band\b|\bor\b|\bnot\b|'
+    r'\(|\)|'
+    r'"[^"]*"|\'[^\']*\'|'
+    r'[a-zA-Z_][a-zA-Z0-9_]*'
+    r')\s*'
+)
+RE_CSPROJ_SLN = re.compile(r'Project\([^)]+\)\s*=\s*"[^"]+"\s*,\s*"([^"]+)"')
+RE_MAVEN_PRERELEASE = re.compile(
+    r'[-.]?(alpha|beta|rc|cr|m|preview|dev|snapshot|milestone)\d*\b',
+    re.IGNORECASE
+)
+RE_GRADLE_CONFIG = re.compile(
+    r'(?:implementation|api|compile|runtimeOnly|testImplementation|testCompile|compileOnly)\s*\(?\s*[\'"]([^\'":]+):([^\'":]+):([^\'":]+)[\'"]'
+)
+RE_GRADLE_MAP1 = re.compile(
+    r'group\s*:\s*[\'"]([^\'"]+)[\'"]\s*,\s*name\s*:\s*[\'"]([^\'"]+)[\'"]\s*,\s*version\s*:\s*[\'"]([^\'"]+)[\'"]'
+)
+RE_GRADLE_MAP2 = re.compile(
+    r'group\s*=\s*[\'"]([^\'"]+)[\'"]\s*,\s*name\s*=\s*[\'"]([^\'"]+)[\'"]\s*,\s*version\s*=\s*[\'"]([^\'"]+)[\'"]'
 )
 
 def init_colors_and_encoding():
@@ -2931,20 +2956,10 @@ def compare_versions_marker(left, op, right):
 
 def tokenize_marker(marker_str):
     """Tokenizes a PEP 508 environment marker string."""
-    token_re = re.compile(
-        r'\s*('
-        r'\bnot\s+in\b|\bin\b|'
-        r'==|!=|<=|>=|<|>|===|~=|'
-        r'\band\b|\bor\b|\bnot\b|'
-        r'\(|\)|'
-        r'"[^"]*"|\'[^\']*\'|'
-        r'[a-zA-Z_][a-zA-Z0-9_]*'
-        r')\s*'
-    )
     tokens = []
     pos = 0
     while pos < len(marker_str):
-        match = token_re.match(marker_str, pos)
+        match = RE_MARKER_TOKEN.match(marker_str, pos)
         if not match:
             char = marker_str[pos]
             if char.isspace():
@@ -3826,8 +3841,7 @@ def parse_sln_file(sln_path):
             with open(sln_path, "r", encoding="utf-8-sig", errors="ignore") as f:
                 content = f.read()
                 
-            proj_re = re.compile(r'Project\([^)]+\)\s*=\s*"[^"]+"\s*,\s*"([^"]+)"')
-            matches = proj_re.findall(content)
+            matches = RE_CSPROJ_SLN.findall(content)
             
             for m in matches:
                 norm_path = m.replace("\\", "/")
@@ -4874,17 +4888,13 @@ def check_maven_package(target):
             raise ValueError(f"Failed to fetch metadata from Maven or Google registries: {last_error or 'Not found'}")
             
         stable_versions = []
-        prerelease_pattern = re.compile(
-            r'[-.]?(alpha|beta|rc|cr|m|preview|dev|snapshot|milestone)\d*\b',
-            re.IGNORECASE
-        )
         for v in versions_list:
             v_lower = v.lower()
             is_prerelease = False
             if "snapshot" in v_lower:
                 is_prerelease = True
             else:
-                m = prerelease_pattern.search(v_lower)
+                m = RE_MAVEN_PRERELEASE.search(v_lower)
                 if m:
                     is_prerelease = True
             if not is_prerelease:
@@ -6232,14 +6242,29 @@ def check_ruby_package(target):
                     if not item.get("prerelease"):
                         stable_versions.append(v_num)
             valid_versions = stable_versions if stable_versions else all_versions
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                raise
+            try:
+                url_fallback = f"{URL_RUBY_REGISTRY}{urllib.parse.quote(name)}.json"
+                req_fb = urllib.request.Request(url_fallback)
+                with safe_urlopen(req_fb, timeout=10) as response:
+                    data_fb = json.loads(response.read().decode("utf-8"))
+                latest_version = data_fb.get("version")
+                valid_versions = [latest_version] if latest_version else []
+            except Exception:
+                valid_versions = []
         except Exception:
             # Fallback to single latest version endpoint
-            url_fallback = f"{URL_RUBY_REGISTRY}{urllib.parse.quote(name)}.json"
-            req_fb = urllib.request.Request(url_fallback)
-            with safe_urlopen(req_fb, timeout=10) as response:
-                data_fb = json.loads(response.read().decode("utf-8"))
-            latest_version = data_fb.get("version")
-            valid_versions = [latest_version] if latest_version else []
+            try:
+                url_fallback = f"{URL_RUBY_REGISTRY}{urllib.parse.quote(name)}.json"
+                req_fb = urllib.request.Request(url_fallback)
+                with safe_urlopen(req_fb, timeout=10) as response:
+                    data_fb = json.loads(response.read().decode("utf-8"))
+                latest_version = data_fb.get("version")
+                valid_versions = [latest_version] if latest_version else []
+            except Exception:
+                valid_versions = []
             
         for ver_str in versions_to_check:
             clean_ver = re.sub(r'^[^\d]*', '', ver_str) if ver_str else "0.0.0"
@@ -6284,6 +6309,38 @@ def check_ruby_package(target):
                 "compare_url": compare_url,
                 "releases_url": releases_url
             })
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            for ver_str in versions_to_check:
+                clean_ver = re.sub(r'^[^\d]*', '', ver_str) if ver_str else "0.0.0"
+                if not clean_ver:
+                    clean_ver = "0.0.0"
+                results.append({
+                    "name": name,
+                    "declared": declared,
+                    "installed": clean_ver,
+                    "latest": "Local",
+                    "latest_same_major": None,
+                    "latest_absolute": None,
+                    "status": "local",
+                    "deprecated": False,
+                    "error": None,
+                    "repo_url": None,
+                    "compare_url": None,
+                    "releases_url": None
+                })
+        else:
+            error_msg = f"HTTP {e.code}"
+            for ver_str in versions_to_check:
+                results.append({
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": None,
+                    "status": "error",
+                    "deprecated": False,
+                    "error": error_msg
+                })
     except Exception as e:
         for ver_str in versions_to_check:
             results.append({
@@ -6488,30 +6545,21 @@ def parse_gradle_build(filepath):
             content = f.read()
             
         # Pattern 1: group:artifact:version in configuration calls
-        p1 = re.compile(
-            r'(?:implementation|api|compile|runtimeOnly|testImplementation|testCompile|compileOnly)\s*\(?\s*[\'"]([^\'":]+):([^\'":]+):([^\'":]+)[\'"]'
-        )
-        for m in p1.finditer(content):
+        for m in RE_GRADLE_CONFIG.finditer(content):
             group = m.group(1).strip()
             artifact = m.group(2).strip()
             version = m.group(3).strip()
             dependencies[f"{group}:{artifact}"] = version
             
         # Pattern 2: group: "...", name: "...", version: "..."
-        p2 = re.compile(
-            r'group\s*:\s*[\'"]([^\'"]+)[\'"]\s*,\s*name\s*:\s*[\'"]([^\'"]+)[\'"]\s*,\s*version\s*:\s*[\'"]([^\'"]+)[\'"]'
-        )
-        for m in p2.finditer(content):
+        for m in RE_GRADLE_MAP1.finditer(content):
             group = m.group(1).strip()
             artifact = m.group(2).strip()
             version = m.group(3).strip()
             dependencies[f"{group}:{artifact}"] = version
             
         # Pattern 3: group = "...", name = "...", version = "..."
-        p3 = re.compile(
-            r'group\s*=\s*[\'"]([^\'"]+)[\'"]\s*,\s*name\s*=\s*[\'"]([^\'"]+)[\'"]\s*,\s*version\s*=\s*[\'"]([^\'"]+)[\'"]'
-        )
-        for m in p3.finditer(content):
+        for m in RE_GRADLE_MAP2.finditer(content):
             group = m.group(1).strip()
             artifact = m.group(2).strip()
             version = m.group(3).strip()
@@ -8150,7 +8198,67 @@ def populate_remediation_recommendations(results, default_project_path):
             v = v[1:]
         return re.sub(r'^[~^>=<!\s]+', '', v)
 
-    for r in results:
+    manifest_file_cache = {}
+    def _get_manifest_lines(m_path):
+        if m_path not in manifest_file_cache:
+            try:
+                with open(m_path, "r", encoding="utf-8", errors="ignore") as f:
+                    manifest_file_cache[m_path] = f.readlines()
+            except Exception:
+                manifest_file_cache[m_path] = []
+        return manifest_file_cache[m_path]
+
+    line_search_cache = {}
+    def _find_line_idx(m_path, lines, pkg_name, tech, declared, is_engine):
+        cache_key = (m_path, tech, pkg_name, str(declared), is_engine)
+        if cache_key in line_search_cache:
+            return line_search_cache[cache_key]
+            
+        found_line_idx = None
+        best_score = -1
+        for idx, line in enumerate(lines):
+            if is_engine:
+                matched = f'"{pkg_name}"' in line or '"engines"' in line
+            else:
+                matched = match_line_for_dependency(line, pkg_name, tech)
+            if matched:
+                score = 1
+                if declared:
+                    ver_digits = re.search(r'\d+\.\d+', str(declared))
+                    if ver_digits and ver_digits.group(0) in line:
+                        score = 2
+                    elif str(declared).strip() in line:
+                        score = 2
+                if score > best_score:
+                    best_score = score
+                    found_line_idx = idx + 1
+                    if score == 2:
+                        break
+        line_search_cache[cache_key] = found_line_idx
+        return found_line_idx
+
+    manifest_files_cache = {}
+    def _get_manifest_files(p_path, tech, is_engine):
+        cache_key = (p_path, tech, is_engine)
+        if cache_key not in manifest_files_cache:
+            if is_engine:
+                package_json_path = os.path.join(p_path, "package.json")
+                manifest_files_cache[cache_key] = [package_json_path] if os.path.exists(package_json_path) else []
+            else:
+                manifest_files_cache[cache_key] = find_manifest_files(p_path, tech)
+        return manifest_files_cache[cache_key]
+
+    total_items = len(results)
+    last_reported_pct = -1
+
+    for idx, r in enumerate(results, 1):
+        if total_items > 0:
+            pct = int((idx / total_items) * 100)
+            if pct != last_reported_pct or idx == total_items or idx % 25 == 0:
+                sys.stdout.write(f"\r{COLOR_GRAY}{ICON_INFO} Processing results: {pct}% ({idx}/{total_items} packages)...{COLOR_RESET}")
+                sys.stdout.flush()
+                last_reported_pct = pct
+
         r["remediation"] = None
         
         is_outdated = r.get("status") in ("major", "minor", "patch", "minor-major", "patch-major")
@@ -8187,44 +8295,17 @@ def populate_remediation_recommendations(results, default_project_path):
             if _clean_v(latest_abs) in (clean_inst_v, clean_decl_v) or _clean_v(latest_abs) == _clean_v(latest_sm) or _clean_v(latest_abs) == _clean_v(latest_patch):
                 latest_abs = None
 
-        manifest_files = []
-        if r.get("is_engine", False):
-            package_json_path = os.path.join(project_path, "package.json")
-            if os.path.exists(package_json_path):
-                manifest_files = [package_json_path]
-        else:
-            manifest_files = find_manifest_files(project_path, tech)
+        manifest_files = _get_manifest_files(project_path, tech, r.get("is_engine", False))
             
         if not manifest_files:
             continue
             
         manifest_path = manifest_files[0]
-        try:
-            with open(manifest_path, "r", encoding="utf-8", errors="ignore") as f:
-                lines = f.readlines()
-        except Exception:
+        lines = _get_manifest_lines(manifest_path)
+        if not lines:
             continue
             
-        found_line_idx = None
-        best_score = -1
-        for idx, line in enumerate(lines):
-            if r.get("is_engine", False):
-                matched = f'"{name}"' in line or '"engines"' in line
-            else:
-                matched = match_line_for_dependency(line, name, tech)
-            if matched:
-                score = 1
-                if declared:
-                    ver_digits = re.search(r'\d+\.\d+', str(declared))
-                    if ver_digits and ver_digits.group(0) in line:
-                        score = 2
-                    elif str(declared).strip() in line:
-                        score = 2
-                if score > best_score:
-                    best_score = score
-                    found_line_idx = idx + 1
-                    if score == 2:
-                        break
+        found_line_idx = _find_line_idx(manifest_path, lines, name, tech, declared, r.get("is_engine", False))
 
         parent_r = None
         parent_line_idx = None
@@ -8232,13 +8313,10 @@ def populate_remediation_recommendations(results, default_project_path):
             for parent_name in r.get("required_by", []):
                 parent_candidate = next((item for item in results if item.get("name") == parent_name and item.get("project_path") == r.get("project_path")), None)
                 if parent_candidate:
-                    for idx, line in enumerate(lines):
-                        if match_line_for_dependency(line, parent_name, tech):
-                            parent_r = parent_candidate
-                            parent_line_idx = idx + 1
-                            break
-                if parent_line_idx is not None:
-                    break
+                    parent_line_idx = _find_line_idx(manifest_path, lines, parent_name, tech, parent_candidate.get("declared"), False)
+                    if parent_line_idx is not None:
+                        parent_r = parent_candidate
+                        break
 
         manifest_missing = False
         if found_line_idx is None and dep_type != "Transitive" and not r.get("required_by"):
@@ -8422,6 +8500,10 @@ def populate_remediation_recommendations(results, default_project_path):
             if manifest_missing:
                 r["manifest_missing"] = True
 
+    if total_items > 0:
+        sys.stdout.write(f"\r{COLOR_GRAY}{ICON_INFO} Processing results: 100% ({total_items}/{total_items} packages)... Done.{COLOR_RESET}\n")
+        sys.stdout.flush()
+
 
 class HTMLReportTemplateProvider:
     @staticmethod
@@ -8549,26 +8631,28 @@ class HTMLReportTemplateProvider:
         .stat-card.malicious { background-color: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); }
         .stat-card.malicious .stat-val { color: #fca5a5; }
         
-        /* Controls Toolbar */
+        /* Controls Panel Card & Layout */
+        .controls-placeholder {
+            display: block;
+            margin-bottom: 24px;
+            position: relative;
+        }
+
         .controls-toolbar {
-            background-color: var(--card-bg);
-            border: 1px solid var(--border-color);
+            background: rgba(17, 24, 39, 0.75);
+            backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
             border-radius: 12px;
-            padding: 15px;
+            padding: 14px 18px;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
             display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 25px;
-            gap: 15px;
-            flex-wrap: wrap;
+            flex-direction: column;
+            gap: 12px;
+            box-sizing: border-box;
+            transition: background 0.25s ease, border-color 0.25s ease;
         }
         
         /* Floating controls-toolbar styles on scroll */
-        .controls-placeholder {
-            display: block;
-            margin-bottom: 25px;
-        }
-        
         @media (min-width: 768px) {
             .controls-toolbar.floating {
                 position: fixed;
@@ -8578,15 +8662,15 @@ class HTMLReportTemplateProvider:
                 width: calc(100% - 40px);
                 max-width: 1000px;
                 border-radius: 0 0 12px 12px;
-                border-left: 1px solid var(--border-color);
-                border-right: 1px solid var(--border-color);
+                border-left: 1px solid rgba(255, 255, 255, 0.12);
+                border-right: 1px solid rgba(255, 255, 255, 0.12);
                 border-top: none;
-                border-bottom: 1px solid var(--border-color);
+                border-bottom: 1px solid rgba(255, 255, 255, 0.12);
                 background-color: rgba(17, 24, 39, 0.95);
-                backdrop-filter: blur(10px);
+                backdrop-filter: blur(16px);
                 z-index: 1000;
-                box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
-                padding: 10px 15px;
+                box-shadow: 0 12px 36px rgba(0, 0, 0, 0.6);
+                padding: 10px 16px;
                 box-sizing: border-box;
                 animation: desktopStickyIn 0.2s ease;
             }
@@ -8603,19 +8687,15 @@ class HTMLReportTemplateProvider:
                 border-left: 0;
                 border-right: 0;
                 border-top: 0;
+                border-bottom: 1px solid rgba(255, 255, 255, 0.12);
                 background-color: rgba(17, 24, 39, 0.95);
-                backdrop-filter: blur(10px);
+                backdrop-filter: blur(16px);
                 z-index: 1000;
-                box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
-                padding: 10px 15px;
+                box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+                padding: 10px 14px;
                 margin-bottom: 0;
                 box-sizing: border-box;
                 animation: mobileStickyIn 0.2s ease;
-            }
-            
-            .controls-toolbar.floating .search-box {
-                max-width: none;
-                width: 100%;
             }
         }
         
@@ -8637,30 +8717,85 @@ class HTMLReportTemplateProvider:
             }
         }
         
+        .controls-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            width: 100%;
+        }
+        
+        .primary-row {
+            flex-wrap: wrap;
+        }
+        
+        .secondary-row {
+            flex-wrap: wrap;
+            padding-top: 10px;
+            border-top: 1px solid rgba(255, 255, 255, 0.06);
+            font-size: 13px;
+        }
+
         .search-box {
-            flex-grow: 1;
             position: relative;
-            max-width: 400px;
-            min-width: 200px;
+            display: inline-flex;
+            align-items: center;
+            flex: 1 1 320px;
+            min-width: 240px;
+            height: 38px;
         }
         
         .search-box input {
             width: 100%;
-            background-color: var(--bg-color);
-            border: 1px solid var(--border-color);
+            height: 100%;
+            background-color: rgba(15, 23, 42, 0.6);
+            border: 1px solid rgba(255, 255, 255, 0.12);
             border-radius: 8px;
             color: var(--text-main);
-            padding: 10px 35px 10px 12px;
-            font-size: 14px;
+            padding: 0 38px 0 36px;
+            font-size: 13.5px;
             box-sizing: border-box;
             font-family: inherit;
+            transition: all 0.2s ease;
         }
         
         .search-box input:focus {
             outline: none;
+            background-color: rgba(15, 23, 42, 0.95);
             border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.2);
         }
         
+        .search-icon {
+            position: absolute;
+            left: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--text-muted);
+            pointer-events: none;
+            z-index: 2;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .search-kbd {
+            position: absolute;
+            right: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 4px;
+            padding: 1px 6px;
+            font-size: 11px;
+            color: var(--text-muted);
+            font-family: monospace;
+            pointer-events: none;
+            z-index: 2;
+            line-height: 1.2;
+        }
+
         #clearSearch {
             position: absolute;
             right: 10px;
@@ -8674,18 +8809,73 @@ class HTMLReportTemplateProvider:
             padding: 0;
             line-height: 1;
             display: none;
-            font-family: sans-serif;
+            z-index: 3;
         }
-        
-        #clearSearch:hover {
-            color: var(--text-main);
+
+        .segmented-control {
+            display: inline-flex;
+            align-items: center;
+            background: rgba(15, 23, 42, 0.6);
+            padding: 3px;
+            border-radius: 9px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            gap: 3px;
+            flex-wrap: wrap;
         }
-        
-        .filter-buttons {
+
+        .secondary-filters-group {
             display: flex;
+            align-items: center;
             gap: 8px;
             flex-wrap: wrap;
+        }
+
+        .facet-label {
+            font-size: 11.5px;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-right: 4px;
+        }
+
+        .filter-divider {
+            width: 1px;
+            height: 18px;
+            background: rgba(255, 255, 255, 0.1);
+            margin: 0 4px;
+        }
+
+        .btn-facet {
+            background: rgba(30, 41, 59, 0.4);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            font-size: 12.5px;
+            padding: 5px 12px;
+        }
+
+        .btn-facet:hover {
+            background: rgba(51, 65, 85, 0.6);
+            border-color: rgba(255, 255, 255, 0.18);
+            transform: translateY(-1px);
+        }
+
+        .btn-reset-filters {
+            background: transparent;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            color: var(--text-muted);
+            font-size: 12px;
+            padding: 5px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: inline-flex;
             align-items: center;
+        }
+
+        .btn-reset-filters:hover {
+            color: var(--text-main);
+            background: rgba(239, 68, 68, 0.15);
+            border-color: rgba(239, 68, 68, 0.4);
         }
         
         .filter-group {
@@ -8942,6 +9132,15 @@ class HTMLReportTemplateProvider:
         .badge-danger { background-color: rgba(220, 38, 38, 0.25); color: #fca5a5; border: 1px solid rgba(220, 38, 38, 0.4); }
         .badge-muted { background-color: rgba(100, 116, 139, 0.15); color: #94a3b8; border: 1px solid rgba(100, 116, 139, 0.3); }
         .badge-project { background-color: rgba(55, 65, 81, 0.4); color: #9ca3af; border: 1px solid rgba(75, 85, 99, 0.4); }
+        .badge-tech { font-family: var(--font-sans); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; padding: 0 6px; height: 18px; line-height: 18px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; margin-left: 6px; }
+        .badge-tech-npm { background-color: rgba(203, 56, 55, 0.18); color: #f87171; border: 1px solid rgba(203, 56, 55, 0.4); }
+        .badge-tech-ruby { background-color: rgba(204, 52, 45, 0.18); color: #fb7185; border: 1px solid rgba(204, 52, 45, 0.4); }
+        .badge-tech-pip, .badge-tech-python { background-color: rgba(55, 118, 171, 0.18); color: #60a5fa; border: 1px solid rgba(55, 118, 171, 0.4); }
+        .badge-tech-nuget, .badge-tech-csharp { background-color: rgba(0, 72, 128, 0.18); color: #38bdf8; border: 1px solid rgba(0, 72, 128, 0.4); }
+        .badge-tech-go { background-color: rgba(0, 173, 216, 0.18); color: #22d3ee; border: 1px solid rgba(0, 173, 216, 0.4); }
+        .badge-tech-cargo, .badge-tech-rust { background-color: rgba(222, 165, 132, 0.18); color: #fb923c; border: 1px solid rgba(222, 165, 132, 0.4); }
+        .badge-tech-composer, .badge-tech-php { background-color: rgba(136, 146, 191, 0.18); color: #a78bfa; border: 1px solid rgba(136, 146, 191, 0.4); }
+        .badge-tech-maven, .badge-tech-gradle, .badge-tech-java { background-color: rgba(237, 139, 0, 0.18); color: #facc15; border: 1px solid rgba(237, 139, 0, 0.4); }
         
         .badge-vuln-stats {
             background-color: rgba(239, 68, 68, 0.12);
@@ -9651,149 +9850,174 @@ class HTMLReportTemplateProvider:
         <!-- Controls -->
         <div class="controls-placeholder">
             <div class="controls-toolbar">
-            <div class="search-box">
-                <input type="text" id="searchInput" placeholder="Search packages..." oninput="onSearchInput()">
-                <button id="clearSearch" onclick="clearSearchInput()">&times;</button>
-            </div>
-            <div class="filter-buttons">
-                <button class="filter-btn active" data-cat="all" onclick="setCategory('all', event)">All</button>
-                
-                <div class="filter-group">
-                    <button class="filter-btn" data-cat="vulnerable" onclick="setCategory('vulnerable', event)">
-                        Vulnerable <span class="chevron-inline">▼</span>
-                    </button>
-                    <div class="filter-dropdown" id="dropdown-vulnerable">
-                        <div class="dropdown-row">
-                            <label><input type="checkbox" value="malicious" checked onchange="filterPackages()"> <span class="dot mal-dot"></span> Malicious Code</label>
-                            <span class="row-actions">
-                                <span class="action-btn" onclick="selectOnly(event, 'malicious')">only</span>
-                                <span class="action-separator">/</span>
-                                <span class="action-btn" onclick="selectAll(event)">all</span>
-                            </span>
+                <!-- Top Row: Search + Main Views Segmented Control -->
+                <div class="controls-row primary-row">
+                    <div class="search-box">
+                        <svg class="search-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                        <input type="text" id="searchInput" placeholder="Search packages by name... (Press / to focus)" oninput="onSearchInput()">
+                        <kbd class="search-kbd" id="searchKbd">/</kbd>
+                        <button id="clearSearch" style="display: none;" onclick="clearSearchInput()">&times;</button>
+                    </div>
+                    
+                    <div class="segmented-control">
+                        <button class="filter-btn active" data-cat="all" onclick="setCategory('all', event)">All</button>
+                        
+                        <div class="filter-group">
+                            <button class="filter-btn" data-cat="vulnerable" onclick="setCategory('vulnerable', event)">
+                                Vulnerable <span class="chevron-inline">▼</span>
+                            </button>
+                            <div class="filter-dropdown" id="dropdown-vulnerable">
+                                <div class="dropdown-row">
+                                    <label><input type="checkbox" value="malicious" checked onchange="filterPackages()"> <span class="dot mal-dot"></span> Malicious Code</label>
+                                    <span class="row-actions">
+                                        <span class="action-btn" onclick="selectOnly(event, 'malicious')">only</span>
+                                        <span class="action-separator">/</span>
+                                        <span class="action-btn" onclick="selectAll(event)">all</span>
+                                    </span>
+                                </div>
+                                <div class="dropdown-row">
+                                    <label><input type="checkbox" value="critical" checked onchange="filterPackages()"> <span class="dot crit-dot"></span> Critical</label>
+                                    <span class="row-actions">
+                                        <span class="action-btn" onclick="selectOnly(event, 'critical')">only</span>
+                                        <span class="action-separator">/</span>
+                                        <span class="action-btn" onclick="selectAll(event)">all</span>
+                                    </span>
+                                </div>
+                                <div class="dropdown-row">
+                                    <label><input type="checkbox" value="high" checked onchange="filterPackages()"> <span class="dot high-dot"></span> High</label>
+                                    <span class="row-actions">
+                                        <span class="action-btn" onclick="selectOnly(event, 'high')">only</span>
+                                        <span class="action-separator">/</span>
+                                        <span class="action-btn" onclick="selectAll(event)">all</span>
+                                    </span>
+                                </div>
+                                <div class="dropdown-row">
+                                    <label><input type="checkbox" value="medium" checked onchange="filterPackages()"> <span class="dot med-dot"></span> Medium</label>
+                                    <span class="row-actions">
+                                        <span class="action-btn" onclick="selectOnly(event, 'medium')">only</span>
+                                        <span class="action-separator">/</span>
+                                        <span class="action-btn" onclick="selectAll(event)">all</span>
+                                    </span>
+                                </div>
+                                <div class="dropdown-row">
+                                    <label><input type="checkbox" value="low" checked onchange="filterPackages()"> <span class="dot low-dot"></span> Low</label>
+                                    <span class="row-actions">
+                                        <span class="action-btn" onclick="selectOnly(event, 'low')">only</span>
+                                        <span class="action-separator">/</span>
+                                        <span class="action-btn" onclick="selectAll(event)">all</span>
+                                    </span>
+                                </div>
+                                <div class="dropdown-row">
+                                    <label><input type="checkbox" value="unknown" checked onchange="filterPackages()"> <span class="dot unkn-dot"></span> Unknown</label>
+                                    <span class="row-actions">
+                                        <span class="action-btn" onclick="selectOnly(event, 'unknown')">only</span>
+                                        <span class="action-separator">/</span>
+                                        <span class="action-btn" onclick="selectAll(event)">all</span>
+                                    </span>
+                                </div>
+                            </div>
                         </div>
-                        <div class="dropdown-row">
-                            <label><input type="checkbox" value="critical" checked onchange="filterPackages()"> <span class="dot crit-dot"></span> Critical</label>
-                            <span class="row-actions">
-                                <span class="action-btn" onclick="selectOnly(event, 'critical')">only</span>
-                                <span class="action-separator">/</span>
-                                <span class="action-btn" onclick="selectAll(event)">all</span>
-                            </span>
+                        
+                        <div class="filter-group">
+                            <button class="filter-btn" data-cat="outdated" onclick="setCategory('outdated', event)">
+                                Outdated <span class="chevron-inline">▼</span>
+                            </button>
+                            <div class="filter-dropdown" id="dropdown-outdated">
+                                <div class="dropdown-row">
+                                    <label><input type="checkbox" value="major" checked onchange="filterPackages()"> Major Update</label>
+                                    <span class="row-actions">
+                                        <span class="action-btn" onclick="selectOnly(event, 'major')">only</span>
+                                        <span class="action-separator">/</span>
+                                        <span class="action-btn" onclick="selectAll(event)">all</span>
+                                    </span>
+                                </div>
+                                <div class="dropdown-row">
+                                    <label><input type="checkbox" value="minor" checked onchange="filterPackages()"> Minor Update</label>
+                                    <span class="row-actions">
+                                        <span class="action-btn" onclick="selectOnly(event, 'minor')">only</span>
+                                        <span class="action-separator">/</span>
+                                        <span class="action-btn" onclick="selectAll(event)">all</span>
+                                    </span>
+                                </div>
+                                <div class="dropdown-row">
+                                    <label><input type="checkbox" value="patch" checked onchange="filterPackages()"> Patch Update</label>
+                                    <span class="row-actions">
+                                        <span class="action-btn" onclick="selectOnly(event, 'patch')">only</span>
+                                        <span class="action-separator">/</span>
+                                        <span class="action-btn" onclick="selectAll(event)">all</span>
+                                    </span>
+                                </div>
+                            </div>
                         </div>
-                        <div class="dropdown-row">
-                            <label><input type="checkbox" value="high" checked onchange="filterPackages()"> <span class="dot high-dot"></span> High</label>
-                            <span class="row-actions">
-                                <span class="action-btn" onclick="selectOnly(event, 'high')">only</span>
-                                <span class="action-separator">/</span>
-                                <span class="action-btn" onclick="selectAll(event)">all</span>
-                            </span>
-                        </div>
-                        <div class="dropdown-row">
-                            <label><input type="checkbox" value="medium" checked onchange="filterPackages()"> <span class="dot med-dot"></span> Medium</label>
-                            <span class="row-actions">
-                                <span class="action-btn" onclick="selectOnly(event, 'medium')">only</span>
-                                <span class="action-separator">/</span>
-                                <span class="action-btn" onclick="selectAll(event)">all</span>
-                            </span>
-                        </div>
-                        <div class="dropdown-row">
-                            <label><input type="checkbox" value="low" checked onchange="filterPackages()"> <span class="dot low-dot"></span> Low</label>
-                            <span class="row-actions">
-                                <span class="action-btn" onclick="selectOnly(event, 'low')">only</span>
-                                <span class="action-separator">/</span>
-                                <span class="action-btn" onclick="selectAll(event)">all</span>
-                            </span>
-                        </div>
-                        <div class="dropdown-row">
-                            <label><input type="checkbox" value="unknown" checked onchange="filterPackages()"> <span class="dot unkn-dot"></span> Unknown</label>
-                            <span class="row-actions">
-                                <span class="action-btn" onclick="selectOnly(event, 'unknown')">only</span>
-                                <span class="action-separator">/</span>
-                                <span class="action-btn" onclick="selectAll(event)">all</span>
-                            </span>
-                        </div>
+                        
+                        <button class="filter-btn" data-cat="clean" onclick="setCategory('clean', event)">Clean</button>
                     </div>
                 </div>
                 
-                <div class="filter-group">
-                    <button class="filter-btn" data-cat="outdated" onclick="setCategory('outdated', event)">
-                        Outdated <span class="chevron-inline">▼</span>
-                    </button>
-                    <div class="filter-dropdown" id="dropdown-outdated">
-                        <div class="dropdown-row">
-                            <label><input type="checkbox" value="major" checked onchange="filterPackages()"> Major Update</label>
-                            <span class="row-actions">
-                                <span class="action-btn" onclick="selectOnly(event, 'major')">only</span>
-                                <span class="action-separator">/</span>
-                                <span class="action-btn" onclick="selectAll(event)">all</span>
-                            </span>
+                <!-- Bottom Row: Alerts + Dimensions + Reset -->
+                <div class="controls-row secondary-row">
+                    <div class="secondary-filters-group">
+                        <span class="facet-label">Alerts:</span>
+                        <button class="filter-btn btn-facet" data-cat="error" onclick="setCategory('error', event)">Errors</button>
+                        <button class="filter-btn btn-facet" data-cat="deprecated" onclick="setCategory('deprecated', event)">Deprecated</button>
+                        <button class="filter-btn btn-facet" data-cat="suppressed" onclick="setCategory('suppressed', event)">Suppressed</button>
+                    </div>
+                    
+                    <div class="filter-divider"></div>
+                    
+                    <div class="secondary-filters-group">
+                        <span class="facet-label">Dimensions:</span>
+                        <div class="filter-group">
+                            <button class="filter-btn btn-facet" data-cat="scope" onclick="setCategory('scope', event)">
+                                Scope <span class="chevron-inline">▼</span>
+                            </button>
+                            <div class="filter-dropdown" id="dropdown-scope">
+                                <div class="dropdown-row">
+                                    <label><input type="checkbox" value="direct" checked onchange="filterPackages()"> Direct</label>
+                                    <span class="row-actions">
+                                        <span class="action-btn" onclick="selectOnly(event, 'direct')">only</span>
+                                        <span class="action-separator">/</span>
+                                        <span class="action-btn" onclick="selectAll(event)">all</span>
+                                    </span>
+                                </div>
+                                <div class="dropdown-row">
+                                    <label><input type="checkbox" value="dev" checked onchange="filterPackages()"> Dev</label>
+                                    <span class="row-actions">
+                                        <span class="action-btn" onclick="selectOnly(event, 'dev')">only</span>
+                                        <span class="action-separator">/</span>
+                                        <span class="action-btn" onclick="selectAll(event)">all</span>
+                                    </span>
+                                </div>
+                                <div class="dropdown-row">
+                                    <label><input type="checkbox" value="transitive" checked onchange="filterPackages()"> Transitive</label>
+                                    <span class="row-actions">
+                                        <span class="action-btn" onclick="selectOnly(event, 'transitive')">only</span>
+                                        <span class="action-separator">/</span>
+                                        <span class="action-btn" onclick="selectAll(event)">all</span>
+                                    </span>
+                                </div>
+                                <div class="dropdown-row">
+                                    <label><input type="checkbox" value="engine" checked onchange="filterPackages()"> Engine</label>
+                                    <span class="row-actions">
+                                        <span class="action-btn" onclick="selectOnly(event, 'engine')">only</span>
+                                        <span class="action-separator">/</span>
+                                        <span class="action-btn" onclick="selectAll(event)">all</span>
+                                    </span>
+                                </div>
+                            </div>
                         </div>
-                        <div class="dropdown-row">
-                            <label><input type="checkbox" value="minor" checked onchange="filterPackages()"> Minor Update</label>
-                            <span class="row-actions">
-                                <span class="action-btn" onclick="selectOnly(event, 'minor')">only</span>
-                                <span class="action-separator">/</span>
-                                <span class="action-btn" onclick="selectAll(event)">all</span>
-                            </span>
-                        </div>
-                        <div class="dropdown-row">
-                            <label><input type="checkbox" value="patch" checked onchange="filterPackages()"> Patch Update</label>
-                            <span class="row-actions">
-                                <span class="action-btn" onclick="selectOnly(event, 'patch')">only</span>
-                                <span class="action-separator">/</span>
-                                <span class="action-btn" onclick="selectAll(event)">all</span>
-                            </span>
-                        </div>
+                        
+                        ${technology_dropdown_html}
+                    </div>
+                    
+                    <div style="margin-left: auto;">
+                        <button class="btn-reset-filters" onclick="resetAllFilters()" title="Reset search and filters">
+                            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 5px; vertical-align: middle;"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>Reset
+                        </button>
                     </div>
                 </div>
-                
-                <button class="filter-btn" data-cat="deprecated" onclick="setCategory('deprecated', event)">Deprecated</button>
-                <button class="filter-btn" data-cat="suppressed" onclick="setCategory('suppressed', event)">Suppressed</button>
-                <button class="filter-btn" data-cat="error" onclick="setCategory('error', event)">Errors</button>
-                
-                <div class="filter-group">
-                    <button class="filter-btn" data-cat="scope" onclick="setCategory('scope', event)">
-                        Scope <span class="chevron-inline">▼</span>
-                    </button>
-                    <div class="filter-dropdown" id="dropdown-scope">
-                        <div class="dropdown-row">
-                            <label><input type="checkbox" value="direct" checked onchange="filterPackages()"> Direct</label>
-                            <span class="row-actions">
-                                <span class="action-btn" onclick="selectOnly(event, 'direct')">only</span>
-                                <span class="action-separator">/</span>
-                                <span class="action-btn" onclick="selectAll(event)">all</span>
-                            </span>
-                        </div>
-                        <div class="dropdown-row">
-                            <label><input type="checkbox" value="dev" checked onchange="filterPackages()"> Dev</label>
-                            <span class="row-actions">
-                                <span class="action-btn" onclick="selectOnly(event, 'dev')">only</span>
-                                <span class="action-separator">/</span>
-                                <span class="action-btn" onclick="selectAll(event)">all</span>
-                            </span>
-                        </div>
-                        <div class="dropdown-row">
-                            <label><input type="checkbox" value="transitive" checked onchange="filterPackages()"> Transitive</label>
-                            <span class="row-actions">
-                                <span class="action-btn" onclick="selectOnly(event, 'transitive')">only</span>
-                                <span class="action-separator">/</span>
-                                <span class="action-btn" onclick="selectAll(event)">all</span>
-                            </span>
-                        </div>
-                        <div class="dropdown-row">
-                            <label><input type="checkbox" value="engine" checked onchange="filterPackages()"> Engine</label>
-                            <span class="row-actions">
-                                <span class="action-btn" onclick="selectOnly(event, 'engine')">only</span>
-                                <span class="action-separator">/</span>
-                                <span class="action-btn" onclick="selectAll(event)">all</span>
-                            </span>
-                        </div>
-                    </div>
-                </div>
-                
-                <button class="filter-btn" data-cat="clean" onclick="setCategory('clean', event)">Clean</button>
             </div>
         </div>
-    </div>
         
         <!-- Packages List -->
         <div class="packages-list" id="packageContainer">
@@ -9806,6 +10030,7 @@ class HTMLReportTemplateProvider:
         const KEVLAR_VULNERABILITY_STORE = ${vulns_json_data};
         const SHOW_PROJECT_GLOBALLY = ${show_project_globally};
         const UNIQUE_PROJECT_PATHS = ${unique_project_paths};
+        const UNIQUE_TECHNOLOGIES = ${unique_technologies};
         const VULS_ENABLED = ${vuls_enabled};
         
         function renderPackages() {
@@ -9837,6 +10062,13 @@ class HTMLReportTemplateProvider:
                     const proj_path = r.project_path;
                     const tech_val = r.technology || "";
                     project_badge = '<span class="badge badge-project" style="font-family: monospace; text-transform: none; margin-left: 4px;">' + escapeHtml(proj_path) + ' [' + escapeHtml(tech_val) + ']</span>';
+                }
+                
+                let tech_badge = "";
+                if (UNIQUE_TECHNOLOGIES.length > 1 && r.technology) {
+                    const tech_name = r.technology;
+                    const tech_val = tech_name.toLowerCase();
+                    tech_badge = '<span class="badge badge-tech badge-tech-' + escapeHtml(tech_val) + '">' + escapeHtml(tech_name) + '</span>';
                 }
                 
                 let badges = [];
@@ -10136,12 +10368,13 @@ class HTMLReportTemplateProvider:
                          'data-deprecated="' + (is_deprecated ? 'true' : 'false') + '" ' +
                          'data-error="' + (error ? 'true' : 'false') + '" ' +
                          'data-deptype="' + dep_type_esc.toLowerCase() + '" ' +
+                         'data-technology="' + escapeHtml((r.technology || '').toLowerCase()) + '" ' +
                          'id="pkg-' + i + '">' +
                         '<div class="card-header" onclick="toggleDetails(' + i + ')">' +
                             '<div class="header-left">' +
                                 '<div class="pkg-title">' +
                                     '<span class="pkg-name">' + name_esc + '</span>' +
-                                    '<span class="pkg-type-badge">' + dep_type_esc + '</span>' + project_badge +
+                                    '<span class="pkg-type-badge">' + dep_type_esc + '</span>' + tech_badge + project_badge +
                                 '</div>' +
                                 '<div class="pkg-badges">' +
                                     badges.join(' ') +
@@ -10334,8 +10567,12 @@ class HTMLReportTemplateProvider:
             const pkgList = document.querySelector('.packages-list');
             
             function updatePlaceholderHeight() {
-                if (placeholder && toolbar && !toolbar.classList.contains('floating')) {
-                    placeholder.style.height = toolbar.offsetHeight + 'px';
+                if (placeholder && toolbar) {
+                    if (toolbar.classList.contains('floating')) {
+                        placeholder.style.height = toolbar.offsetHeight + 'px';
+                    } else {
+                        placeholder.style.height = 'auto';
+                    }
                 }
             }
             
@@ -10357,11 +10594,17 @@ class HTMLReportTemplateProvider:
                 const placeholderRect = placeholder.getBoundingClientRect();
                 
                 if (placeholderRect.top < 20) {
-                    toolbar.classList.add('floating');
-                    pkgList.classList.add('floating-active');
+                    if (!toolbar.classList.contains('floating')) {
+                        placeholder.style.height = toolbar.offsetHeight + 'px';
+                        toolbar.classList.add('floating');
+                        pkgList.classList.add('floating-active');
+                    }
                 } else {
-                    toolbar.classList.remove('floating');
-                    pkgList.classList.remove('floating-active');
+                    if (toolbar.classList.contains('floating')) {
+                        toolbar.classList.remove('floating');
+                        pkgList.classList.remove('floating-active');
+                        placeholder.style.height = 'auto';
+                    }
                 }
             });
 
@@ -10507,21 +10750,42 @@ class HTMLReportTemplateProvider:
             }
         });
         
+        document.addEventListener('keydown', function(e) {
+            if ((e.key === '/' || (e.ctrlKey && e.key.toLowerCase() === 'k')) && document.activeElement !== document.getElementById('searchInput')) {
+                e.preventDefault();
+                const input = document.getElementById('searchInput');
+                if (input) {
+                    input.focus();
+                    input.select();
+                }
+            }
+        });
+        
+        function resetAllFilters() {
+            clearSearchInput();
+            setCategory('all');
+        }
+
         function onSearchInput() {
             const input = document.getElementById('searchInput');
             const clearBtn = document.getElementById('clearSearch');
+            const kbdHint = document.getElementById('searchKbd');
             if (input.value) {
                 clearBtn.style.display = 'block';
+                if (kbdHint) kbdHint.style.display = 'none';
             } else {
                 clearBtn.style.display = 'none';
+                if (kbdHint) kbdHint.style.display = 'block';
             }
             filterPackages();
         }
         
         function clearSearchInput() {
             const input = document.getElementById('searchInput');
+            const kbdHint = document.getElementById('searchKbd');
             input.value = '';
             document.getElementById('clearSearch').style.display = 'none';
+            if (kbdHint) kbdHint.style.display = 'block';
             filterPackages();
             input.focus();
         }
@@ -10533,6 +10797,7 @@ class HTMLReportTemplateProvider:
             const checkedSeverities = Array.from(document.querySelectorAll('#dropdown-vulnerable input[type="checkbox"]:checked')).map(cb => cb.value);
             const checkedOutdated = Array.from(document.querySelectorAll('#dropdown-outdated input[type="checkbox"]:checked')).map(cb => cb.value);
             const checkedScopes = Array.from(document.querySelectorAll('#dropdown-scope input[type="checkbox"]:checked')).map(cb => cb.value);
+            const checkedTechs = Array.from(document.querySelectorAll('#dropdown-technology input[type="checkbox"]:checked')).map(cb => cb.value);
             
             cards.forEach(card => {
                 const name = card.getAttribute('data-name').toLowerCase();
@@ -10543,6 +10808,7 @@ class HTMLReportTemplateProvider:
                 const isDeprecated = card.getAttribute('data-deprecated') === 'true';
                 const depType = card.getAttribute('data-deptype');
                 const hasError = card.getAttribute('data-error') === 'true';
+                const cardTech = card.getAttribute('data-technology') || '';
                 
                 let matchesCategory = false;
                 if (activeCategories.includes('all')) {
@@ -10564,6 +10830,11 @@ class HTMLReportTemplateProvider:
                             }
                         } else if (cat === 'scope') {
                             if (!checkedScopes.includes(depType)) {
+                                matchesAll = false;
+                                break;
+                            }
+                        } else if (cat === 'technology') {
+                            if (!checkedTechs.includes(cardTech)) {
                                 matchesAll = false;
                                 break;
                             }
@@ -11166,6 +11437,33 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
         unique_project_paths = sorted(list(set(r.get("project_path") for r in results if r.get("project_path"))))
         show_project_globally = len(unique_project_paths) <= 1
         
+        unique_technologies = sorted(list(set(r.get("technology") for r in results if r.get("technology"))))
+        
+        technology_dropdown_html = ""
+        if len(unique_technologies) > 1:
+            tech_rows = []
+            for tech in unique_technologies:
+                tech_esc = escape_html(tech)
+                tech_val_esc = escape_html(tech.lower())
+                tech_rows.append(f'''
+                        <div class="dropdown-row">
+                            <label><input type="checkbox" value="{tech_val_esc}" checked onchange="filterPackages()"> {tech_esc}</label>
+                            <span class="row-actions">
+                                <span class="action-btn" onclick="selectOnly(event, '{tech_val_esc}')">only</span>
+                                <span class="action-separator">/</span>
+                                <span class="action-btn" onclick="selectAll(event)">all</span>
+                            </span>
+                        </div>''')
+            technology_dropdown_html = f'''
+                <div class="filter-group">
+                    <button class="filter-btn btn-facet" data-cat="technology" onclick="setCategory('technology', event)">
+                        Technology <span class="chevron-inline">▼</span>
+                    </button>
+                    <div class="filter-dropdown" id="dropdown-technology">
+                        {''.join(tech_rows)}
+                    </div>
+                </div>'''
+
         project_path_header_html = ""
         if show_project_globally and unique_project_paths:
             single_path = unique_project_paths[0]
@@ -11224,10 +11522,9 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                 
             pkg_record = {
                 "name": name,
-                "declared": declared if (is_direct_install and dep_type != "Transitive") else declared if dep_type == "Transitive" else "",
-                "dep_type": dep_type,
+                "declared": declared,
                 "installed": installed,
-                "latest": r["latest"],
+                "latest": r.get("latest"),
                 "latest_same_major": r.get("latest_same_major"),
                 "latest_absolute": r.get("latest_absolute"),
                 "status": r["status"],
@@ -11309,11 +11606,13 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             "vulns_json_data": escaped_vulns_json,
             "show_project_globally": json.dumps(show_project_globally),
             "unique_project_paths": json.dumps(unique_project_paths),
+            "unique_technologies": json.dumps(unique_technologies),
+            "technology_dropdown_html": technology_dropdown_html,
             "vuls_enabled": json.dumps(vuls_enabled)
         }
         
         html_content = template.safe_substitute(mapping)
-
+        
         
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(html_content)
@@ -11890,8 +12189,6 @@ def process_single_project_results(results, pkg_data, elapsed, args):
         if "technology" not in r:
             r["technology"] = args.tech if args.tech != "auto" else r.get("technology")
             
-    sys.stdout.write(f"{COLOR_GRAY}{ICON_INFO} Processing results...{COLOR_RESET}\n")
-    sys.stdout.flush()
     populate_remediation_recommendations(results, args.path)
     validate_configuration_drift(results)
     apply_vulnerability_suppressions(results, args.suppress, project_path=args.path)
