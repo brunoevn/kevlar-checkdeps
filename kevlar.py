@@ -8198,7 +8198,67 @@ def populate_remediation_recommendations(results, default_project_path):
             v = v[1:]
         return re.sub(r'^[~^>=<!\s]+', '', v)
 
-    for r in results:
+    manifest_file_cache = {}
+    def _get_manifest_lines(m_path):
+        if m_path not in manifest_file_cache:
+            try:
+                with open(m_path, "r", encoding="utf-8", errors="ignore") as f:
+                    manifest_file_cache[m_path] = f.readlines()
+            except Exception:
+                manifest_file_cache[m_path] = []
+        return manifest_file_cache[m_path]
+
+    line_search_cache = {}
+    def _find_line_idx(m_path, lines, pkg_name, tech, declared, is_engine):
+        cache_key = (m_path, tech, pkg_name, str(declared), is_engine)
+        if cache_key in line_search_cache:
+            return line_search_cache[cache_key]
+            
+        found_line_idx = None
+        best_score = -1
+        for idx, line in enumerate(lines):
+            if is_engine:
+                matched = f'"{pkg_name}"' in line or '"engines"' in line
+            else:
+                matched = match_line_for_dependency(line, pkg_name, tech)
+            if matched:
+                score = 1
+                if declared:
+                    ver_digits = re.search(r'\d+\.\d+', str(declared))
+                    if ver_digits and ver_digits.group(0) in line:
+                        score = 2
+                    elif str(declared).strip() in line:
+                        score = 2
+                if score > best_score:
+                    best_score = score
+                    found_line_idx = idx + 1
+                    if score == 2:
+                        break
+        line_search_cache[cache_key] = found_line_idx
+        return found_line_idx
+
+    manifest_files_cache = {}
+    def _get_manifest_files(p_path, tech, is_engine):
+        cache_key = (p_path, tech, is_engine)
+        if cache_key not in manifest_files_cache:
+            if is_engine:
+                package_json_path = os.path.join(p_path, "package.json")
+                manifest_files_cache[cache_key] = [package_json_path] if os.path.exists(package_json_path) else []
+            else:
+                manifest_files_cache[cache_key] = find_manifest_files(p_path, tech)
+        return manifest_files_cache[cache_key]
+
+    total_items = len(results)
+    last_reported_pct = -1
+
+    for idx, r in enumerate(results, 1):
+        if total_items > 0:
+            pct = int((idx / total_items) * 100)
+            if pct != last_reported_pct or idx == total_items or idx % 25 == 0:
+                sys.stdout.write(f"\r{COLOR_GRAY}{ICON_INFO} Processing results: {pct}% ({idx}/{total_items} packages)...{COLOR_RESET}")
+                sys.stdout.flush()
+                last_reported_pct = pct
+
         r["remediation"] = None
         
         is_outdated = r.get("status") in ("major", "minor", "patch", "minor-major", "patch-major")
@@ -8235,44 +8295,17 @@ def populate_remediation_recommendations(results, default_project_path):
             if _clean_v(latest_abs) in (clean_inst_v, clean_decl_v) or _clean_v(latest_abs) == _clean_v(latest_sm) or _clean_v(latest_abs) == _clean_v(latest_patch):
                 latest_abs = None
 
-        manifest_files = []
-        if r.get("is_engine", False):
-            package_json_path = os.path.join(project_path, "package.json")
-            if os.path.exists(package_json_path):
-                manifest_files = [package_json_path]
-        else:
-            manifest_files = find_manifest_files(project_path, tech)
+        manifest_files = _get_manifest_files(project_path, tech, r.get("is_engine", False))
             
         if not manifest_files:
             continue
             
         manifest_path = manifest_files[0]
-        try:
-            with open(manifest_path, "r", encoding="utf-8", errors="ignore") as f:
-                lines = f.readlines()
-        except Exception:
+        lines = _get_manifest_lines(manifest_path)
+        if not lines:
             continue
             
-        found_line_idx = None
-        best_score = -1
-        for idx, line in enumerate(lines):
-            if r.get("is_engine", False):
-                matched = f'"{name}"' in line or '"engines"' in line
-            else:
-                matched = match_line_for_dependency(line, name, tech)
-            if matched:
-                score = 1
-                if declared:
-                    ver_digits = re.search(r'\d+\.\d+', str(declared))
-                    if ver_digits and ver_digits.group(0) in line:
-                        score = 2
-                    elif str(declared).strip() in line:
-                        score = 2
-                if score > best_score:
-                    best_score = score
-                    found_line_idx = idx + 1
-                    if score == 2:
-                        break
+        found_line_idx = _find_line_idx(manifest_path, lines, name, tech, declared, r.get("is_engine", False))
 
         parent_r = None
         parent_line_idx = None
@@ -8280,13 +8313,10 @@ def populate_remediation_recommendations(results, default_project_path):
             for parent_name in r.get("required_by", []):
                 parent_candidate = next((item for item in results if item.get("name") == parent_name and item.get("project_path") == r.get("project_path")), None)
                 if parent_candidate:
-                    for idx, line in enumerate(lines):
-                        if match_line_for_dependency(line, parent_name, tech):
-                            parent_r = parent_candidate
-                            parent_line_idx = idx + 1
-                            break
-                if parent_line_idx is not None:
-                    break
+                    parent_line_idx = _find_line_idx(manifest_path, lines, parent_name, tech, parent_candidate.get("declared"), False)
+                    if parent_line_idx is not None:
+                        parent_r = parent_candidate
+                        break
 
         manifest_missing = False
         if found_line_idx is None and dep_type != "Transitive" and not r.get("required_by"):
@@ -8469,6 +8499,10 @@ def populate_remediation_recommendations(results, default_project_path):
             }
             if manifest_missing:
                 r["manifest_missing"] = True
+
+    if total_items > 0:
+        sys.stdout.write(f"\r{COLOR_GRAY}{ICON_INFO} Processing results: 100% ({total_items}/{total_items} packages)... Done.{COLOR_RESET}\n")
+        sys.stdout.flush()
 
 
 class HTMLReportTemplateProvider:
@@ -8990,6 +9024,15 @@ class HTMLReportTemplateProvider:
         .badge-danger { background-color: rgba(220, 38, 38, 0.25); color: #fca5a5; border: 1px solid rgba(220, 38, 38, 0.4); }
         .badge-muted { background-color: rgba(100, 116, 139, 0.15); color: #94a3b8; border: 1px solid rgba(100, 116, 139, 0.3); }
         .badge-project { background-color: rgba(55, 65, 81, 0.4); color: #9ca3af; border: 1px solid rgba(75, 85, 99, 0.4); }
+        .badge-tech { font-family: var(--font-sans); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; padding: 0 6px; height: 18px; line-height: 18px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; margin-left: 6px; }
+        .badge-tech-npm { background-color: rgba(203, 56, 55, 0.18); color: #f87171; border: 1px solid rgba(203, 56, 55, 0.4); }
+        .badge-tech-ruby { background-color: rgba(204, 52, 45, 0.18); color: #fb7185; border: 1px solid rgba(204, 52, 45, 0.4); }
+        .badge-tech-pip, .badge-tech-python { background-color: rgba(55, 118, 171, 0.18); color: #60a5fa; border: 1px solid rgba(55, 118, 171, 0.4); }
+        .badge-tech-nuget, .badge-tech-csharp { background-color: rgba(0, 72, 128, 0.18); color: #38bdf8; border: 1px solid rgba(0, 72, 128, 0.4); }
+        .badge-tech-go { background-color: rgba(0, 173, 216, 0.18); color: #22d3ee; border: 1px solid rgba(0, 173, 216, 0.4); }
+        .badge-tech-cargo, .badge-tech-rust { background-color: rgba(222, 165, 132, 0.18); color: #fb923c; border: 1px solid rgba(222, 165, 132, 0.4); }
+        .badge-tech-composer, .badge-tech-php { background-color: rgba(136, 146, 191, 0.18); color: #a78bfa; border: 1px solid rgba(136, 146, 191, 0.4); }
+        .badge-tech-maven, .badge-tech-gradle, .badge-tech-java { background-color: rgba(237, 139, 0, 0.18); color: #facc15; border: 1px solid rgba(237, 139, 0, 0.4); }
         
         .badge-vuln-stats {
             background-color: rgba(239, 68, 68, 0.12);
@@ -9838,6 +9881,7 @@ class HTMLReportTemplateProvider:
                     </div>
                 </div>
                 
+                ${technology_dropdown_html}
                 <button class="filter-btn" data-cat="clean" onclick="setCategory('clean', event)">Clean</button>
             </div>
         </div>
@@ -9854,6 +9898,7 @@ class HTMLReportTemplateProvider:
         const KEVLAR_VULNERABILITY_STORE = ${vulns_json_data};
         const SHOW_PROJECT_GLOBALLY = ${show_project_globally};
         const UNIQUE_PROJECT_PATHS = ${unique_project_paths};
+        const UNIQUE_TECHNOLOGIES = ${unique_technologies};
         const VULS_ENABLED = ${vuls_enabled};
         
         function renderPackages() {
@@ -9885,6 +9930,13 @@ class HTMLReportTemplateProvider:
                     const proj_path = r.project_path;
                     const tech_val = r.technology || "";
                     project_badge = '<span class="badge badge-project" style="font-family: monospace; text-transform: none; margin-left: 4px;">' + escapeHtml(proj_path) + ' [' + escapeHtml(tech_val) + ']</span>';
+                }
+                
+                let tech_badge = "";
+                if (UNIQUE_TECHNOLOGIES.length > 1 && r.technology) {
+                    const tech_name = r.technology;
+                    const tech_val = tech_name.toLowerCase();
+                    tech_badge = '<span class="badge badge-tech badge-tech-' + escapeHtml(tech_val) + '">' + escapeHtml(tech_name) + '</span>';
                 }
                 
                 let badges = [];
@@ -10184,12 +10236,13 @@ class HTMLReportTemplateProvider:
                          'data-deprecated="' + (is_deprecated ? 'true' : 'false') + '" ' +
                          'data-error="' + (error ? 'true' : 'false') + '" ' +
                          'data-deptype="' + dep_type_esc.toLowerCase() + '" ' +
+                         'data-technology="' + escapeHtml((r.technology || '').toLowerCase()) + '" ' +
                          'id="pkg-' + i + '">' +
                         '<div class="card-header" onclick="toggleDetails(' + i + ')">' +
                             '<div class="header-left">' +
                                 '<div class="pkg-title">' +
                                     '<span class="pkg-name">' + name_esc + '</span>' +
-                                    '<span class="pkg-type-badge">' + dep_type_esc + '</span>' + project_badge +
+                                    '<span class="pkg-type-badge">' + dep_type_esc + '</span>' + tech_badge + project_badge +
                                 '</div>' +
                                 '<div class="pkg-badges">' +
                                     badges.join(' ') +
@@ -10581,6 +10634,7 @@ class HTMLReportTemplateProvider:
             const checkedSeverities = Array.from(document.querySelectorAll('#dropdown-vulnerable input[type="checkbox"]:checked')).map(cb => cb.value);
             const checkedOutdated = Array.from(document.querySelectorAll('#dropdown-outdated input[type="checkbox"]:checked')).map(cb => cb.value);
             const checkedScopes = Array.from(document.querySelectorAll('#dropdown-scope input[type="checkbox"]:checked')).map(cb => cb.value);
+            const checkedTechs = Array.from(document.querySelectorAll('#dropdown-technology input[type="checkbox"]:checked')).map(cb => cb.value);
             
             cards.forEach(card => {
                 const name = card.getAttribute('data-name').toLowerCase();
@@ -10591,6 +10645,7 @@ class HTMLReportTemplateProvider:
                 const isDeprecated = card.getAttribute('data-deprecated') === 'true';
                 const depType = card.getAttribute('data-deptype');
                 const hasError = card.getAttribute('data-error') === 'true';
+                const cardTech = card.getAttribute('data-technology') || '';
                 
                 let matchesCategory = false;
                 if (activeCategories.includes('all')) {
@@ -10612,6 +10667,11 @@ class HTMLReportTemplateProvider:
                             }
                         } else if (cat === 'scope') {
                             if (!checkedScopes.includes(depType)) {
+                                matchesAll = false;
+                                break;
+                            }
+                        } else if (cat === 'technology') {
+                            if (!checkedTechs.includes(cardTech)) {
                                 matchesAll = false;
                                 break;
                             }
@@ -11214,6 +11274,33 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
         unique_project_paths = sorted(list(set(r.get("project_path") for r in results if r.get("project_path"))))
         show_project_globally = len(unique_project_paths) <= 1
         
+        unique_technologies = sorted(list(set(r.get("technology") for r in results if r.get("technology"))))
+        
+        technology_dropdown_html = ""
+        if len(unique_technologies) > 1:
+            tech_rows = []
+            for tech in unique_technologies:
+                tech_esc = escape_html(tech)
+                tech_val_esc = escape_html(tech.lower())
+                tech_rows.append(f'''
+                        <div class="dropdown-row">
+                            <label><input type="checkbox" value="{tech_val_esc}" checked onchange="filterPackages()"> {tech_esc}</label>
+                            <span class="row-actions">
+                                <span class="action-btn" onclick="selectOnly(event, '{tech_val_esc}')">only</span>
+                                <span class="action-separator">/</span>
+                                <span class="action-btn" onclick="selectAll(event)">all</span>
+                            </span>
+                        </div>''')
+            technology_dropdown_html = f'''
+                <div class="filter-group">
+                    <button class="filter-btn" data-cat="technology" onclick="setCategory('technology', event)">
+                        Technology <span class="chevron-inline">▼</span>
+                    </button>
+                    <div class="filter-dropdown" id="dropdown-technology">
+                        {''.join(tech_rows)}
+                    </div>
+                </div>'''
+
         project_path_header_html = ""
         if show_project_globally and unique_project_paths:
             single_path = unique_project_paths[0]
@@ -11272,10 +11359,9 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                 
             pkg_record = {
                 "name": name,
-                "declared": declared if (is_direct_install and dep_type != "Transitive") else declared if dep_type == "Transitive" else "",
-                "dep_type": dep_type,
+                "declared": declared,
                 "installed": installed,
-                "latest": r["latest"],
+                "latest": r.get("latest"),
                 "latest_same_major": r.get("latest_same_major"),
                 "latest_absolute": r.get("latest_absolute"),
                 "status": r["status"],
@@ -11357,11 +11443,13 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             "vulns_json_data": escaped_vulns_json,
             "show_project_globally": json.dumps(show_project_globally),
             "unique_project_paths": json.dumps(unique_project_paths),
+            "unique_technologies": json.dumps(unique_technologies),
+            "technology_dropdown_html": technology_dropdown_html,
             "vuls_enabled": json.dumps(vuls_enabled)
         }
         
         html_content = template.safe_substitute(mapping)
-
+        
         
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(html_content)
@@ -11938,8 +12026,6 @@ def process_single_project_results(results, pkg_data, elapsed, args):
         if "technology" not in r:
             r["technology"] = args.tech if args.tech != "auto" else r.get("technology")
             
-    sys.stdout.write(f"{COLOR_GRAY}{ICON_INFO} Processing results...{COLOR_RESET}\n")
-    sys.stdout.flush()
     populate_remediation_recommendations(results, args.path)
     validate_configuration_drift(results)
     apply_vulnerability_suppressions(results, args.suppress, project_path=args.path)

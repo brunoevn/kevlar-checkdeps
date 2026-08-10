@@ -960,6 +960,46 @@ class TestKevlar(unittest.TestCase):
             
             self.assertIn('"name": "guzzlehttp/guzzle"', content)
             self.assertIn('"GHSA-1111-2222-3333"', content)
+
+    def test_export_html_report_multi_technology(self):
+        import tempfile
+        results = [
+            {
+                "name": "express",
+                "declared": "^4.17.1",
+                "installed": "4.17.1",
+                "latest": "4.18.2",
+                "status": "minor",
+                "deprecated": False,
+                "error": None,
+                "technology": "npm",
+                "project_path": "/app",
+                "dep_type": "Direct"
+            },
+            {
+                "name": "rails",
+                "declared": "~> 7.0",
+                "installed": "7.0.0",
+                "latest": "7.1.0",
+                "status": "minor",
+                "deprecated": False,
+                "error": None,
+                "technology": "ruby",
+                "project_path": "/app",
+                "dep_type": "Direct"
+            }
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "report.html")
+            kevlar.export_html_report(results, {}, filepath)
+            self.assertTrue(os.path.exists(filepath))
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+                
+            self.assertIn('id="dropdown-technology"', content)
+            self.assertIn('const UNIQUE_TECHNOLOGIES = ["npm", "ruby"];', content)
+            self.assertIn('badge-tech-npm', content)
+            self.assertIn('badge-tech-ruby', content)
             
     def test_parse_package_lock_all_dep_types(self):
         import tempfile
