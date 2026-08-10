@@ -8652,6 +8652,71 @@ class HTMLReportTemplateProvider:
             transition: background 0.25s ease, border-color 0.25s ease;
         }
         
+        /* Floating controls-toolbar styles on scroll */
+        @media (min-width: 768px) {
+            .controls-toolbar.floating {
+                position: fixed;
+                top: 0;
+                left: 50%;
+                transform: translate(-50%, 0);
+                width: calc(100% - 40px);
+                max-width: 1000px;
+                border-radius: 0 0 12px 12px;
+                border-left: 1px solid rgba(255, 255, 255, 0.12);
+                border-right: 1px solid rgba(255, 255, 255, 0.12);
+                border-top: none;
+                border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+                background-color: rgba(17, 24, 39, 0.95);
+                backdrop-filter: blur(16px);
+                z-index: 1000;
+                box-shadow: 0 12px 36px rgba(0, 0, 0, 0.6);
+                padding: 10px 16px;
+                box-sizing: border-box;
+                animation: desktopStickyIn 0.2s ease;
+            }
+        }
+        
+        /* Mobile Sticky fallback */
+        @media (max-width: 767px) {
+            .controls-toolbar.floating {
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 100%;
+                border-radius: 0;
+                border-left: 0;
+                border-right: 0;
+                border-top: 0;
+                border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+                background-color: rgba(17, 24, 39, 0.95);
+                backdrop-filter: blur(16px);
+                z-index: 1000;
+                box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+                padding: 10px 14px;
+                margin-bottom: 0;
+                box-sizing: border-box;
+                animation: mobileStickyIn 0.2s ease;
+            }
+        }
+        
+        @keyframes desktopStickyIn {
+            from {
+                transform: translate(-50%, -100%);
+            }
+            to {
+                transform: translate(-50%, 0);
+            }
+        }
+        
+        @keyframes mobileStickyIn {
+            from {
+                transform: translateY(-100%);
+            }
+            to {
+                transform: translateY(0);
+            }
+        }
+        
         .controls-row {
             display: flex;
             align-items: center;
