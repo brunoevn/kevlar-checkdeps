@@ -6242,14 +6242,29 @@ def check_ruby_package(target):
                     if not item.get("prerelease"):
                         stable_versions.append(v_num)
             valid_versions = stable_versions if stable_versions else all_versions
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                raise
+            try:
+                url_fallback = f"{URL_RUBY_REGISTRY}{urllib.parse.quote(name)}.json"
+                req_fb = urllib.request.Request(url_fallback)
+                with safe_urlopen(req_fb, timeout=10) as response:
+                    data_fb = json.loads(response.read().decode("utf-8"))
+                latest_version = data_fb.get("version")
+                valid_versions = [latest_version] if latest_version else []
+            except Exception:
+                valid_versions = []
         except Exception:
             # Fallback to single latest version endpoint
-            url_fallback = f"{URL_RUBY_REGISTRY}{urllib.parse.quote(name)}.json"
-            req_fb = urllib.request.Request(url_fallback)
-            with safe_urlopen(req_fb, timeout=10) as response:
-                data_fb = json.loads(response.read().decode("utf-8"))
-            latest_version = data_fb.get("version")
-            valid_versions = [latest_version] if latest_version else []
+            try:
+                url_fallback = f"{URL_RUBY_REGISTRY}{urllib.parse.quote(name)}.json"
+                req_fb = urllib.request.Request(url_fallback)
+                with safe_urlopen(req_fb, timeout=10) as response:
+                    data_fb = json.loads(response.read().decode("utf-8"))
+                latest_version = data_fb.get("version")
+                valid_versions = [latest_version] if latest_version else []
+            except Exception:
+                valid_versions = []
             
         for ver_str in versions_to_check:
             clean_ver = re.sub(r'^[^\d]*', '', ver_str) if ver_str else "0.0.0"
@@ -6294,6 +6309,38 @@ def check_ruby_package(target):
                 "compare_url": compare_url,
                 "releases_url": releases_url
             })
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            for ver_str in versions_to_check:
+                clean_ver = re.sub(r'^[^\d]*', '', ver_str) if ver_str else "0.0.0"
+                if not clean_ver:
+                    clean_ver = "0.0.0"
+                results.append({
+                    "name": name,
+                    "declared": declared,
+                    "installed": clean_ver,
+                    "latest": "Local",
+                    "latest_same_major": None,
+                    "latest_absolute": None,
+                    "status": "local",
+                    "deprecated": False,
+                    "error": None,
+                    "repo_url": None,
+                    "compare_url": None,
+                    "releases_url": None
+                })
+        else:
+            error_msg = f"HTTP {e.code}"
+            for ver_str in versions_to_check:
+                results.append({
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": None,
+                    "status": "error",
+                    "deprecated": False,
+                    "error": error_msg
+                })
     except Exception as e:
         for ver_str in versions_to_check:
             results.append({

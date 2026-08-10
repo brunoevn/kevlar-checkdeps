@@ -1627,6 +1627,21 @@ class TestKevlar(unittest.TestCase):
         finally:
             os.remove(tmp_path)
 
+    def test_check_ruby_package_404_local(self):
+        from unittest.mock import patch, MagicMock
+        import urllib.error
+        target = {
+            "name": "capybara_accessible_selectors",
+            "declared": "0.10.0",
+            "installed": ["0.10.0"]
+        }
+        with patch("kevlar.safe_urlopen", side_effect=urllib.error.HTTPError("url", 404, "Not Found", {}, None)):
+            res = kevlar.check_ruby_package(target)
+            self.assertEqual(len(res), 1)
+            self.assertEqual(res[0]["status"], "local")
+            self.assertEqual(res[0]["latest"], "Local")
+            self.assertIsNone(res[0]["error"])
+
     def test_parse_gradle_lockfile(self):
         import tempfile
         content = (
