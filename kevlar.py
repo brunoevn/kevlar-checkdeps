@@ -8631,118 +8631,106 @@ class HTMLReportTemplateProvider:
         .stat-card.malicious { background-color: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); }
         .stat-card.malicious .stat-val { color: #fca5a5; }
         
-        /* Controls Toolbar */
+        /* Controls Panel Card & Layout */
+        .controls-placeholder {
+            display: block;
+            margin-bottom: 24px;
+            position: relative;
+        }
+
         .controls-toolbar {
-            background-color: var(--card-bg);
-            border: 1px solid var(--border-color);
+            background: rgba(17, 24, 39, 0.75);
+            backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
             border-radius: 12px;
-            padding: 15px;
+            padding: 14px 18px;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
             display: flex;
-            justify-content: space-between;
+            flex-direction: column;
+            gap: 12px;
+            box-sizing: border-box;
+            transition: background 0.25s ease, border-color 0.25s ease;
+        }
+        
+        .controls-row {
+            display: flex;
             align-items: center;
-            margin-bottom: 25px;
-            gap: 15px;
+            justify-content: space-between;
+            gap: 16px;
+            width: 100%;
+        }
+        
+        .primary-row {
             flex-wrap: wrap;
         }
         
-        /* Floating controls-toolbar styles on scroll */
-        .controls-placeholder {
-            display: block;
-            margin-bottom: 25px;
+        .secondary-row {
+            flex-wrap: wrap;
+            padding-top: 10px;
+            border-top: 1px solid rgba(255, 255, 255, 0.06);
+            font-size: 13px;
         }
-        
-        @media (min-width: 768px) {
-            .controls-toolbar.floating {
-                position: fixed;
-                top: 0;
-                left: 50%;
-                transform: translate(-50%, 0);
-                width: calc(100% - 40px);
-                max-width: 1000px;
-                border-radius: 0 0 12px 12px;
-                border-left: 1px solid var(--border-color);
-                border-right: 1px solid var(--border-color);
-                border-top: none;
-                border-bottom: 1px solid var(--border-color);
-                background-color: rgba(17, 24, 39, 0.95);
-                backdrop-filter: blur(10px);
-                z-index: 1000;
-                box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
-                padding: 10px 15px;
-                box-sizing: border-box;
-                animation: desktopStickyIn 0.2s ease;
-            }
-        }
-        
-        /* Mobile Sticky fallback */
-        @media (max-width: 767px) {
-            .controls-toolbar.floating {
-                position: fixed;
-                top: 0;
-                left: 0;
-                width: 100%;
-                border-radius: 0;
-                border-left: 0;
-                border-right: 0;
-                border-top: 0;
-                background-color: rgba(17, 24, 39, 0.95);
-                backdrop-filter: blur(10px);
-                z-index: 1000;
-                box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
-                padding: 10px 15px;
-                margin-bottom: 0;
-                box-sizing: border-box;
-                animation: mobileStickyIn 0.2s ease;
-            }
-            
-            .controls-toolbar.floating .search-box {
-                max-width: none;
-                width: 100%;
-            }
-        }
-        
-        @keyframes desktopStickyIn {
-            from {
-                transform: translate(-50%, -100%);
-            }
-            to {
-                transform: translate(-50%, 0);
-            }
-        }
-        
-        @keyframes mobileStickyIn {
-            from {
-                transform: translateY(-100%);
-            }
-            to {
-                transform: translateY(0);
-            }
-        }
-        
+
         .search-box {
-            flex-grow: 1;
             position: relative;
-            max-width: 400px;
-            min-width: 200px;
+            display: inline-flex;
+            align-items: center;
+            flex: 1 1 320px;
+            min-width: 240px;
+            height: 38px;
         }
         
         .search-box input {
             width: 100%;
-            background-color: var(--bg-color);
-            border: 1px solid var(--border-color);
+            height: 100%;
+            background-color: rgba(15, 23, 42, 0.6);
+            border: 1px solid rgba(255, 255, 255, 0.12);
             border-radius: 8px;
             color: var(--text-main);
-            padding: 10px 35px 10px 12px;
-            font-size: 14px;
+            padding: 0 38px 0 36px;
+            font-size: 13.5px;
             box-sizing: border-box;
             font-family: inherit;
+            transition: all 0.2s ease;
         }
         
         .search-box input:focus {
             outline: none;
+            background-color: rgba(15, 23, 42, 0.95);
             border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.2);
         }
         
+        .search-icon {
+            position: absolute;
+            left: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--text-muted);
+            pointer-events: none;
+            z-index: 2;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .search-kbd {
+            position: absolute;
+            right: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 4px;
+            padding: 1px 6px;
+            font-size: 11px;
+            color: var(--text-muted);
+            font-family: monospace;
+            pointer-events: none;
+            z-index: 2;
+            line-height: 1.2;
+        }
+
         #clearSearch {
             position: absolute;
             right: 10px;
@@ -8756,18 +8744,73 @@ class HTMLReportTemplateProvider:
             padding: 0;
             line-height: 1;
             display: none;
-            font-family: sans-serif;
+            z-index: 3;
         }
-        
-        #clearSearch:hover {
-            color: var(--text-main);
+
+        .segmented-control {
+            display: inline-flex;
+            align-items: center;
+            background: rgba(15, 23, 42, 0.6);
+            padding: 3px;
+            border-radius: 9px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            gap: 3px;
+            flex-wrap: wrap;
         }
-        
-        .filter-buttons {
+
+        .secondary-filters-group {
             display: flex;
+            align-items: center;
             gap: 8px;
             flex-wrap: wrap;
+        }
+
+        .facet-label {
+            font-size: 11.5px;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-right: 4px;
+        }
+
+        .filter-divider {
+            width: 1px;
+            height: 18px;
+            background: rgba(255, 255, 255, 0.1);
+            margin: 0 4px;
+        }
+
+        .btn-facet {
+            background: rgba(30, 41, 59, 0.4);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            font-size: 12.5px;
+            padding: 5px 12px;
+        }
+
+        .btn-facet:hover {
+            background: rgba(51, 65, 85, 0.6);
+            border-color: rgba(255, 255, 255, 0.18);
+            transform: translateY(-1px);
+        }
+
+        .btn-reset-filters {
+            background: transparent;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            color: var(--text-muted);
+            font-size: 12px;
+            padding: 5px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: inline-flex;
             align-items: center;
+        }
+
+        .btn-reset-filters:hover {
+            color: var(--text-main);
+            background: rgba(239, 68, 68, 0.15);
+            border-color: rgba(239, 68, 68, 0.4);
         }
         
         .filter-group {
@@ -9742,150 +9785,174 @@ class HTMLReportTemplateProvider:
         <!-- Controls -->
         <div class="controls-placeholder">
             <div class="controls-toolbar">
-            <div class="search-box">
-                <input type="text" id="searchInput" placeholder="Search packages..." oninput="onSearchInput()">
-                <button id="clearSearch" onclick="clearSearchInput()">&times;</button>
-            </div>
-            <div class="filter-buttons">
-                <button class="filter-btn active" data-cat="all" onclick="setCategory('all', event)">All</button>
-                
-                <div class="filter-group">
-                    <button class="filter-btn" data-cat="vulnerable" onclick="setCategory('vulnerable', event)">
-                        Vulnerable <span class="chevron-inline">▼</span>
-                    </button>
-                    <div class="filter-dropdown" id="dropdown-vulnerable">
-                        <div class="dropdown-row">
-                            <label><input type="checkbox" value="malicious" checked onchange="filterPackages()"> <span class="dot mal-dot"></span> Malicious Code</label>
-                            <span class="row-actions">
-                                <span class="action-btn" onclick="selectOnly(event, 'malicious')">only</span>
-                                <span class="action-separator">/</span>
-                                <span class="action-btn" onclick="selectAll(event)">all</span>
-                            </span>
+                <!-- Top Row: Search + Main Views Segmented Control -->
+                <div class="controls-row primary-row">
+                    <div class="search-box">
+                        <svg class="search-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                        <input type="text" id="searchInput" placeholder="Search packages by name... (Press / to focus)" oninput="onSearchInput()">
+                        <kbd class="search-kbd" id="searchKbd">/</kbd>
+                        <button id="clearSearch" style="display: none;" onclick="clearSearchInput()">&times;</button>
+                    </div>
+                    
+                    <div class="segmented-control">
+                        <button class="filter-btn active" data-cat="all" onclick="setCategory('all', event)">All</button>
+                        
+                        <div class="filter-group">
+                            <button class="filter-btn" data-cat="vulnerable" onclick="setCategory('vulnerable', event)">
+                                Vulnerable <span class="chevron-inline">▼</span>
+                            </button>
+                            <div class="filter-dropdown" id="dropdown-vulnerable">
+                                <div class="dropdown-row">
+                                    <label><input type="checkbox" value="malicious" checked onchange="filterPackages()"> <span class="dot mal-dot"></span> Malicious Code</label>
+                                    <span class="row-actions">
+                                        <span class="action-btn" onclick="selectOnly(event, 'malicious')">only</span>
+                                        <span class="action-separator">/</span>
+                                        <span class="action-btn" onclick="selectAll(event)">all</span>
+                                    </span>
+                                </div>
+                                <div class="dropdown-row">
+                                    <label><input type="checkbox" value="critical" checked onchange="filterPackages()"> <span class="dot crit-dot"></span> Critical</label>
+                                    <span class="row-actions">
+                                        <span class="action-btn" onclick="selectOnly(event, 'critical')">only</span>
+                                        <span class="action-separator">/</span>
+                                        <span class="action-btn" onclick="selectAll(event)">all</span>
+                                    </span>
+                                </div>
+                                <div class="dropdown-row">
+                                    <label><input type="checkbox" value="high" checked onchange="filterPackages()"> <span class="dot high-dot"></span> High</label>
+                                    <span class="row-actions">
+                                        <span class="action-btn" onclick="selectOnly(event, 'high')">only</span>
+                                        <span class="action-separator">/</span>
+                                        <span class="action-btn" onclick="selectAll(event)">all</span>
+                                    </span>
+                                </div>
+                                <div class="dropdown-row">
+                                    <label><input type="checkbox" value="medium" checked onchange="filterPackages()"> <span class="dot med-dot"></span> Medium</label>
+                                    <span class="row-actions">
+                                        <span class="action-btn" onclick="selectOnly(event, 'medium')">only</span>
+                                        <span class="action-separator">/</span>
+                                        <span class="action-btn" onclick="selectAll(event)">all</span>
+                                    </span>
+                                </div>
+                                <div class="dropdown-row">
+                                    <label><input type="checkbox" value="low" checked onchange="filterPackages()"> <span class="dot low-dot"></span> Low</label>
+                                    <span class="row-actions">
+                                        <span class="action-btn" onclick="selectOnly(event, 'low')">only</span>
+                                        <span class="action-separator">/</span>
+                                        <span class="action-btn" onclick="selectAll(event)">all</span>
+                                    </span>
+                                </div>
+                                <div class="dropdown-row">
+                                    <label><input type="checkbox" value="unknown" checked onchange="filterPackages()"> <span class="dot unkn-dot"></span> Unknown</label>
+                                    <span class="row-actions">
+                                        <span class="action-btn" onclick="selectOnly(event, 'unknown')">only</span>
+                                        <span class="action-separator">/</span>
+                                        <span class="action-btn" onclick="selectAll(event)">all</span>
+                                    </span>
+                                </div>
+                            </div>
                         </div>
-                        <div class="dropdown-row">
-                            <label><input type="checkbox" value="critical" checked onchange="filterPackages()"> <span class="dot crit-dot"></span> Critical</label>
-                            <span class="row-actions">
-                                <span class="action-btn" onclick="selectOnly(event, 'critical')">only</span>
-                                <span class="action-separator">/</span>
-                                <span class="action-btn" onclick="selectAll(event)">all</span>
-                            </span>
+                        
+                        <div class="filter-group">
+                            <button class="filter-btn" data-cat="outdated" onclick="setCategory('outdated', event)">
+                                Outdated <span class="chevron-inline">▼</span>
+                            </button>
+                            <div class="filter-dropdown" id="dropdown-outdated">
+                                <div class="dropdown-row">
+                                    <label><input type="checkbox" value="major" checked onchange="filterPackages()"> Major Update</label>
+                                    <span class="row-actions">
+                                        <span class="action-btn" onclick="selectOnly(event, 'major')">only</span>
+                                        <span class="action-separator">/</span>
+                                        <span class="action-btn" onclick="selectAll(event)">all</span>
+                                    </span>
+                                </div>
+                                <div class="dropdown-row">
+                                    <label><input type="checkbox" value="minor" checked onchange="filterPackages()"> Minor Update</label>
+                                    <span class="row-actions">
+                                        <span class="action-btn" onclick="selectOnly(event, 'minor')">only</span>
+                                        <span class="action-separator">/</span>
+                                        <span class="action-btn" onclick="selectAll(event)">all</span>
+                                    </span>
+                                </div>
+                                <div class="dropdown-row">
+                                    <label><input type="checkbox" value="patch" checked onchange="filterPackages()"> Patch Update</label>
+                                    <span class="row-actions">
+                                        <span class="action-btn" onclick="selectOnly(event, 'patch')">only</span>
+                                        <span class="action-separator">/</span>
+                                        <span class="action-btn" onclick="selectAll(event)">all</span>
+                                    </span>
+                                </div>
+                            </div>
                         </div>
-                        <div class="dropdown-row">
-                            <label><input type="checkbox" value="high" checked onchange="filterPackages()"> <span class="dot high-dot"></span> High</label>
-                            <span class="row-actions">
-                                <span class="action-btn" onclick="selectOnly(event, 'high')">only</span>
-                                <span class="action-separator">/</span>
-                                <span class="action-btn" onclick="selectAll(event)">all</span>
-                            </span>
-                        </div>
-                        <div class="dropdown-row">
-                            <label><input type="checkbox" value="medium" checked onchange="filterPackages()"> <span class="dot med-dot"></span> Medium</label>
-                            <span class="row-actions">
-                                <span class="action-btn" onclick="selectOnly(event, 'medium')">only</span>
-                                <span class="action-separator">/</span>
-                                <span class="action-btn" onclick="selectAll(event)">all</span>
-                            </span>
-                        </div>
-                        <div class="dropdown-row">
-                            <label><input type="checkbox" value="low" checked onchange="filterPackages()"> <span class="dot low-dot"></span> Low</label>
-                            <span class="row-actions">
-                                <span class="action-btn" onclick="selectOnly(event, 'low')">only</span>
-                                <span class="action-separator">/</span>
-                                <span class="action-btn" onclick="selectAll(event)">all</span>
-                            </span>
-                        </div>
-                        <div class="dropdown-row">
-                            <label><input type="checkbox" value="unknown" checked onchange="filterPackages()"> <span class="dot unkn-dot"></span> Unknown</label>
-                            <span class="row-actions">
-                                <span class="action-btn" onclick="selectOnly(event, 'unknown')">only</span>
-                                <span class="action-separator">/</span>
-                                <span class="action-btn" onclick="selectAll(event)">all</span>
-                            </span>
-                        </div>
+                        
+                        <button class="filter-btn" data-cat="clean" onclick="setCategory('clean', event)">Clean</button>
                     </div>
                 </div>
                 
-                <div class="filter-group">
-                    <button class="filter-btn" data-cat="outdated" onclick="setCategory('outdated', event)">
-                        Outdated <span class="chevron-inline">▼</span>
-                    </button>
-                    <div class="filter-dropdown" id="dropdown-outdated">
-                        <div class="dropdown-row">
-                            <label><input type="checkbox" value="major" checked onchange="filterPackages()"> Major Update</label>
-                            <span class="row-actions">
-                                <span class="action-btn" onclick="selectOnly(event, 'major')">only</span>
-                                <span class="action-separator">/</span>
-                                <span class="action-btn" onclick="selectAll(event)">all</span>
-                            </span>
+                <!-- Bottom Row: Alerts + Dimensions + Reset -->
+                <div class="controls-row secondary-row">
+                    <div class="secondary-filters-group">
+                        <span class="facet-label">Alerts:</span>
+                        <button class="filter-btn btn-facet" data-cat="error" onclick="setCategory('error', event)">Errors</button>
+                        <button class="filter-btn btn-facet" data-cat="deprecated" onclick="setCategory('deprecated', event)">Deprecated</button>
+                        <button class="filter-btn btn-facet" data-cat="suppressed" onclick="setCategory('suppressed', event)">Suppressed</button>
+                    </div>
+                    
+                    <div class="filter-divider"></div>
+                    
+                    <div class="secondary-filters-group">
+                        <span class="facet-label">Dimensions:</span>
+                        <div class="filter-group">
+                            <button class="filter-btn btn-facet" data-cat="scope" onclick="setCategory('scope', event)">
+                                Scope <span class="chevron-inline">▼</span>
+                            </button>
+                            <div class="filter-dropdown" id="dropdown-scope">
+                                <div class="dropdown-row">
+                                    <label><input type="checkbox" value="direct" checked onchange="filterPackages()"> Direct</label>
+                                    <span class="row-actions">
+                                        <span class="action-btn" onclick="selectOnly(event, 'direct')">only</span>
+                                        <span class="action-separator">/</span>
+                                        <span class="action-btn" onclick="selectAll(event)">all</span>
+                                    </span>
+                                </div>
+                                <div class="dropdown-row">
+                                    <label><input type="checkbox" value="dev" checked onchange="filterPackages()"> Dev</label>
+                                    <span class="row-actions">
+                                        <span class="action-btn" onclick="selectOnly(event, 'dev')">only</span>
+                                        <span class="action-separator">/</span>
+                                        <span class="action-btn" onclick="selectAll(event)">all</span>
+                                    </span>
+                                </div>
+                                <div class="dropdown-row">
+                                    <label><input type="checkbox" value="transitive" checked onchange="filterPackages()"> Transitive</label>
+                                    <span class="row-actions">
+                                        <span class="action-btn" onclick="selectOnly(event, 'transitive')">only</span>
+                                        <span class="action-separator">/</span>
+                                        <span class="action-btn" onclick="selectAll(event)">all</span>
+                                    </span>
+                                </div>
+                                <div class="dropdown-row">
+                                    <label><input type="checkbox" value="engine" checked onchange="filterPackages()"> Engine</label>
+                                    <span class="row-actions">
+                                        <span class="action-btn" onclick="selectOnly(event, 'engine')">only</span>
+                                        <span class="action-separator">/</span>
+                                        <span class="action-btn" onclick="selectAll(event)">all</span>
+                                    </span>
+                                </div>
+                            </div>
                         </div>
-                        <div class="dropdown-row">
-                            <label><input type="checkbox" value="minor" checked onchange="filterPackages()"> Minor Update</label>
-                            <span class="row-actions">
-                                <span class="action-btn" onclick="selectOnly(event, 'minor')">only</span>
-                                <span class="action-separator">/</span>
-                                <span class="action-btn" onclick="selectAll(event)">all</span>
-                            </span>
-                        </div>
-                        <div class="dropdown-row">
-                            <label><input type="checkbox" value="patch" checked onchange="filterPackages()"> Patch Update</label>
-                            <span class="row-actions">
-                                <span class="action-btn" onclick="selectOnly(event, 'patch')">only</span>
-                                <span class="action-separator">/</span>
-                                <span class="action-btn" onclick="selectAll(event)">all</span>
-                            </span>
-                        </div>
+                        
+                        ${technology_dropdown_html}
+                    </div>
+                    
+                    <div style="margin-left: auto;">
+                        <button class="btn-reset-filters" onclick="resetAllFilters()" title="Reset search and filters">
+                            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 5px; vertical-align: middle;"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>Reset
+                        </button>
                     </div>
                 </div>
-                
-                <button class="filter-btn" data-cat="deprecated" onclick="setCategory('deprecated', event)">Deprecated</button>
-                <button class="filter-btn" data-cat="suppressed" onclick="setCategory('suppressed', event)">Suppressed</button>
-                <button class="filter-btn" data-cat="error" onclick="setCategory('error', event)">Errors</button>
-                
-                <div class="filter-group">
-                    <button class="filter-btn" data-cat="scope" onclick="setCategory('scope', event)">
-                        Scope <span class="chevron-inline">▼</span>
-                    </button>
-                    <div class="filter-dropdown" id="dropdown-scope">
-                        <div class="dropdown-row">
-                            <label><input type="checkbox" value="direct" checked onchange="filterPackages()"> Direct</label>
-                            <span class="row-actions">
-                                <span class="action-btn" onclick="selectOnly(event, 'direct')">only</span>
-                                <span class="action-separator">/</span>
-                                <span class="action-btn" onclick="selectAll(event)">all</span>
-                            </span>
-                        </div>
-                        <div class="dropdown-row">
-                            <label><input type="checkbox" value="dev" checked onchange="filterPackages()"> Dev</label>
-                            <span class="row-actions">
-                                <span class="action-btn" onclick="selectOnly(event, 'dev')">only</span>
-                                <span class="action-separator">/</span>
-                                <span class="action-btn" onclick="selectAll(event)">all</span>
-                            </span>
-                        </div>
-                        <div class="dropdown-row">
-                            <label><input type="checkbox" value="transitive" checked onchange="filterPackages()"> Transitive</label>
-                            <span class="row-actions">
-                                <span class="action-btn" onclick="selectOnly(event, 'transitive')">only</span>
-                                <span class="action-separator">/</span>
-                                <span class="action-btn" onclick="selectAll(event)">all</span>
-                            </span>
-                        </div>
-                        <div class="dropdown-row">
-                            <label><input type="checkbox" value="engine" checked onchange="filterPackages()"> Engine</label>
-                            <span class="row-actions">
-                                <span class="action-btn" onclick="selectOnly(event, 'engine')">only</span>
-                                <span class="action-separator">/</span>
-                                <span class="action-btn" onclick="selectAll(event)">all</span>
-                            </span>
-                        </div>
-                    </div>
-                </div>
-                
-                ${technology_dropdown_html}
-                <button class="filter-btn" data-cat="clean" onclick="setCategory('clean', event)">Clean</button>
             </div>
         </div>
-    </div>
         
         <!-- Packages List -->
         <div class="packages-list" id="packageContainer">
@@ -10435,8 +10502,12 @@ class HTMLReportTemplateProvider:
             const pkgList = document.querySelector('.packages-list');
             
             function updatePlaceholderHeight() {
-                if (placeholder && toolbar && !toolbar.classList.contains('floating')) {
-                    placeholder.style.height = toolbar.offsetHeight + 'px';
+                if (placeholder && toolbar) {
+                    if (toolbar.classList.contains('floating')) {
+                        placeholder.style.height = toolbar.offsetHeight + 'px';
+                    } else {
+                        placeholder.style.height = 'auto';
+                    }
                 }
             }
             
@@ -10458,11 +10529,17 @@ class HTMLReportTemplateProvider:
                 const placeholderRect = placeholder.getBoundingClientRect();
                 
                 if (placeholderRect.top < 20) {
-                    toolbar.classList.add('floating');
-                    pkgList.classList.add('floating-active');
+                    if (!toolbar.classList.contains('floating')) {
+                        placeholder.style.height = toolbar.offsetHeight + 'px';
+                        toolbar.classList.add('floating');
+                        pkgList.classList.add('floating-active');
+                    }
                 } else {
-                    toolbar.classList.remove('floating');
-                    pkgList.classList.remove('floating-active');
+                    if (toolbar.classList.contains('floating')) {
+                        toolbar.classList.remove('floating');
+                        pkgList.classList.remove('floating-active');
+                        placeholder.style.height = 'auto';
+                    }
                 }
             });
 
@@ -10608,21 +10685,42 @@ class HTMLReportTemplateProvider:
             }
         });
         
+        document.addEventListener('keydown', function(e) {
+            if ((e.key === '/' || (e.ctrlKey && e.key.toLowerCase() === 'k')) && document.activeElement !== document.getElementById('searchInput')) {
+                e.preventDefault();
+                const input = document.getElementById('searchInput');
+                if (input) {
+                    input.focus();
+                    input.select();
+                }
+            }
+        });
+        
+        function resetAllFilters() {
+            clearSearchInput();
+            setCategory('all');
+        }
+
         function onSearchInput() {
             const input = document.getElementById('searchInput');
             const clearBtn = document.getElementById('clearSearch');
+            const kbdHint = document.getElementById('searchKbd');
             if (input.value) {
                 clearBtn.style.display = 'block';
+                if (kbdHint) kbdHint.style.display = 'none';
             } else {
                 clearBtn.style.display = 'none';
+                if (kbdHint) kbdHint.style.display = 'block';
             }
             filterPackages();
         }
         
         function clearSearchInput() {
             const input = document.getElementById('searchInput');
+            const kbdHint = document.getElementById('searchKbd');
             input.value = '';
             document.getElementById('clearSearch').style.display = 'none';
+            if (kbdHint) kbdHint.style.display = 'block';
             filterPackages();
             input.focus();
         }
@@ -11293,7 +11391,7 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                         </div>''')
             technology_dropdown_html = f'''
                 <div class="filter-group">
-                    <button class="filter-btn" data-cat="technology" onclick="setCategory('technology', event)">
+                    <button class="filter-btn btn-facet" data-cat="technology" onclick="setCategory('technology', event)">
                         Technology <span class="chevron-inline">▼</span>
                     </button>
                     <div class="filter-dropdown" id="dropdown-technology">
