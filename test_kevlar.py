@@ -2887,6 +2887,30 @@ class TestKevlar(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_parse_requirements_txt_path_traversal_prevented(self):
+        """Test that parse_requirements_txt blocks inclusions escaping base_dir."""
+        import tempfile
+        import shutil
+
+        temp_dir = tempfile.mkdtemp()
+        outside_dir = tempfile.mkdtemp()
+        try:
+            outside_req = os.path.join(outside_dir, "outside_req.txt")
+            with open(outside_req, "w", encoding="utf-8") as f:
+                f.write("secret-package==1.0.0\n")
+
+            rel_path_to_outside = os.path.relpath(outside_req, temp_dir)
+            main_req = os.path.join(temp_dir, "requirements.txt")
+            with open(main_req, "w", encoding="utf-8") as f:
+                f.write(f"-r {rel_path_to_outside}\n")
+
+            deps, _ = kevlar.parse_requirements_txt(main_req, base_dir=temp_dir)
+            self.assertNotIn("secret-package", deps)
+        finally:
+            shutil.rmtree(temp_dir)
+            shutil.rmtree(outside_dir)
+
+
     def test_no_show_console_flag(self):
         """Test that print_results_table returns without printing when no_show_console is True."""
         import io
