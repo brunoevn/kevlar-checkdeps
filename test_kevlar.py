@@ -2881,7 +2881,7 @@ class TestKevlar(unittest.TestCase):
             with open(sub_req, "w", encoding="utf-8") as f:
                 f.write("../requirements.txt\n")
 
-            deps, _ = kevlar.parse_requirements_txt(sub_req)
+            deps, _ = kevlar.parse_requirements_txt(sub_req, base_dir=temp_dir)
             self.assertIn("requests", deps)
             self.assertNotIn("..", deps)
         finally:

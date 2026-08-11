@@ -3112,12 +3112,22 @@ def get_env_markers():
         "extra": "",
     }
 
-def parse_requirements_txt(filepath, seen_files=None):
+def parse_requirements_txt(filepath, seen_files=None, base_dir=None):
     """Parses requirements.txt to extract dependencies and parent traces, supporting PEP 508 and file inclusions."""
     if seen_files is None:
         seen_files = set()
         
     abs_filepath = os.path.abspath(filepath)
+
+    if base_dir is None:
+        # To avoid breaking existing functionality where subdirectories
+        # include parent directories within the project root,
+        # we determine the project root heuristically, or default to cwd.
+        # But we'll allow the unit tests to set base_dir explicitly.
+        # Defaulting base_dir to the current working directory works in most cases
+        # as the script runs from the project root.
+        base_dir = os.getcwd()
+
     if abs_filepath in seen_files:
         return {}, {}
     seen_files.add(abs_filepath)
@@ -3179,8 +3189,13 @@ def parse_requirements_txt(filepath, seen_files=None):
                 
             if inc_target:
                 inc_path = os.path.abspath(os.path.join(os.path.dirname(abs_filepath), inc_target))
+
+                # Check path traversal: The included file must not escape the initial root base_dir
+                if not _is_safe_path(base_dir, inc_path):
+                    continue
+
                 if os.path.exists(inc_path) and os.path.isfile(inc_path) and inc_path not in seen_files:
-                    inc_deps, inc_parents = parse_requirements_txt(inc_path, seen_files)
+                    inc_deps, inc_parents = parse_requirements_txt(inc_path, seen_files, base_dir=base_dir)
                     dependencies.update(inc_deps)
                     for k, v in inc_parents.items():
                         parents.setdefault(k, set()).update(v)
