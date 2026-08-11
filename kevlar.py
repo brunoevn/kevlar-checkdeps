@@ -151,6 +151,7 @@ TECHNOLOGIES = {
 # Cached Regex patterns for performance
 RE_SEMVER_ALPHA = re.compile(r'([a-zA-Z]+.*)$')
 RE_SEMVER_DIGITS = re.compile(r'\d+')
+RE_CLEAN_VER = re.compile(r'^[^\d]*')
 
 SEMVER_REGEX = re.compile(
     r'^v?(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)'
@@ -1341,24 +1342,28 @@ def find_latest_semver_tiers(installed_ver, all_versions):
     if not installed_ver or not all_versions:
         return (None, None, None)
     
-    clean_inst = re.sub(r'^[^\d]*', '', installed_ver).split('+')[0]
-    _, inst_major, inst_minor, _, _, inst_prerelease = parse_semver(clean_inst)
-    installed_is_prerelease = bool(inst_prerelease)
+    clean_inst = RE_CLEAN_VER.sub('', installed_ver).split('+')[0]
+    inst_parsed = parse_semver(clean_inst)
+    inst_major = inst_parsed[1]
+    inst_minor = inst_parsed[2]
+    installed_is_prerelease = bool(inst_parsed[5])
     
-    filtered_versions = []
+    parsed_versions = []
     for v in all_versions:
-        clean_v = re.sub(r'^[^\d]*', '', v).split('+')[0]
-        _, _, _, _, _, prerelease = parse_semver(clean_v)
-        if not installed_is_prerelease and prerelease:
+        clean_v = RE_CLEAN_VER.sub('', v).split('+')[0]
+        parsed_versions.append((v, parse_semver(clean_v)))
+
+    filtered_versions = []
+    for v, parsed in parsed_versions:
+        if not installed_is_prerelease and parsed[5]:
             continue
-        filtered_versions.append(v)
+        filtered_versions.append((v, parsed))
         
     if not filtered_versions:
-        filtered_versions = all_versions
+        filtered_versions = parsed_versions
     
-    def semver_sort_key(v_str):
-        clean = re.sub(r'^[^\d]*', '', v_str).split('+')[0]
-        epoch, major, minor, patch, revision, prerelease = parse_semver(clean)
+    def semver_sort_key(item):
+        epoch, major, minor, patch, revision, prerelease = item[1]
         is_stable = 1 if not prerelease else 0
         return (epoch, major, minor, patch, revision, is_stable, PrereleaseKey(prerelease))
         
@@ -1366,16 +1371,14 @@ def find_latest_semver_tiers(installed_ver, all_versions):
     if not sorted_all:
         return (None, None, None)
         
-    latest_absolute = sorted_all[-1]
+    latest_absolute = sorted_all[-1][0]
     
     same_major_versions = []
     same_patch_versions = []
-    for v in sorted_all:
-        clean_v = re.sub(r'^[^\d]*', '', v).split('+')[0]
-        _, v_major, v_minor, _, _, _ = parse_semver(clean_v)
-        if v_major == inst_major:
+    for v, parsed in sorted_all:
+        if parsed[1] == inst_major:
             same_major_versions.append(v)
-            if v_minor == inst_minor:
+            if parsed[2] == inst_minor:
                 same_patch_versions.append(v)
             
     latest_patch = same_patch_versions[-1] if same_patch_versions else None
@@ -2171,7 +2174,7 @@ def check_npm_package(target):
                 continue
                 
             # Strip ranges prefixes to get base version for check
-            clean_ver = re.sub(r'^[^\d]*', '', ver_str) if ver_str else "0.0.0"
+            clean_ver = RE_CLEAN_VER.sub('', ver_str) if ver_str else "0.0.0"
             if not clean_ver:
                 clean_ver = "0.0.0"
                 
@@ -2313,7 +2316,7 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
         versions_to_check = installed_versions if installed_versions else [declared]
         for ver_str in versions_to_check:
             # Clean range prefix symbols
-            clean_ver = re.sub(r'^[^\d]*', '', ver_str) if ver_str else "0.0.0"
+            clean_ver = RE_CLEAN_VER.sub('', ver_str) if ver_str else "0.0.0"
             if not clean_ver:
                 clean_ver = "0.0.0"
                 
@@ -3267,7 +3270,7 @@ def check_pypi_package(target):
         
         for ver_str in versions_to_check:
             # Clean version constraints prefixes
-            clean_ver = re.sub(r'^[^\d]*', '', ver_str) if ver_str else "0.0.0"
+            clean_ver = RE_CLEAN_VER.sub('', ver_str) if ver_str else "0.0.0"
             if not clean_ver:
                 clean_ver = "0.0.0"
                 
@@ -4008,7 +4011,7 @@ def check_nuget_package(target):
         valid_versions = stable_versions if stable_versions else versions_list
         
         for ver_str in versions_to_check:
-            clean_ver = re.sub(r'^[^\d]*', '', ver_str) if ver_str else "0.0.0"
+            clean_ver = RE_CLEAN_VER.sub('', ver_str) if ver_str else "0.0.0"
             if not clean_ver:
                 clean_ver = "0.0.0"
                 
@@ -4903,7 +4906,7 @@ def check_maven_package(target):
         valid_versions = stable_versions if stable_versions else versions_list
         
         for ver_str in versions_to_check:
-            clean_ver = re.sub(r'^[^\d]*', '', ver_str) if ver_str else "0.0.0"
+            clean_ver = RE_CLEAN_VER.sub('', ver_str) if ver_str else "0.0.0"
             if not clean_ver:
                 clean_ver = "0.0.0"
                 
@@ -5978,7 +5981,7 @@ def check_rust_package(target):
             all_versions = [v.get("num") for v in versions_meta if v.get("num")]
             
         for ver_str in versions_to_check:
-            clean_ver = re.sub(r'^[^\d]*', '', ver_str) if ver_str else "0.0.0"
+            clean_ver = RE_CLEAN_VER.sub('', ver_str) if ver_str else "0.0.0"
             if not clean_ver:
                 clean_ver = "0.0.0"
                 
@@ -6267,7 +6270,7 @@ def check_ruby_package(target):
                 valid_versions = []
             
         for ver_str in versions_to_check:
-            clean_ver = re.sub(r'^[^\d]*', '', ver_str) if ver_str else "0.0.0"
+            clean_ver = RE_CLEAN_VER.sub('', ver_str) if ver_str else "0.0.0"
             if not clean_ver:
                 clean_ver = "0.0.0"
                 
@@ -6312,7 +6315,7 @@ def check_ruby_package(target):
     except urllib.error.HTTPError as e:
         if e.code == 404:
             for ver_str in versions_to_check:
-                clean_ver = re.sub(r'^[^\d]*', '', ver_str) if ver_str else "0.0.0"
+                clean_ver = RE_CLEAN_VER.sub('', ver_str) if ver_str else "0.0.0"
                 if not clean_ver:
                     clean_ver = "0.0.0"
                 results.append({
