@@ -426,6 +426,61 @@ class TestKevlar(unittest.TestCase):
             kevlar.parse_secure_xml("<root>Some long text</root>", max_expanded_size=10)
         self.assertIn("Expanded data size limit exceeded", str(ctx.exception))
 
+    def test_parse_secure_xml_encodings(self):
+        # UTF-8
+        content_utf8 = b'<?xml version="1.0" encoding="UTF-8"?><root>test</root>'
+        root = kevlar.parse_secure_xml(content_utf8)
+        self.assertEqual(root.tag, "root")
+        self.assertEqual(root.text, "test")
+
+        # Latin-1
+        content_latin1 = b'<?xml version="1.0" encoding="iso-8859-1"?><root>\xe9</root>'
+        root = kevlar.parse_secure_xml(content_latin1)
+        self.assertEqual(root.tag, "root")
+        self.assertEqual(root.text, "\xe9")
+
+        # Invalid encoding fallbacks
+        content_invalid = b'<?xml version="1.0" encoding="invalid-enc"?><root>test</root>'
+        root = kevlar.parse_secure_xml(content_invalid)
+        self.assertEqual(root.tag, "root")
+        self.assertEqual(root.text, "test")
+
+        # No encoding specified, fallback to utf-8
+        content_no_enc = b'<root>test</root>'
+        root = kevlar.parse_secure_xml(content_no_enc)
+        self.assertEqual(root.tag, "root")
+        self.assertEqual(root.text, "test")
+
+    def test_parse_secure_xml_billion_laughs(self):
+        # Billion laughs should be caught by forbid_doctype
+        xml = """<?xml version="1.0"?>
+<!DOCTYPE lolz [
+ <!ENTITY lol "lol">
+ <!ELEMENT lolz (#PCDATA)>
+ <!ENTITY lol1 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">
+]>
+<lolz>&lol1;</lolz>"""
+        with self.assertRaises(ValueError) as ctx:
+            kevlar.parse_secure_xml(xml)
+        self.assertIn("XML contains forbidden DOCTYPE declarations", str(ctx.exception))
+
+    def test_parse_secure_xml_external_entity(self):
+        # XXE should be caught by forbid_doctype
+        xml = """<?xml version="1.0"?>
+<!DOCTYPE foo [
+<!ENTITY xxe SYSTEM "file:///etc/passwd">
+]>
+<foo>&xxe;</foo>"""
+        with self.assertRaises(ValueError) as ctx:
+            kevlar.parse_secure_xml(xml)
+        self.assertIn("XML contains forbidden DOCTYPE declarations", str(ctx.exception))
+
+    def test_parse_secure_xml_depth_limit(self):
+        xml = "<root>" + "<child>" * 20 + "</child>" * 20 + "</root>"
+        with self.assertRaises(ValueError) as ctx:
+            kevlar.parse_secure_xml(xml, max_depth=15)
+        self.assertIn("Node depth exceeds limit", str(ctx.exception))
+
     def test_secure_xml_namespaces(self):
         xml_content = """<?xml version="1.0" encoding="UTF-8"?>
         <pom:project xmlns:pom="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
