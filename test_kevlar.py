@@ -426,6 +426,61 @@ class TestKevlar(unittest.TestCase):
             kevlar.parse_secure_xml("<root>Some long text</root>", max_expanded_size=10)
         self.assertIn("Expanded data size limit exceeded", str(ctx.exception))
 
+    def test_parse_secure_xml_encodings(self):
+        # UTF-8
+        content_utf8 = b'<?xml version="1.0" encoding="UTF-8"?><root>test</root>'
+        root = kevlar.parse_secure_xml(content_utf8)
+        self.assertEqual(root.tag, "root")
+        self.assertEqual(root.text, "test")
+
+        # Latin-1
+        content_latin1 = b'<?xml version="1.0" encoding="iso-8859-1"?><root>\xe9</root>'
+        root = kevlar.parse_secure_xml(content_latin1)
+        self.assertEqual(root.tag, "root")
+        self.assertEqual(root.text, "\xe9")
+
+        # Invalid encoding fallbacks
+        content_invalid = b'<?xml version="1.0" encoding="invalid-enc"?><root>test</root>'
+        root = kevlar.parse_secure_xml(content_invalid)
+        self.assertEqual(root.tag, "root")
+        self.assertEqual(root.text, "test")
+
+        # No encoding specified, fallback to utf-8
+        content_no_enc = b'<root>test</root>'
+        root = kevlar.parse_secure_xml(content_no_enc)
+        self.assertEqual(root.tag, "root")
+        self.assertEqual(root.text, "test")
+
+    def test_parse_secure_xml_billion_laughs(self):
+        # Billion laughs should be caught by forbid_doctype
+        xml = """<?xml version="1.0"?>
+<!DOCTYPE lolz [
+ <!ENTITY lol "lol">
+ <!ELEMENT lolz (#PCDATA)>
+ <!ENTITY lol1 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">
+]>
+<lolz>&lol1;</lolz>"""
+        with self.assertRaises(ValueError) as ctx:
+            kevlar.parse_secure_xml(xml)
+        self.assertIn("XML contains forbidden DOCTYPE declarations", str(ctx.exception))
+
+    def test_parse_secure_xml_external_entity(self):
+        # XXE should be caught by forbid_doctype
+        xml = """<?xml version="1.0"?>
+<!DOCTYPE foo [
+<!ENTITY xxe SYSTEM "file:///etc/passwd">
+]>
+<foo>&xxe;</foo>"""
+        with self.assertRaises(ValueError) as ctx:
+            kevlar.parse_secure_xml(xml)
+        self.assertIn("XML contains forbidden DOCTYPE declarations", str(ctx.exception))
+
+    def test_parse_secure_xml_depth_limit(self):
+        xml = "<root>" + "<child>" * 20 + "</child>" * 20 + "</root>"
+        with self.assertRaises(ValueError) as ctx:
+            kevlar.parse_secure_xml(xml, max_depth=15)
+        self.assertIn("Node depth exceeds limit", str(ctx.exception))
+
     def test_secure_xml_namespaces(self):
         xml_content = """<?xml version="1.0" encoding="UTF-8"?>
         <pom:project xmlns:pom="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
@@ -1000,6 +1055,35 @@ class TestKevlar(unittest.TestCase):
             self.assertIn('const UNIQUE_TECHNOLOGIES = ["npm", "ruby"];', content)
             self.assertIn('badge-tech-npm', content)
             self.assertIn('badge-tech-ruby', content)
+
+    def test_export_html_report_xss_escaping(self):
+        import tempfile
+        results = [
+            {
+                "name": "vulnerable-pkg",
+                "declared": "1.0.0",
+                "installed": "1.0.0",
+                "latest": "1.0.0",
+                "status": "up-to-date",
+                "deprecated": False,
+                "error": None,
+                "technology": "<script>alert('xss-tech')</script>",
+                "project_path": "</script><script>alert('xss-path')</script>",
+                "dep_type": "Direct"
+            }
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "report.html")
+            kevlar.export_html_report(results, {}, filepath)
+            self.assertTrue(os.path.exists(filepath))
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            # Verify dangerous script tags are escaped as unicode escape sequences in JS block
+            self.assertNotIn("</script><script>alert('xss-path')</script>", content)
+            self.assertIn("\\u003c/script\\u003e\\u003cscript\\u003ealert('xss-path')\\u003c/script\\u003e", content)
+            self.assertIn("\\u003cscript\\u003ealert('xss-tech')\\u003c/script\\u003e", content)
+
             
     def test_parse_package_lock_all_dep_types(self):
         import tempfile
@@ -2881,11 +2965,35 @@ class TestKevlar(unittest.TestCase):
             with open(sub_req, "w", encoding="utf-8") as f:
                 f.write("../requirements.txt\n")
 
-            deps, _ = kevlar.parse_requirements_txt(sub_req)
+            deps, _ = kevlar.parse_requirements_txt(sub_req, base_dir=temp_dir)
             self.assertIn("requests", deps)
             self.assertNotIn("..", deps)
         finally:
             shutil.rmtree(temp_dir)
+
+    def test_parse_requirements_txt_path_traversal_prevented(self):
+        """Test that parse_requirements_txt blocks inclusions escaping base_dir."""
+        import tempfile
+        import shutil
+
+        temp_dir = tempfile.mkdtemp()
+        outside_dir = tempfile.mkdtemp()
+        try:
+            outside_req = os.path.join(outside_dir, "outside_req.txt")
+            with open(outside_req, "w", encoding="utf-8") as f:
+                f.write("secret-package==1.0.0\n")
+
+            rel_path_to_outside = os.path.relpath(outside_req, temp_dir)
+            main_req = os.path.join(temp_dir, "requirements.txt")
+            with open(main_req, "w", encoding="utf-8") as f:
+                f.write(f"-r {rel_path_to_outside}\n")
+
+            deps, _ = kevlar.parse_requirements_txt(main_req, base_dir=temp_dir)
+            self.assertNotIn("secret-package", deps)
+        finally:
+            shutil.rmtree(temp_dir)
+            shutil.rmtree(outside_dir)
+
 
     def test_no_show_console_flag(self):
         """Test that print_results_table returns without printing when no_show_console is True."""
