@@ -1055,6 +1055,35 @@ class TestKevlar(unittest.TestCase):
             self.assertIn('const UNIQUE_TECHNOLOGIES = ["npm", "ruby"];', content)
             self.assertIn('badge-tech-npm', content)
             self.assertIn('badge-tech-ruby', content)
+
+    def test_export_html_report_xss_escaping(self):
+        import tempfile
+        results = [
+            {
+                "name": "vulnerable-pkg",
+                "declared": "1.0.0",
+                "installed": "1.0.0",
+                "latest": "1.0.0",
+                "status": "up-to-date",
+                "deprecated": False,
+                "error": None,
+                "technology": "<script>alert('xss-tech')</script>",
+                "project_path": "</script><script>alert('xss-path')</script>",
+                "dep_type": "Direct"
+            }
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "report.html")
+            kevlar.export_html_report(results, {}, filepath)
+            self.assertTrue(os.path.exists(filepath))
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+                
+            # Verify dangerous script tags are escaped as unicode escape sequences in JS block
+            self.assertNotIn("</script><script>alert('xss-path')</script>", content)
+            self.assertIn("\\u003c/script\\u003e\\u003cscript\\u003ealert('xss-path')\\u003c/script\\u003e", content)
+            self.assertIn("\\u003cscript\\u003ealert('xss-tech')\\u003c/script\\u003e", content)
+
             
     def test_parse_package_lock_all_dep_types(self):
         import tempfile

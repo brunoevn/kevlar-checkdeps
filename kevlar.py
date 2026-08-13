@@ -11627,8 +11627,8 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             "packages_json_data": escaped_packages_json,
             "vulns_json_data": escaped_vulns_json,
             "show_project_globally": json.dumps(show_project_globally),
-            "unique_project_paths": json.dumps(unique_project_paths),
-            "unique_technologies": json.dumps(unique_technologies),
+            "unique_project_paths": json.dumps(unique_project_paths).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026"),
+            "unique_technologies": json.dumps(unique_technologies).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026"),
             "technology_dropdown_html": technology_dropdown_html,
             "vuls_enabled": json.dumps(vuls_enabled)
         }
