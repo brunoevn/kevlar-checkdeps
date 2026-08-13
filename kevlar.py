@@ -6687,11 +6687,11 @@ def validate_configuration_drift(results):
         
         if not declared or not installed:
             continue
-        if str(declared).strip().lower() in ("n/a", "unknown", "", "transitive"):
+        if str(declared).strip().lower() in {"n/a", "unknown", "", "transitive"}:
             continue
         if r.get("dep_type") == "Transitive" or (r.get("required_by") and not r.get("is_direct", False)):
             continue
-        if str(installed).strip().lower() in ("n/a", "unknown", ""):
+        if str(installed).strip().lower() in {"n/a", "unknown", ""}:
             continue
             
         decl_str = str(declared).strip()
