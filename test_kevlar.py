@@ -1078,7 +1078,7 @@ class TestKevlar(unittest.TestCase):
             self.assertTrue(os.path.exists(filepath))
             with open(filepath, "r", encoding="utf-8") as f:
                 content = f.read()
-                
+
             # Verify dangerous script tags are escaped as unicode escape sequences in JS block
             self.assertNotIn("</script><script>alert('xss-path')</script>", content)
             self.assertIn("\\u003c/script\\u003e\\u003cscript\\u003ealert('xss-path')\\u003c/script\\u003e", content)

@@ -2749,23 +2749,8 @@ def find_direct_parents(name, parents_map, direct_packages):
                 
     return direct_parents
 
-def run_npm_checker(args):
-    """Main orchestrator for npm checker."""
-    pkg_file, lock_file = find_npm_files(args.path)
-    
-    if not pkg_file and not lock_file:
-        print(f"{COLOR_RED}{ICON_ERROR} No package.json or lockfile found in: {args.path}{COLOR_RESET}")
-        return None, None, 0
-        
-    pkg_data = None
-    if pkg_file:
-        print(f"{COLOR_GRAY}{ICON_INFO} Reading package.json...{COLOR_RESET}")
-        pkg_data = parse_package_json(pkg_file)
-        
-    lock_data = {}
-    parents_data = {}
-    integrity_data = {}
-    direct_versions_lock = {}
+def _prepare_npm_lock_data(lock_file):
+    lock_data, parents_data, integrity_data, direct_versions_lock = {}, {}, {}, {}
     if lock_file:
         basename = os.path.basename(lock_file)
         if basename == "package-lock.json":
@@ -2777,54 +2762,29 @@ def run_npm_checker(args):
         elif basename == "pnpm-lock.yaml":
             print(f"{COLOR_GRAY}{ICON_INFO} Reading pnpm-lock.yaml...{COLOR_RESET}")
             lock_data, parents_data, integrity_data = parse_pnpm_lock(lock_file)
-        
-    targets = build_check_targets(pkg_data, lock_data, args.all)
-    for t in targets:
-        t_integrity = {}
-        for ver in t["installed"]:
-            key = (t["name"], ver)
-            if key in integrity_data:
-                t_integrity[ver] = integrity_data[key]
-        t["integrity"] = t_integrity
-    
-    node_constraint, _source = find_node_constraint(args.path, pkg_data)
-    
-    if not targets and not node_constraint:
-        print(f"{COLOR_YELLOW}{ICON_WARN} No packages identified to check.{COLOR_RESET}")
-        return None, None, 0
-        
-    start_time = time.time()
-    results = check_all_targets(targets, args.concurrent) if targets else []
-    
-    # Identify and isolate direct vs transitive results for npm packages
-    # We want to clear the 'declared' constraint for transitive versions of a package
-    # so they are not flagged as configuration drift and are correctly shown as transitive in the report.
-    if pkg_data and "all_direct" in pkg_data:
-        # Group result indices by package name
-        by_name = {}
-        for idx, r in enumerate(results):
-            if not r.get("is_engine", False):
-                by_name.setdefault(r["name"], []).append(idx)
-                
-        for name, indices in by_name.items():
-            if name in pkg_data["all_direct"] and len(indices) > 1:
-                # We have multiple installed versions for a direct dependency.
-                # Find which version is the direct install.
-                declared_constraint = pkg_data["all_direct"][name]
-                installed_versions = [results[idx]["installed"] for idx in indices]
-                
-                # Get direct version
-                direct_ver = find_direct_installed_version(
-                    name, declared_constraint, installed_versions, 
-                    direct_versions_from_lock=direct_versions_lock
-                )
-                
-                # Clear 'declared' for all other versions of this package
-                for idx in indices:
-                    if results[idx]["installed"] != direct_ver:
-                        results[idx]["declared"] = None
-    
-    # Check integrity checksums
+    return lock_data, parents_data, integrity_data, direct_versions_lock
+
+def _isolate_direct_npm_results(results, pkg_data, direct_versions_lock):
+    if not (pkg_data and "all_direct" in pkg_data):
+        return
+    by_name = {}
+    for idx, r in enumerate(results):
+        if not r.get("is_engine", False):
+            by_name.setdefault(r["name"], []).append(idx)
+
+    for name, indices in by_name.items():
+        if name in pkg_data["all_direct"] and len(indices) > 1:
+            declared_constraint = pkg_data["all_direct"][name]
+            installed_versions = [results[idx]["installed"] for idx in indices]
+            direct_ver = find_direct_installed_version(
+                name, declared_constraint, installed_versions,
+                direct_versions_from_lock=direct_versions_lock
+            )
+            for idx in indices:
+                if results[idx]["installed"] != direct_ver:
+                    results[idx]["declared"] = None
+
+def _check_npm_integrity(results, lock_file, integrity_data):
     for r in results:
         r["missing_checksum"] = False
         r["weak_checksum"] = False
@@ -2844,43 +2804,41 @@ def run_npm_checker(args):
             else:
                 r["missing_checksum"] = True
 
-    # Check vulnerabilities via OSV if requested
+def _check_npm_vulnerabilities(results, targets, args):
     if getattr(args, "vuls", False):
         tech_info = TECHNOLOGIES["npm"]
         osv_vulns = check_osv_vulnerabilities(targets, tech_info["osv_ecosystem"], args.concurrent)
-        
-        # Attach vulns back to results
         for r in results:
             key = (r["name"], r["installed"])
             r["vulnerabilities"] = osv_vulns.get(key, [])
     else:
         for r in results:
             r["vulnerabilities"] = []
-            
-    # Check Node.js version if applicable
-    if node_constraint:
-        status, deprecated_msg, error_msg, recommendation = analyze_node_constraint(node_constraint)
-            
-        results.append({
-            "name": "node",
-            "declared": node_constraint,
-            "installed": "N/A",
-            "latest": recommendation,
-            "latest_same_major": None,
-            "latest_absolute": None,
-            "status": status,
-            "deprecated": deprecated_msg,
-            "error": error_msg,
-            "repo_url": "https://nodejs.org",
-            "compare_url": None,
-            "releases_url": "https://nodejs.org/en/about/previous-releases",
-            "mismatch_checksum": False,
-            "lockfile_checksum": None,
-            "registry_checksums": [],
-            "is_engine": True
-        })
-            
-    # Resolve transitive dependency parents & dependency types
+
+def _add_node_constraint_result(results, node_constraint):
+    if not node_constraint:
+        return
+    status, deprecated_msg, error_msg, recommendation = analyze_node_constraint(node_constraint)
+    results.append({
+        "name": "node",
+        "declared": node_constraint,
+        "installed": "N/A",
+        "latest": recommendation,
+        "latest_same_major": None,
+        "latest_absolute": None,
+        "status": status,
+        "deprecated": deprecated_msg,
+        "error": error_msg,
+        "repo_url": "https://nodejs.org",
+        "compare_url": None,
+        "releases_url": "https://nodejs.org/en/about/previous-releases",
+        "mismatch_checksum": False,
+        "lockfile_checksum": None,
+        "registry_checksums": [],
+        "is_engine": True
+    })
+
+def _resolve_npm_dependency_types(results, pkg_data, parents_data):
     direct_packages = set(pkg_data["all_direct"].keys()) if pkg_data and "all_direct" in pkg_data else set()
     if parents_data:
         root_parents = {name for name, pts in parents_data.items() if "root" in pts}
@@ -2899,6 +2857,45 @@ def run_npm_checker(args):
         else:
             r["dep_type"] = "Engine"
             r["required_by"] = []
+
+def run_npm_checker(args):
+    """Main orchestrator for npm checker."""
+    pkg_file, lock_file = find_npm_files(args.path)
+
+    if not pkg_file and not lock_file:
+        print(f"{COLOR_RED}{ICON_ERROR} No package.json or lockfile found in: {args.path}{COLOR_RESET}")
+        return None, None, 0
+
+    pkg_data = None
+    if pkg_file:
+        print(f"{COLOR_GRAY}{ICON_INFO} Reading package.json...{COLOR_RESET}")
+        pkg_data = parse_package_json(pkg_file)
+
+    lock_data, parents_data, integrity_data, direct_versions_lock = _prepare_npm_lock_data(lock_file)
+
+    targets = build_check_targets(pkg_data, lock_data, args.all)
+    for t in targets:
+        t_integrity = {}
+        for ver in t["installed"]:
+            key = (t["name"], ver)
+            if key in integrity_data:
+                t_integrity[ver] = integrity_data[key]
+        t["integrity"] = t_integrity
+
+    node_constraint, _source = find_node_constraint(args.path, pkg_data)
+
+    if not targets and not node_constraint:
+        print(f"{COLOR_YELLOW}{ICON_WARN} No packages identified to check.{COLOR_RESET}")
+        return None, None, 0
+
+    start_time = time.time()
+    results = check_all_targets(targets, args.concurrent) if targets else []
+
+    _isolate_direct_npm_results(results, pkg_data, direct_versions_lock)
+    _check_npm_integrity(results, lock_file, integrity_data)
+    _check_npm_vulnerabilities(results, targets, args)
+    _add_node_constraint_result(results, node_constraint)
+    _resolve_npm_dependency_types(results, pkg_data, parents_data)
             
     elapsed = time.time() - start_time
     
