@@ -3835,8 +3835,7 @@ def parse_sln_file(sln_path):
         sln_dir = os.path.dirname(os.path.abspath(sln_path))
         if sln_path.lower().endswith(".slnx"):
             try:
-                import xml.etree.ElementTree as ET
-                tree = ET.parse(sln_path)
+                tree = safe_et_parse(sln_path)
                 root = tree.getroot()
                 for elem in root.iter("Project"):
                     rel_p = elem.get("Path")

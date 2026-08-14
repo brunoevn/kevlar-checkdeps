@@ -8,3 +8,7 @@
 **Learning:** Just because a value is JSON dumped does not make it safe for HTML `<script>` tags, because the sequence `</script>` can break out of the tag.
 **Prevention:** Always apply HTML-safe encoding (e.g. `.replace("<", "\u003c")`) to JSON data embedded directly inside HTML script tags.
 
+## $(date +%Y-%m-%d) - Prevent XXE Vulnerability in Solution File Parsing
+**Vulnerability:** XML External Entity (XXE) vulnerability in `.slnx` file parsing.
+**Learning:** `xml.etree.ElementTree.parse` was used to parse solution files, which can allow an attacker to read local files or conduct SSRF attacks if malicious XML payloads are provided in `.slnx` files.
+**Prevention:** Always use the custom `safe_et_parse` function (or `safe_et_fromstring`) which utilizes a custom secure Expat parser configured to reject forbidden DOCTYPE and ENTITY declarations.
