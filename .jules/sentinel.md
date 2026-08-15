@@ -8,3 +8,8 @@
 **Learning:** Just because a value is JSON dumped does not make it safe for HTML `<script>` tags, because the sequence `</script>` can break out of the tag.
 **Prevention:** Always apply HTML-safe encoding (e.g. `.replace("<", "\u003c")`) to JSON data embedded directly inside HTML script tags.
 
+
+## 2026-08-15 - Prevent XXE Vulnerabilities When Parsing Solution/POM Files
+**Vulnerability:** XML External Entity (XXE) vulnerability when parsing .slnx files via `ET.parse(sln_path)` and pom.xml files via `ET.fromstring(parent_pom_xml)`.
+**Learning:** The default standard library `xml.etree.ElementTree` parsing functions are vulnerable to XXE (e.g., local file inclusion, DOS via billion laughs) when processing untrusted XML data.
+**Prevention:** Always use custom secure wrapper functions (like `safe_et_parse` and `safe_et_fromstring`) that explicitly disable unsafe XML features, limit depth, and prevent DOCTYPE/ENTITY processing.
