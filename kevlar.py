@@ -373,11 +373,11 @@ def calculate_cvss4_score_approx(vector_str):
             ac = "H"
         pr = parts.get("PR", "N")
         ui = "N"
-        if parts.get("UI") in ("A", "R"):
+        if parts.get("UI") in {"A", "R"}:
             ui = "R"
             
         scope = "U"
-        if parts.get("SC") in ("H", "L") or parts.get("SI") in ("H", "L") or parts.get("SA") in ("H", "L"):
+        if parts.get("SC") in {"H", "L"} or parts.get("SI") in {"H", "L"} or parts.get("SA") in {"H", "L"}:
             scope = "C"
             
         c = parts.get("VC", "N")
@@ -682,7 +682,7 @@ def safe_urlopen(req, timeout=10, max_retries=5, backoff=0.5):
     # 3. Validar esquema usando urlparse (solo permitir https y http, priorizando https)
     parsed = urllib.parse.urlparse(url_str)
     scheme = parsed.scheme.lower()
-    if scheme not in ("https", "http"):
+    if scheme not in {"https", "http"}:
         raise ValueError("Protocolo de comunicación no permitido")
 
     # 4. Asegurar que la validación ocurre antes de procesar/instanciar el Request hacia la red
@@ -954,7 +954,7 @@ def fetch_node_schedule():
 def satisfy_term(version_str, term):
     try:
         term = term.strip()
-        if not term or term in ("*", "x"):
+        if not term or term in {"*", "x"}:
             return True
             
         op = ""
@@ -969,7 +969,7 @@ def satisfy_term(version_str, term):
         
         _, v_maj, v_min, v_pat, _, _ = parse_semver(version_str)
         
-        if (ver_part.endswith(".x") or ver_part.endswith(".*")) and op not in ("^", "~"):
+        if (ver_part.endswith(".x") or ver_part.endswith(".*")) and op not in {"^", "~"}:
             parts = ver_part.split(".")
             try:
                 if len(parts) == 2:
@@ -1003,7 +1003,7 @@ def satisfy_term(version_str, term):
             return compare_versions(version_str, ver_part) > 0
         elif op == "<":
             return compare_versions(version_str, ver_part) < 0
-        elif op in ("=", "==", ""):
+        elif op in {"=", "==", ""}:
             return compare_versions(version_str, ver_part) == 0
         elif op == "^":
             if compare_versions(version_str, ver_part) < 0:
@@ -1022,12 +1022,12 @@ def satisfy_term(version_str, term):
                 
             parts = [p.strip() for p in clean_ver.split(".") if p.strip()]
             
-            is_wildcard_minor = (len(parts) >= 2 and parts[1] in ("x", "*"))
+            is_wildcard_minor = (len(parts) >= 2 and parts[1] in {"x", "*"})
             is_only_major_zero = (len(parts) == 1 and parts[0] == "0")
             if is_only_major_zero or is_wildcard_minor:
                 return v_maj == 0
                 
-            is_wildcard_patch = (len(parts) >= 3 and parts[0] == "0" and parts[1] == "0" and parts[2] in ("x", "*"))
+            is_wildcard_patch = (len(parts) >= 3 and parts[0] == "0" and parts[1] == "0" and parts[2] in {"x", "*"})
             if is_wildcard_patch:
                 return v_maj == 0 and v_min == 0 and v_pat == t_pat
                 
@@ -1061,7 +1061,7 @@ def satisfy_term(version_str, term):
 
 def check_semver_satisfies(version_str, range_str):
     """Checks if version_str satisfies range_str according to semver rules."""
-    if not range_str or range_str.strip() in ("*", "x", "any"):
+    if not range_str or range_str.strip() in {"*", "x", "any"}:
         return True
     
     range_str = re.sub(r'([><=^~])\s+', r'\1', range_str.strip())
@@ -1182,7 +1182,7 @@ def analyze_node_constraint(constraint_str):
     ]
     latest_lts = active_even_majors[-1] if active_even_majors else DEFAULT_FALLBACK_MAJOR
     
-    if not constraint_str or constraint_str.strip() in ("*", "x", "any"):
+    if not constraint_str or constraint_str.strip() in {"*", "x", "any"}:
         return "minor", f"Node.js engine constraint is wildcard or missing. Recommend specifying >={latest_lts}.0.0.", None, f">={latest_lts}.0.0"
         
     # Find all major versions satisfied by the constraint
@@ -1299,7 +1299,7 @@ def classify_update(installed_str, latest_str):
     clean_inst = str(installed_str).strip().lstrip("v").split("+")[0]
     clean_late = str(latest_str).strip().lstrip("v").split("+")[0]
     
-    if clean_inst == clean_late or clean_late in ("0.0.0", "unknown", ""):
+    if clean_inst == clean_late or clean_late in {"0.0.0", "unknown", ""}:
         return "up-to-date"
         
     cmp = compare_versions(installed_str, latest_str)
@@ -1318,9 +1318,9 @@ def classify_update(installed_str, latest_str):
 
 def determine_update_type(installed_ver, latest_same_major, latest_absolute):
     """Determines update type, returning minor-major or patch-major if both updates exist."""
-    if not latest_absolute or str(latest_absolute).strip() in ("0.0.0", "unknown", ""):
+    if not latest_absolute or str(latest_absolute).strip() in {"0.0.0", "unknown", ""}:
         return "up-to-date"
-    if not installed_ver or str(installed_ver).strip() in ("0.0.0", "unknown", ""):
+    if not installed_ver or str(installed_ver).strip() in {"0.0.0", "unknown", ""}:
         return "up-to-date"
         
     clean_inst = str(installed_ver).strip().lstrip("v").split("+")[0]
@@ -1333,7 +1333,7 @@ def determine_update_type(installed_ver, latest_same_major, latest_absolute):
         clean_same = str(latest_same_major).strip().lstrip("v").split("+")[0]
         if clean_inst and clean_same and clean_inst != clean_same:
             same_major_type = classify_update(clean_inst, clean_same)
-            if same_major_type in ("minor", "patch"):
+            if same_major_type in {"minor", "patch"}:
                 return f"{same_major_type}-major"
                 
     return abs_type
@@ -1439,7 +1439,7 @@ def clean_repo_url(url):
                 url = "https://" + url
             parsed = urllib.parse.urlparse(url)
             
-        if parsed.scheme not in ("http", "https"):
+        if parsed.scheme not in {"http", "https"}:
             return None
     except Exception:
         return None
@@ -1803,7 +1803,7 @@ def parse_pnpm_lock(filepath):
                 # Maintain the indentation stack: pop states that are at deeper indentation (preserving DEPENDENCIES at equal indent)
                 while stack:
                     top_indent, top_state, _ = stack[-1]
-                    if top_state in ('DEPENDENCIES', 'IMPORTER_DEPS') and indent == top_indent:
+                    if top_state in {'DEPENDENCIES', 'IMPORTER_DEPS'} and indent == top_indent:
                         break
                     if indent <= top_indent:
                         stack.pop()
@@ -1826,13 +1826,13 @@ def parse_pnpm_lock(filepath):
                     stack.append((indent, 'PACKAGES', None))
                     continue
                 
-                if current_state in ('IMPORTERS', 'IMPORTER_ITEM', 'IMPORTER_DEPS'):
+                if current_state in {'IMPORTERS', 'IMPORTER_ITEM', 'IMPORTER_DEPS'}:
                     if stripped.startswith(("dependencies:", "devDependencies:", "optionalDependencies:", "peerDependencies:")):
-                        while stack and stack[-1][1] in ('IMPORTER_DEPS', 'IMPORTER_DEP_ITEM'):
+                        while stack and stack[-1][1] in {'IMPORTER_DEPS', 'IMPORTER_DEP_ITEM'}:
                             stack.pop()
                         stack.append((indent, 'IMPORTER_DEPS', None))
                         continue
-                    elif stripped.endswith(":") and current_state in ('IMPORTERS', 'IMPORTER_ITEM'):
+                    elif stripped.endswith(":") and current_state in {'IMPORTERS', 'IMPORTER_ITEM'}:
                         imp_name = stripped.rstrip(":").strip("'\"")
                         base_name = imp_name.rsplit("/", 1)[-1]
                         parents.setdefault(imp_name, set()).add("root")
@@ -1843,7 +1843,7 @@ def parse_pnpm_lock(filepath):
                 if current_state == 'IMPORTER_DEPS':
                     if ":" in stripped:
                         dep_name = stripped.split(":", 1)[0].strip().strip("'\"")
-                        if dep_name and dep_name not in ("specifier", "version") and dep_name not in ("node", "npm", "pnpm", "yarn", "bun", "python"):
+                        if dep_name and dep_name not in {"specifier", "version"} and dep_name not in {"node", "npm", "pnpm", "yarn", "bun", "python"}:
                             parents.setdefault(dep_name, set()).add("root")
                             stack.append((indent, 'IMPORTER_DEP_ITEM', dep_name))
                 
@@ -1889,14 +1889,14 @@ def parse_pnpm_lock(filepath):
                     if version and "(" in version:
                         version = version.split("(", 1)[0]
                     
-                    if pkg_name and version and pkg_name not in ("node", "npm", "pnpm", "yarn", "bun", "python"):
+                    if pkg_name and version and pkg_name not in {"node", "npm", "pnpm", "yarn", "bun", "python"}:
                         resolved.setdefault(pkg_name, set()).add(version)
                         # Push this package's context onto the stack
                         stack.append((indent, 'PACKAGE_BODY', (pkg_name, version)))
                 
-                if current_state in ('PACKAGE_BODY', 'DEPENDENCIES'):
+                if current_state in {'PACKAGE_BODY', 'DEPENDENCIES'}:
                     if stripped.startswith(("dependencies:", "devDependencies:", "optionalDependencies:", "peerDependencies:")):
-                        while stack and stack[-1][1] in ('DEPENDENCIES', 'DEPENDENCY_ITEM'):
+                        while stack and stack[-1][1] in {'DEPENDENCIES', 'DEPENDENCY_ITEM'}:
                             stack.pop()
                         stack.append((indent, 'DEPENDENCIES', None))
                         continue
@@ -1920,7 +1920,7 @@ def parse_pnpm_lock(filepath):
                     if ":" in stripped:
                         dep_name, dep_ver = stripped.split(":", 1)
                         dep_name = dep_name.strip().strip("'\"")
-                        if dep_name and current_pkg and dep_name not in ("node", "npm", "pnpm", "yarn", "bun", "python") and dep_name not in ("specifier", "version", "integrity", "optional", "transitivePeerDependencies"):
+                        if dep_name and current_pkg and dep_name not in {"node", "npm", "pnpm", "yarn", "bun", "python"} and dep_name not in {"specifier", "version", "integrity", "optional", "transitivePeerDependencies"}:
                             parents.setdefault(dep_name, set()).add(current_pkg)
                             stack.append((indent, 'DEPENDENCY_ITEM', dep_name))
                             
@@ -2216,7 +2216,7 @@ def check_npm_package(target):
             repo_url = None
             compare_url = None
             releases_url = None
-            if update_type in ("major", "minor-major", "patch-major"):
+            if update_type in {"major", "minor-major", "patch-major"}:
                 repo_url = resolve_npm_repo(name)
                 if repo_url:
                     compare_url = get_compare_url(repo_url, clean_ver, latest_absolute)
@@ -2460,7 +2460,7 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
                 sev = "UNKNOWN"
                 if "severity" in data_dict and isinstance(data_dict["severity"], list):
                     for s in data_dict["severity"]:
-                        if s.get("type") in ("CVSS_V4", "CVSS_V3", "CVSS_V2"):
+                        if s.get("type") in {"CVSS_V4", "CVSS_V3", "CVSS_V2"}:
                             score = s.get('score')
                             if score:
                                 score_str = str(score)
@@ -3023,7 +3023,7 @@ def parse_and_evaluate_marker(marker_str, env):
     def parse_comparison():
         left_val, left_name = parse_primary()
         op = peek()
-        if op in ('==', '!=', '<=', '>=', '<', '>', '===', '~=', 'in', 'not in'):
+        if op in {'==', '!=', '<=', '>=', '<', '>', '===', '~=', 'in', 'not in'}:
             consume()
             right_val, right_name = parse_primary()
             return evaluate_comparison_op(left_val, left_name, op, right_val, right_name)
@@ -3052,11 +3052,11 @@ def parse_and_evaluate_marker(marker_str, env):
 def evaluate_comparison_op(left_val, left_name, op, right_val, right_name):
     """Evaluates a single comparison operation for markers."""
     is_version = (
-        left_name in ('python_version', 'python_full_version', 'implementation_version', 'platform_version') or
-        right_name in ('python_version', 'python_full_version', 'implementation_version', 'platform_version')
+        left_name in {'python_version', 'python_full_version', 'implementation_version', 'platform_version'} or
+        right_name in {'python_version', 'python_full_version', 'implementation_version', 'platform_version'}
     )
     
-    if op in ('in', 'not in'):
+    if op in {'in', 'not in'}:
         left_str = str(left_val)
         right_str = str(right_val)
         if op == 'in':
@@ -3064,7 +3064,7 @@ def evaluate_comparison_op(left_val, left_name, op, right_val, right_name):
         else:
             return left_str not in right_str
             
-    if is_version and op in ('==', '!=', '<', '<=', '>', '>=', '~='):
+    if is_version and op in {'==', '!=', '<', '<=', '>', '>=', '~='}:
         return compare_versions_marker(left_val, op, right_val)
         
     left_str = str(left_val)
@@ -3313,7 +3313,7 @@ def check_pypi_package(target):
             repo_url = None
             compare_url = None
             releases_url = None
-            if update_type in ("major", "minor-major", "patch-major"):
+            if update_type in {"major", "minor-major", "patch-major"}:
                 urls = info.get("project_urls") or {}
                 raw_url = None
                 for key in ["Source", "Repository", "Code", "Homepage"]:
@@ -4043,7 +4043,7 @@ def check_nuget_package(target):
             repo_url = None
             compare_url = None
             releases_url = None
-            if update_type in ("major", "minor-major", "patch-major"):
+            if update_type in {"major", "minor-major", "patch-major"}:
                 repo_url = resolve_nuget_repo(name, latest_absolute)
                 if repo_url:
                     compare_url = get_compare_url(repo_url, clean_ver, latest_absolute)
@@ -4301,7 +4301,7 @@ def check_composer_package(target):
             repo_url = None
             compare_url = None
             releases_url = None
-            if update_type in ("major", "minor-major", "patch-major"):
+            if update_type in {"major", "minor-major", "patch-major"}:
                 raw_url = None
                 for item in pkg_data:
                     v_str = item.get("version", "").lstrip("v")
@@ -4786,7 +4786,7 @@ def resolve_maven_transitive_dependencies(direct_deps, max_depth=3, max_workers=
                     opt_elem = dep.find(f"{prefix}optional")
                     
                     scope = (s_elem.text.strip() if (s_elem is not None and s_elem.text) else "compile").lower()
-                    if scope in ("test", "provided", "system"):
+                    if scope in {"test", "provided", "system"}:
                         continue
                         
                     if opt_elem is not None and opt_elem.text and opt_elem.text.strip().lower() == "true":
@@ -4938,7 +4938,7 @@ def check_maven_package(target):
             repo_url = None
             compare_url = None
             releases_url = None
-            if update_type in ("major", "minor-major", "patch-major"):
+            if update_type in {"major", "minor-major", "patch-major"}:
                 repo_url = resolve_maven_repo(successful_registry, group_path, artifact_id, latest_absolute)
                 if repo_url:
                     compare_url = get_compare_url(repo_url, clean_ver, latest_absolute)
@@ -5432,7 +5432,7 @@ def check_go_package(target):
             repo_url = None
             compare_url = None
             releases_url = None
-            if update_type in ("major", "minor-major", "patch-major"):
+            if update_type in {"major", "minor-major", "patch-major"}:
                 repo_url = resolve_go_repo(name)
                 if repo_url:
                     compare_url = get_compare_url(repo_url, clean_ver, latest_absolute)
@@ -5865,7 +5865,7 @@ def parse_cargo_toml(filepath):
                     
                 # Check dependency sections
                 is_dep_section = (
-                    current_section in ("dependencies", "dev-dependencies", "build-dependencies")
+                    current_section in {"dependencies", "dev-dependencies", "build-dependencies"}
                     or (current_section and (
                         "dependencies" in current_section
                         or "dev-dependencies" in current_section
@@ -5878,7 +5878,7 @@ def parse_cargo_toml(filepath):
                     m_dep = re.match(r'^([a-zA-Z0-9_-]+)\s*=', line)
                     if m_dep:
                         dep_name = m_dep.group(1).strip()
-                        if dep_name not in ("version", "optional", "features", "default-features", "path"):
+                        if dep_name not in {"version", "optional", "features", "default-features", "path"}:
                             dependencies.add(dep_name)
     except Exception as e:
         print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Cargo.toml: {e}{COLOR_RESET}")
@@ -6017,7 +6017,7 @@ def check_rust_package(target):
             repo_url = None
             compare_url = None
             releases_url = None
-            if status in ("major", "minor-major", "patch-major"):
+            if status in {"major", "minor-major", "patch-major"}:
                 if not repo_url_raw:
                     repo_url_raw = f"https://github.com/rust-lang/{name}" if is_github_url(f"https://github.com/rust-lang/{name}") else None
                 repo_url = clean_repo_url(repo_url_raw)
@@ -6302,7 +6302,7 @@ def check_ruby_package(target):
             repo_url = None
             compare_url = None
             releases_url = None
-            if status in ("major", "minor-major", "patch-major"):
+            if status in {"major", "minor-major", "patch-major"}:
                 try:
                     url_gem = f"https://rubygems.org/api/v1/gems/{urllib.parse.quote(name)}.json"
                     req_g = urllib.request.Request(url_gem)
@@ -6709,11 +6709,11 @@ def validate_configuration_drift(results):
         
         if not declared or not installed:
             continue
-        if str(declared).strip().lower() in ("n/a", "unknown", "", "transitive"):
+        if str(declared).strip().lower() in {"n/a", "unknown", "", "transitive"}:
             continue
         if r.get("dep_type") == "Transitive" or (r.get("required_by") and not r.get("is_direct", False)):
             continue
-        if str(installed).strip().lower() in ("n/a", "unknown", ""):
+        if str(installed).strip().lower() in {"n/a", "unknown", ""}:
             continue
             
         decl_str = str(declared).strip()
@@ -6762,10 +6762,10 @@ class TerminalTextFormatter:
     @staticmethod
     def get_char_width(char):
         """Returns visual terminal width of a character."""
-        if char in ("🚫", "🛡️", "🛡"):
+        if char in {"🚫", "🛡️", "🛡"}:
             return 2
         w = unicodedata.east_asian_width(char)
-        if w in ('W', 'F'):
+        if w in {'W', 'F'}:
             return 2
         if ord(char) > 0xffff:
             return 2
@@ -6801,7 +6801,7 @@ def print_results_table(results, pkg_data, show_all, vuls_enabled=False, no_show
     filtered_results = []
     for r in results:
         is_issue = (
-            r["status"] in ("major", "minor", "patch") 
+            r["status"] in {"major", "minor", "patch"}
             or r["deprecated"] 
             or r["status"] == "error"
             or (vuls_enabled and r.get("vulnerabilities"))
@@ -6965,7 +6965,7 @@ def print_results_table(results, pkg_data, show_all, vuls_enabled=False, no_show
     # Print Major Update Diffs section
     major_diffs_to_print = []
     for r in filtered_results:
-        if r["status"] in ("major", "minor-major", "patch-major") and r.get("compare_url"):
+        if r["status"] in {"major", "minor-major", "patch-major"} and r.get("compare_url"):
             major_diffs_to_print.append(f"  {COLOR_BOLD}{r['name']}{COLOR_RESET}: {COLOR_CYAN}{r['compare_url']}{COLOR_RESET}")
             
     if major_diffs_to_print:
@@ -7196,7 +7196,7 @@ def generate_sarif_run(results):
             
             # Severity level mapping for SARIF:
             # critical/high -> error, medium -> warning, low/unknown -> note
-            if severity in ("malicious", "critical", "high"):
+            if severity in {"malicious", "critical", "high"}:
                 sarif_level = "error"
             elif severity == "medium":
                 sarif_level = "warning"
@@ -7259,8 +7259,8 @@ def generate_sarif_run(results):
                     }
                 }
                 
-        # 3. Map Outdated Dependency (status in ("major", "minor", "patch") and not is_config_drift)
-        if status in ("major", "minor", "patch") and not is_config_drift:
+        # 3. Map Outdated Dependency (status in {"major", "minor", "patch"} and not is_config_drift)
+        if status in {"major", "minor", "patch"} and not is_config_drift:
             rule_id = "KEVLAR-OUTDATED-DEPENDENCY"
             latest = r.get("latest") or "unknown"
             
@@ -8097,7 +8097,7 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
     insert_line_idx = None
     line_to_add = ""
     
-    if tech in ("npm", "pnpm"):
+    if tech in {"npm", "pnpm"}:
         overrides_line_idx = None
         for idx, line in enumerate(lines):
             if re.search(r'"overrides"\s*:\s*\{', line):
@@ -8283,7 +8283,7 @@ def populate_remediation_recommendations(results, default_project_path):
 
         r["remediation"] = None
         
-        is_outdated = r.get("status") in ("major", "minor", "patch", "minor-major", "patch-major")
+        is_outdated = r.get("status") in {"major", "minor", "patch", "minor-major", "patch-major"}
         has_vulns = bool(r.get("vulnerabilities"))
         is_depr = bool(r.get("deprecated"))
         
@@ -11857,7 +11857,7 @@ def check_for_updates():
         latest_version = "Error"
         
     status = "Up-to-date"
-    if latest_version not in ("Unknown", "Error"):
+    if latest_version not in {"Unknown", "Error"}:
         try:
             curr_parts = [int(x) for x in VERSION.split(".")]
             late_parts = [int(x) for x in latest_version.split(".")]
@@ -11869,7 +11869,7 @@ def check_for_updates():
                 
     if status == "Update Available":
         print(f"{COLOR_YELLOW}{ICON_WARN} A new version v{latest_version} is available! (Current: v{VERSION}).{COLOR_RESET}")
-    elif latest_version not in ("Unknown", "Error"):
+    elif latest_version not in {"Unknown", "Error"}:
         print(f"{COLOR_GREEN}{ICON_OK} Kevlar is up-to-date (v{VERSION}).{COLOR_RESET}")
 
 def print_banner():
@@ -12086,11 +12086,11 @@ def run_scan_all(args, parser):
                         
                 generated_report_basenames.add(safe_proj_dirname)
 
-                if args.format in ("html", "both"):
+                if args.format in {"html", "both"}:
                     proj_html_filepath = f"report-{safe_proj_dirname}.html"
                     export_html_report(results, pkg_data, proj_html_filepath, args.vuls)
                     
-                if args.format in ("json", "both"):
+                if args.format in {"json", "both"}:
                     proj_json_filepath = f"report-{safe_proj_dirname}.json"
                     export_json_report(results, proj_json_filepath)
                     
