@@ -2953,7 +2953,7 @@ class TestKevlar(unittest.TestCase):
 
         def mock_fetch(group_id, artifact_id, version, *args, **kwargs):
             if group_id == "org.example" and artifact_id == "parent-lib":
-                return ET.fromstring(parent_pom_xml)
+                return kevlar.safe_et_fromstring(parent_pom_xml)
             return None
 
         with patch("kevlar.fetch_remote_maven_pom", side_effect=mock_fetch):
