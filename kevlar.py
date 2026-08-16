@@ -31,19 +31,27 @@ import ctypes
 import tomllib
 import random
 
+
 # Safe terminal output wrapping to prevent UnicodeEncodeError on Windows
 class SafeWriter:
     def __init__(self, original_stream):
         self.original_stream = original_stream
-        self.encoding = (original_stream.encoding if hasattr(original_stream, "encoding") else None) or "utf-8"
+        self.encoding = (
+            original_stream.encoding if hasattr(original_stream, "encoding") else None
+        ) or "utf-8"
+
     def write(self, data):
         try:
             self.original_stream.write(data)
         except UnicodeEncodeError:
-            self.original_stream.write(data.encode(self.encoding, errors="replace").decode(self.encoding))
+            self.original_stream.write(
+                data.encode(self.encoding, errors="replace").decode(self.encoding)
+            )
+
     def flush(self):
         if hasattr(self.original_stream, "flush"):
             self.original_stream.flush()
+
 
 sys.stdout = SafeWriter(sys.stdout)
 sys.stderr = SafeWriter(sys.stderr)
@@ -51,7 +59,7 @@ sys.stderr = SafeWriter(sys.stderr)
 # Global lock to protect concurrent console writes (sys.stdout, sys.stderr, print)
 console_lock = threading.Lock()
 
-VERSION = "1.10.7"
+VERSION = "1.10.8"
 
 # External APIs Configuration
 URL_NPM_REGISTRY = "https://registry.npmjs.org/"
@@ -69,12 +77,12 @@ URL_RUBY_REGISTRY = "https://rubygems.org/api/v1/gems/"
 # ANSI escape codes for styling (HSL/Curated Theme)
 COLOR_RESET = "\033[0m"
 COLOR_BOLD = "\033[1m"
-COLOR_RED = "\033[38;5;203m"       # Sleek soft red
-COLOR_YELLOW = "\033[38;5;221m"    # Soft warm yellow
-COLOR_GREEN = "\033[38;5;120m"     # Bright fresh green
-COLOR_CYAN = "\033[38;5;86m"       # Pastel cyan
-COLOR_MAGENTA = "\033[38;5;213m"   # Bright pinkish/magenta
-COLOR_GRAY = "\033[38;5;244m"      # Medium gray
+COLOR_RED = "\033[38;5;203m"  # Sleek soft red
+COLOR_YELLOW = "\033[38;5;221m"  # Soft warm yellow
+COLOR_GREEN = "\033[38;5;120m"  # Bright fresh green
+COLOR_CYAN = "\033[38;5;86m"  # Pastel cyan
+COLOR_MAGENTA = "\033[38;5;213m"  # Bright pinkish/magenta
+COLOR_GRAY = "\033[38;5;244m"  # Medium gray
 
 # Default Unicode Icons for visual cues
 ICON_OK = "✔"
@@ -86,10 +94,17 @@ ICON_SHIELD = "🛡️"
 
 # Default Unicode Box borders
 BORDER_CHARS = {
-    "top_left": "┌", "horizontal": "─", "top_join": "┬", "top_right": "┐",
-    "mid_left": "├", "mid_join": "┼", "mid_right": "┤",
-    "bot_left": "└", "bot_join": "┴", "bot_right": "┘",
-    "vertical": "│"
+    "top_left": "┌",
+    "horizontal": "─",
+    "top_join": "┬",
+    "top_right": "┐",
+    "mid_left": "├",
+    "mid_join": "┼",
+    "mid_right": "┤",
+    "bot_left": "└",
+    "bot_join": "┴",
+    "bot_right": "┘",
+    "vertical": "│",
 }
 
 # Regex for parsing semantic version strings
@@ -100,80 +115,87 @@ TECHNOLOGIES = {
     "npm": {
         "files": ["package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml"],
         "osv_ecosystem": "npm",
-        "runner": None
+        "runner": None,
     },
     "pip": {
-        "files": ["requirements.txt", "poetry.lock", "Pipfile.lock", "pdm.lock", "pyproject.toml"],
+        "files": [
+            "requirements.txt",
+            "poetry.lock",
+            "Pipfile.lock",
+            "pdm.lock",
+            "pyproject.toml",
+        ],
         "osv_ecosystem": "PyPI",
-        "runner": None
+        "runner": None,
     },
     "nuget": {
         "files": [".csproj", ".sln", ".slnx", "packages.config", "project.assets.json"],
         "osv_ecosystem": "NuGet",
-        "runner": None
+        "runner": None,
     },
     "php": {
         "files": ["composer.json", "composer.lock"],
         "osv_ecosystem": "Packagist",
-        "runner": None
+        "runner": None,
     },
-    "maven": {
-        "files": ["pom.xml"],
-        "osv_ecosystem": "Maven",
-        "runner": None
-    },
-    "go": {
-        "files": ["go.mod"],
-        "osv_ecosystem": "Go",
-        "runner": None
-    },
+    "maven": {"files": ["pom.xml"], "osv_ecosystem": "Maven", "runner": None},
+    "go": {"files": ["go.mod"], "osv_ecosystem": "Go", "runner": None},
     "rust": {
         "files": ["Cargo.toml", "Cargo.lock"],
         "osv_ecosystem": "crates.io",
-        "runner": None
+        "runner": None,
     },
     "ruby": {
         "files": ["Gemfile", "Gemfile.lock"],
         "osv_ecosystem": "RubyGems",
-        "runner": None
+        "runner": None,
     },
     "gradle": {
-        "files": ["build.gradle", "build.gradle.kts", "gradle.lockfile", "libs.versions.toml"],
+        "files": [
+            "build.gradle",
+            "build.gradle.kts",
+            "gradle.lockfile",
+            "libs.versions.toml",
+        ],
         "osv_ecosystem": "Maven",
-        "runner": None
+        "runner": None,
     },
     "android": {
-        "files": ["build.gradle", "build.gradle.kts", "gradle.lockfile", "libs.versions.toml"],
+        "files": [
+            "build.gradle",
+            "build.gradle.kts",
+            "gradle.lockfile",
+            "libs.versions.toml",
+        ],
         "osv_ecosystem": "Maven",
-        "runner": None
-    }
+        "runner": None,
+    },
 }
 
 # Cached Regex patterns for performance
-RE_SEMVER_ALPHA = re.compile(r'([a-zA-Z]+.*)$')
-RE_SEMVER_DIGITS = re.compile(r'\d+')
-RE_CLEAN_VER = re.compile(r'^[^\d]*')
+RE_SEMVER_ALPHA = re.compile(r"([a-zA-Z]+.*)$")
+RE_SEMVER_DIGITS = re.compile(r"\d+")
+RE_CLEAN_VER = re.compile(r"^[^\d]*")
 
 SEMVER_REGEX = re.compile(
-    r'^v?(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)'
-    r'(?:-(?P<prerelease>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?'
-    r'(?:\+(?P<buildmetadata>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$'
+    r"^v?(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)"
+    r"(?:-(?P<prerelease>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+    r"(?:\+(?P<buildmetadata>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$"
 )
 
 RE_MARKER_TOKEN = re.compile(
-    r'\s*('
-    r'\bnot\s+in\b|\bin\b|'
-    r'==|!=|<=|>=|<|>|===|~=|'
-    r'\band\b|\bor\b|\bnot\b|'
-    r'\(|\)|'
+    r"\s*("
+    r"\bnot\s+in\b|\bin\b|"
+    r"==|!=|<=|>=|<|>|===|~=|"
+    r"\band\b|\bor\b|\bnot\b|"
+    r"\(|\)|"
     r'"[^"]*"|\'[^\']*\'|'
-    r'[a-zA-Z_][a-zA-Z0-9_]*'
-    r')\s*'
+    r"[a-zA-Z_][a-zA-Z0-9_]*"
+    r")\s*"
 )
 RE_CSPROJ_SLN = re.compile(r'Project\([^)]+\)\s*=\s*"[^"]+"\s*,\s*"([^"]+)"')
 RE_MAVEN_PRERELEASE = re.compile(
-    r'[-.]?(alpha|beta|rc|cr|m|preview|dev|snapshot|milestone)\d*\b',
-    re.IGNORECASE
+    r"[-.]?(alpha|beta|rc|cr|m|preview|dev|snapshot|milestone)\d*\b", re.IGNORECASE
 )
 RE_GRADLE_CONFIG = re.compile(
     r'(?:implementation|api|compile|runtimeOnly|testImplementation|testCompile|compileOnly)\s*\(?\s*[\'"]([^\'":]+):([^\'":]+):([^\'":]+)[\'"]'
@@ -184,6 +206,7 @@ RE_GRADLE_MAP1 = re.compile(
 RE_GRADLE_MAP2 = re.compile(
     r'group\s*=\s*[\'"]([^\'"]+)[\'"]\s*,\s*name\s*=\s*[\'"]([^\'"]+)[\'"]\s*,\s*version\s*=\s*[\'"]([^\'"]+)[\'"]'
 )
+
 
 def init_colors_and_encoding():
     """Enable ANSI escape sequences and adjust icons for stdout encoding compatibility."""
@@ -211,16 +234,24 @@ def init_colors_and_encoding():
         ICON_ERROR = "[ERROR]"
         ICON_DEPRECATED = "[DEPR]"
         ICON_SHIELD = "[SEC]"
-        
+
         BORDER_CHARS = {
-            "top_left": "+", "horizontal": "-", "top_join": "+", "top_right": "+",
-            "mid_left": "+", "mid_join": "+", "mid_right": "+",
-            "bot_left": "+", "bot_join": "+", "bot_right": "+",
-            "vertical": "|"
+            "top_left": "+",
+            "horizontal": "-",
+            "top_join": "+",
+            "top_right": "+",
+            "mid_left": "+",
+            "mid_join": "+",
+            "mid_right": "+",
+            "bot_left": "+",
+            "bot_join": "+",
+            "bot_right": "+",
+            "vertical": "|",
         }
 
 
 DEBUG_MODE = False
+
 
 def _is_safe_path(base_dir, target_path):
     """
@@ -232,8 +263,11 @@ def _is_safe_path(base_dir, target_path):
     real_target = os.path.realpath(target_path)
     if real_target == real_base:
         return True
-    base_prefix = real_base if real_base.endswith(os.path.sep) else real_base + os.path.sep
+    base_prefix = (
+        real_base if real_base.endswith(os.path.sep) else real_base + os.path.sep
+    )
     return real_target.startswith(base_prefix)
+
 
 def _detect_xml_encoding(content):
     """
@@ -244,16 +278,16 @@ def _detect_xml_encoding(content):
         return "utf-8"
 
     # 1. Check for standard Byte Order Marks (BOM)
-    if content.startswith(b'\xef\xbb\xbf'):
-        return 'utf-8-sig'
-    if content.startswith(b'\xff\xfe\x00\x00'):
-        return 'utf-32-le'
-    if content.startswith(b'\x00\x00\xfe\xff'):
-        return 'utf-32-be'
-    if content.startswith(b'\xff\xfe'):
-        return 'utf-16'  # Python's utf-16 auto-detects and removes BOM
-    if content.startswith(b'\xfe\xff'):
-        return 'utf-16'  # Python's utf-16 auto-detects and removes BOM
+    if content.startswith(b"\xef\xbb\xbf"):
+        return "utf-8-sig"
+    if content.startswith(b"\xff\xfe\x00\x00"):
+        return "utf-32-le"
+    if content.startswith(b"\x00\x00\xfe\xff"):
+        return "utf-32-be"
+    if content.startswith(b"\xff\xfe"):
+        return "utf-16"  # Python's utf-16 auto-detects and removes BOM
+    if content.startswith(b"\xfe\xff"):
+        return "utf-16"  # Python's utf-16 auto-detects and removes BOM
 
     # 2. Sniff encoding using first occurrence of '<' (0x3c)
     # This detects UTF-16 and UTF-32 without BOM, and handles leading whitespace.
@@ -266,19 +300,24 @@ def _detect_xml_encoding(content):
     if idx != -1:
         # Check alignment and surrounding null bytes to determine encoding.
         # UTF-32-BE: '<' is U+0000003C (0x00 0x00 0x00 0x3c), so idx % 4 == 3.
-        if idx % 4 == 3 and idx >= 3 and content[idx-3:idx] == b'\x00\x00\x00':
-            return 'utf-32-be'
+        if idx % 4 == 3 and idx >= 3 and content[idx - 3 : idx] == b"\x00\x00\x00":
+            return "utf-32-be"
         # UTF-32-LE: '<' is U+3C000000 (0x3c 0x00 0x00 0x00), so idx % 4 == 0.
-        if idx % 4 == 0 and idx + 3 < len(content) and content[idx+1:idx+4] == b'\x00\x00\x00':
-            return 'utf-32-le'
+        if (
+            idx % 4 == 0
+            and idx + 3 < len(content)
+            and content[idx + 1 : idx + 4] == b"\x00\x00\x00"
+        ):
+            return "utf-32-le"
         # UTF-16-BE: '<' is U+003C (0x00 0x3c), so idx % 2 == 1.
-        if idx % 2 == 1 and idx >= 1 and content[idx-1] == 0x00:
-            return 'utf-16-be'
+        if idx % 2 == 1 and idx >= 1 and content[idx - 1] == 0x00:
+            return "utf-16-be"
         # UTF-16-LE: '<' is U+3C00 (0x3c 0x00), so idx % 2 == 0.
-        if idx % 2 == 0 and idx + 1 < len(content) and content[idx+1] == 0x00:
-            return 'utf-16-le'
+        if idx % 2 == 0 and idx + 1 < len(content) and content[idx + 1] == 0x00:
+            return "utf-16-le"
 
     return "utf-8"
+
 
 def calculate_cvss2_score(vector_str):
     """Calculates base CVSS v2 score from a vector string."""
@@ -288,25 +327,26 @@ def calculate_cvss2_score(vector_str):
             if p.count(":") == 1:
                 k, v = p.split(":")
                 parts[k] = v
-        
+
         av = {"L": 0.395, "A": 0.646, "N": 1.0}.get(parts.get("AV"), 1.0)
         ac = {"H": 0.35, "M": 0.61, "L": 0.71}.get(parts.get("AC"), 0.71)
         au = {"M": 0.45, "S": 0.56, "N": 0.704}.get(parts.get("Au"), 0.704)
-        
+
         c = {"N": 0.0, "P": 0.275, "C": 0.660}.get(parts.get("C"), 0.0)
         i = {"N": 0.0, "P": 0.275, "C": 0.660}.get(parts.get("I"), 0.0)
         a = {"N": 0.0, "P": 0.275, "C": 0.660}.get(parts.get("A"), 0.0)
-        
+
         impact = 10.41 * (1 - (1 - c) * (1 - i) * (1 - a))
         exploitability = 20.0 * av * ac * au
-        
+
         if impact == 0:
             return 0.0
-            
+
         score = ((0.6 * impact) + (0.4 * exploitability) - 1.5) * 1.176
         return round(score, 1)
     except Exception:
         return None
+
 
 def calculate_cvss3_score(vector_str):
     """Calculates base CVSS v3.x score from a vector string."""
@@ -316,47 +356,48 @@ def calculate_cvss3_score(vector_str):
             if p.count(":") == 1:
                 k, v = p.split(":")
                 parts[k] = v
-        
+
         av = {"N": 0.85, "A": 0.62, "L": 0.55, "P": 0.20}.get(parts.get("AV"), 0.85)
         ac = {"L": 0.77, "H": 0.44}.get(parts.get("AC"), 0.77)
         ui = {"N": 0.85, "R": 0.62}.get(parts.get("UI"), 0.85)
         scope = parts.get("S", "U")
-        
+
         if scope == "C":
             pr = {"N": 0.85, "L": 0.68, "H": 0.50}.get(parts.get("PR"), 0.85)
         else:
             pr = {"N": 0.85, "L": 0.62, "H": 0.27}.get(parts.get("PR"), 0.85)
-            
+
         c = {"N": 0.0, "L": 0.22, "H": 0.56}.get(parts.get("C"), 0.0)
         i = {"N": 0.0, "L": 0.22, "H": 0.56}.get(parts.get("I"), 0.0)
         a = {"N": 0.0, "L": 0.22, "H": 0.56}.get(parts.get("A"), 0.0)
-        
+
         iss = 1 - (1 - c) * (1 - i) * (1 - a)
-        
+
         if scope == "C":
             impact = 7.52 * (iss - 0.029) - 3.25 * (iss - 0.02) ** 15
         else:
             impact = 6.42 * iss
-            
+
         exploitability = 8.22 * av * ac * pr * ui
-        
+
         if impact <= 0:
             return 0.0
-            
+
         if scope == "C":
             score = 1.08 * (impact + exploitability)
         else:
             score = impact + exploitability
-            
+
         score_val = min(score, 10.0)
         int_val = int(score_val * 100)
         if int_val % 10 == 0:
             return int_val / 100.0
         else:
             return (int_val - (int_val % 10) + 10) / 100.0
-            
+
     except Exception:
         return None
+
 
 def calculate_cvss4_score_approx(vector_str):
     """Approximates base CVSS v4.0 score by translating metrics to v3 equivalent."""
@@ -366,28 +407,35 @@ def calculate_cvss4_score_approx(vector_str):
             if p.count(":") == 1:
                 k, v = p.split(":")
                 parts[k] = v
-        
+
         av = parts.get("AV", "N")
         ac = parts.get("AC", "L")
         if parts.get("AT") == "P":
             ac = "H"
         pr = parts.get("PR", "N")
         ui = "N"
-        if parts.get("UI") in ("A", "R"):
+        if parts.get("UI") in {"A", "R"}:
             ui = "R"
-            
+
         scope = "U"
-        if parts.get("SC") in ("H", "L") or parts.get("SI") in ("H", "L") or parts.get("SA") in ("H", "L"):
+        if (
+            parts.get("SC") in {"H", "L"}
+            or parts.get("SI") in {"H", "L"}
+            or parts.get("SA") in {"H", "L"}
+        ):
             scope = "C"
-            
+
         c = parts.get("VC", "N")
         i = parts.get("VI", "N")
         a = parts.get("VA", "N")
-        
-        v3_vector = f"CVSS:3.1/AV:{av}/AC:{ac}/PR:{pr}/UI:{ui}/S:{scope}/C:{c}/I:{i}/A:{a}"
+
+        v3_vector = (
+            f"CVSS:3.1/AV:{av}/AC:{ac}/PR:{pr}/UI:{ui}/S:{scope}/C:{c}/I:{i}/A:{a}"
+        )
         return calculate_cvss3_score(v3_vector)
     except Exception:
         return None
+
 
 def get_severity_level(vuln):
     """Determines the severity level (malicious, critical, high, medium, low, unknown) of a vulnerability."""
@@ -402,91 +450,118 @@ def get_severity_level(vuln):
         severity = vuln.get("severity", "UNKNOWN")
     else:
         severity = str(vuln)
-        
+
     sev_upper = severity.upper()
-    
+
     # 1. Exact matches or plain text checks first
     if "CRITICAL" in sev_upper:
         return "critical"
     if "HIGH" in sev_upper or "UNSOUND" in sev_upper:
         return "high"
-    if "MEDIUM" in sev_upper or "MODERATE" in sev_upper or "UNMAINTAINED" in sev_upper or "WARNING" in sev_upper or "NOTICE" in sev_upper or "INFORMATIONAL" in sev_upper:
+    if (
+        "MEDIUM" in sev_upper
+        or "MODERATE" in sev_upper
+        or "UNMAINTAINED" in sev_upper
+        or "WARNING" in sev_upper
+        or "NOTICE" in sev_upper
+        or "INFORMATIONAL" in sev_upper
+    ):
         return "medium"
     if "LOW" in sev_upper:
         return "low"
     if "MALICIOUS" in sev_upper:
         return "malicious"
-        
+
     # 2. CVSS score calculations
     if "CVSS" in sev_upper or "AV:" in sev_upper:
-        m4 = re.search(r'(CVSS:4\.[0-9a-zA-Z/:.]+)', sev_upper)
+        m4 = re.search(r"(CVSS:4\.[0-9a-zA-Z/:.]+)", sev_upper)
         if m4:
             vector = m4.group(1)
             score = calculate_cvss4_score_approx(vector)
             if score is not None:
-                if score >= 9.0: return "critical"
-                elif score >= 7.0: return "high"
-                elif score >= 4.0: return "medium"
-                elif score >= 0.1: return "low"
-                
-        m3 = re.search(r'(CVSS:3\.[0-9a-zA-Z/:.]+)', sev_upper)
+                if score >= 9.0:
+                    return "critical"
+                elif score >= 7.0:
+                    return "high"
+                elif score >= 4.0:
+                    return "medium"
+                elif score >= 0.1:
+                    return "low"
+
+        m3 = re.search(r"(CVSS:3\.[0-9a-zA-Z/:.]+)", sev_upper)
         if m3:
             vector = m3.group(1)
             score = calculate_cvss3_score(vector)
             if score is not None:
-                if score >= 9.0: return "critical"
-                elif score >= 7.0: return "high"
-                elif score >= 4.0: return "medium"
-                elif score >= 0.1: return "low"
-                
+                if score >= 9.0:
+                    return "critical"
+                elif score >= 7.0:
+                    return "high"
+                elif score >= 4.0:
+                    return "medium"
+                elif score >= 0.1:
+                    return "low"
+
         vector2 = None
-        m2 = re.search(r'(CVSS:2\.[0-9a-zA-Z/:.]+)', sev_upper)
+        m2 = re.search(r"(CVSS:2\.[0-9a-zA-Z/:.]+)", sev_upper)
         if m2:
             vector2 = m2.group(1)
         elif "AV:" in sev_upper:
-            m_raw2 = re.search(r'(AV:[NAL]/AC:[HML]/Au:[MSN]/C:[NPC]/I:[NPC]/A:[NPC])', sev_upper)
+            m_raw2 = re.search(
+                r"(AV:[NAL]/AC:[HML]/Au:[MSN]/C:[NPC]/I:[NPC]/A:[NPC])", sev_upper
+            )
             if m_raw2:
                 vector2 = m_raw2.group(1)
-                
+
         if vector2:
             score = calculate_cvss2_score(vector2)
             if score is not None:
-                if score >= 9.0: return "critical"
-                elif score >= 7.0: return "high"
-                elif score >= 4.0: return "medium"
-                elif score >= 0.1: return "low"
+                if score >= 9.0:
+                    return "critical"
+                elif score >= 7.0:
+                    return "high"
+                elif score >= 4.0:
+                    return "medium"
+                elif score >= 0.1:
+                    return "low"
 
     # 3. Fallback metric-based heuristic (similar to normalize_severity_to_text)
     s = severity.lower()
     import re as _re
+
     def _metric(vector, key):
-        m = _re.search(r'/' + key.lower() + r'(?=[:/])([nhml])', vector)
+        m = _re.search(r"/" + key.lower() + r"(?=[:/])([nhml])", vector)
         if not m:
-            m = _re.search(r'(?:^|/)' + key.lower() + r':([nhml])', vector)
-        return m.group(1) if m else 'n'
-        
-    if 'cvss:3' in s or 'cvss:2' in s or 'av:' in s:
-        c = _metric(s, 'C'); i = _metric(s, 'I'); a = _metric(s, 'A')
-        sc = _metric(s, 'S')
-        if sc == 'c' and (c == 'h' or i == 'h'):
+            m = _re.search(r"(?:^|/)" + key.lower() + r":([nhml])", vector)
+        return m.group(1) if m else "n"
+
+    if "cvss:3" in s or "cvss:2" in s or "av:" in s:
+        c = _metric(s, "C")
+        i = _metric(s, "I")
+        a = _metric(s, "A")
+        sc = _metric(s, "S")
+        if sc == "c" and (c == "h" or i == "h"):
             return "critical"
-        if c == 'h' or i == 'h' or a == 'h':
+        if c == "h" or i == "h" or a == "h":
             return "high"
-        if c == 'l' or i == 'l' or a == 'l':
+        if c == "l" or i == "l" or a == "l":
             return "medium"
         return "low"
-        
-    if 'cvss:4' in s:
-        vc = _metric(s, 'VC'); vi = _metric(s, 'VI'); va = _metric(s, 'VA')
-        if vc == 'h' and vi == 'h':
+
+    if "cvss:4" in s:
+        vc = _metric(s, "VC")
+        vi = _metric(s, "VI")
+        va = _metric(s, "VA")
+        if vc == "h" and vi == "h":
             return "critical"
-        if vc == 'h' or vi == 'h' or va == 'h':
+        if vc == "h" or vi == "h" or va == "h":
             return "high"
-        if vc == 'l' or vi == 'l' or va == 'l':
+        if vc == "l" or vi == "l" or va == "l":
             return "medium"
         return "low"
-        
+
     return "unknown"
+
 
 class SecureXMLBuilder:
     def __init__(self, max_depth=15, max_expanded_size=10 * 1024 * 1024):
@@ -500,8 +575,10 @@ class SecureXMLBuilder:
     def start_element(self, name, attrs):
         self.depth += 1
         if self.depth > self.max_depth:
-            raise ValueError(f"XML parsing rejected: Node depth exceeds limit of {self.max_depth}")
-        
+            raise ValueError(
+                f"XML parsing rejected: Node depth exceeds limit of {self.max_depth}"
+            )
+
         if "}" in name and not name.startswith("{"):
             name = "{" + name
 
@@ -544,52 +621,65 @@ class SecureXMLBuilder:
                 last_child = elem[-1]
                 last_child.tail = (last_child.tail or "") + data
 
-def parse_secure_xml(content, max_depth=15, max_expanded_size=10*1024*1024):
+
+def parse_secure_xml(content, max_depth=15, max_expanded_size=10 * 1024 * 1024):
     builder = SecureXMLBuilder(max_depth, max_expanded_size)
-    
+
     encoding = "utf-8"
     if isinstance(content, bytes):
         encoding = _detect_xml_encoding(content)
         try:
             prefix = content[:1024].decode("latin-1", errors="ignore")
-            m = re.search(r'<\?xml\s+[^>]*encoding\s*=\s*["\']([^"\']+)["\']', prefix, re.IGNORECASE)
+            m = re.search(
+                r'<\?xml\s+[^>]*encoding\s*=\s*["\']([^"\']+)["\']',
+                prefix,
+                re.IGNORECASE,
+            )
             if m:
                 encoding = m.group(1)
         except Exception:
             pass
         try:
-            content_str = content.decode(encoding, errors='replace')
+            content_str = content.decode(encoding, errors="replace")
         except Exception:
-            content_str = content.decode('latin-1', errors='replace')
-            encoding = 'latin-1'
+            content_str = content.decode("latin-1", errors="replace")
+            encoding = "latin-1"
     else:
         content_str = content
-        m = re.search(r'<\?xml\s+[^>]*encoding\s*=\s*["\']([^"\']+)["\']', content_str[:1024], re.IGNORECASE)
+        m = re.search(
+            r'<\?xml\s+[^>]*encoding\s*=\s*["\']([^"\']+)["\']',
+            content_str[:1024],
+            re.IGNORECASE,
+        )
         if m:
             encoding = m.group(1)
 
     # FIXED: Re-encode string back to the detected/declared encoding and pass it to ParserCreate
     try:
-        content_bytes = content_str.encode(encoding, errors='replace')
+        content_bytes = content_str.encode(encoding, errors="replace")
     except Exception:
-        content_bytes = content_str.encode('utf-8', errors='replace')
-        encoding = 'utf-8'
+        content_bytes = content_str.encode("utf-8", errors="replace")
+        encoding = "utf-8"
 
     parser = xml.parsers.expat.ParserCreate(encoding=encoding, namespace_separator="}")
     parser.StartElementHandler = builder.start_element
     parser.EndElementHandler = builder.end_element
     parser.CharacterDataHandler = builder.char_data
-    
+
     # 1 y 2. Delegar la validación a los handlers de Expat y lanzar ValueError inmediato
     def forbid_doctype(*args, **kwargs):
-        raise ValueError("XML parsing rejected: XML contains forbidden DOCTYPE declarations.")
-        
+        raise ValueError(
+            "XML parsing rejected: XML contains forbidden DOCTYPE declarations."
+        )
+
     def forbid_entity(*args, **kwargs):
-        raise ValueError("XML parsing rejected: XML contains forbidden Entity declarations.")
+        raise ValueError(
+            "XML parsing rejected: XML contains forbidden Entity declarations."
+        )
 
     parser.StartDoctypeDeclHandler = forbid_doctype
     parser.EntityDeclHandler = forbid_entity
-    
+
     try:
         parser.Parse(content_bytes, True)
     except xml.parsers.expat.ExpatError as e:
@@ -600,15 +690,17 @@ def parse_secure_xml(content, max_depth=15, max_expanded_size=10*1024*1024):
         raise err
     return builder.root
 
+
 def safe_et_parse(source):
     """
     Safely parses an XML file path using ET, validating it first.
     Returns an ElementTree-like object.
     """
-    with open(source, 'rb') as f:
+    with open(source, "rb") as f:
         content = f.read()
     root = parse_secure_xml(content)
     return ET.ElementTree(root)
+
 
 def safe_et_fromstring(text):
     """
@@ -617,13 +709,14 @@ def safe_et_fromstring(text):
     """
     return parse_secure_xml(text)
 
+
 def _sanitize_error_message(exc, target_name):
     """
     Translates an internal exception into a business-safe, standardized error message
     without exposing system-level details, internal URLs, paths, or tracebacks.
     """
     msg = str(exc)
-    
+
     if isinstance(exc, urllib.error.HTTPError):
         if exc.code == 404:
             return "Registry returned not found (404)"
@@ -633,7 +726,7 @@ def _sanitize_error_message(exc, target_name):
             return "Internal server error on registry side"
         else:
             return f"Registry returned unexpected HTTP status {exc.code}"
-            
+
     if isinstance(exc, urllib.error.URLError):
         reason_str = str(exc.reason).lower()
         if "timeout" in reason_str or "timed out" in reason_str:
@@ -642,23 +735,24 @@ def _sanitize_error_message(exc, target_name):
             return "Registry SSL handshake failed"
         else:
             return "Registry connection failed or address unresolved"
-            
+
     if isinstance(exc, json.JSONDecodeError):
         return "Malformed registry response format"
-        
+
     if isinstance(exc, ET.ParseError):
         return "Malformed manifest format"
-        
+
     if isinstance(exc, ValueError):
         if "XML parsing rejected" in msg or "DOCTYPE" in msg or "ENTITY" in msg:
             return "Malformed manifest format"
         return "Invalid configuration or manifest parameters"
-        
+
     exc_type_lower = type(exc).__name__.lower()
     if "timeout" in exc_type_lower or "timedout" in exc_type_lower:
         return "Registry communication timeout"
-        
+
     return "Unexpected execution error during analysis"
+
 
 def safe_urlopen(req, timeout=10, max_retries=5, backoff=0.5):
     """Safely opens a URL with retries, exponential backoff, Retry-After handling, and default headers."""
@@ -682,7 +776,7 @@ def safe_urlopen(req, timeout=10, max_retries=5, backoff=0.5):
     # 3. Validar esquema usando urlparse (solo permitir https y http, priorizando https)
     parsed = urllib.parse.urlparse(url_str)
     scheme = parsed.scheme.lower()
-    if scheme not in ("https", "http"):
+    if scheme not in {"https", "http"}:
         raise ValueError("Protocolo de comunicación no permitido")
 
     # 4. Asegurar que la validación ocurre antes de procesar/instanciar el Request hacia la red
@@ -693,7 +787,7 @@ def safe_urlopen(req, timeout=10, max_retries=5, backoff=0.5):
 
     if not req.has_header("User-Agent"):
         req.add_header("User-Agent", f"Kevlar-CheckDeps/{VERSION}")
-        
+
     last_err = None
     for attempt in range(max_retries):
         try:
@@ -704,7 +798,11 @@ def safe_urlopen(req, timeout=10, max_retries=5, backoff=0.5):
             if e.code == 429:
                 last_err = e
                 if attempt < max_retries - 1:
-                    retry_after = e.headers.get("Retry-After") if hasattr(e, "headers") and e.headers else None
+                    retry_after = (
+                        e.headers.get("Retry-After")
+                        if hasattr(e, "headers") and e.headers
+                        else None
+                    )
                     wait_sec = None
                     if retry_after:
                         try:
@@ -712,29 +810,38 @@ def safe_urlopen(req, timeout=10, max_retries=5, backoff=0.5):
                         except ValueError:
                             pass
                     if wait_sec is None:
-                        wait_sec = backoff * (2 ** attempt) + random.uniform(0.5, 1.5)
+                        wait_sec = backoff * (2**attempt) + random.uniform(0.5, 1.5)
                     time.sleep(wait_sec)
                     continue
                 raise e
             if e.code < 500:
                 raise e
             last_err = e
-        except (urllib.error.URLError, ConnectionResetError, TimeoutError, OSError) as e:
+        except (
+            urllib.error.URLError,
+            ConnectionResetError,
+            TimeoutError,
+            OSError,
+        ) as e:
             last_err = e
-            
+
         if attempt < max_retries - 1:
-            time.sleep(backoff * (2 ** attempt) + random.uniform(0.1, 0.5))
-            
+            time.sleep(backoff * (2**attempt) + random.uniform(0.1, 0.5))
+
     if last_err:
         raise last_err
+
 
 class PrereleaseKey:
     def __init__(self, prerelease):
         self.prerelease = prerelease or ""
+
     def __lt__(self, other):
         return compare_prereleases(self.prerelease, other.prerelease) < 0
+
     def __eq__(self, other):
         return compare_prereleases(self.prerelease, other.prerelease) == 0
+
 
 def _split_mixed_identifier(s):
     """Splits a mixed alphanumeric identifier into chunks of digit and non-digit sequences.
@@ -766,6 +873,7 @@ def _split_mixed_identifier(s):
             chunks.append(chunk_str)
     return chunks
 
+
 def _compare_mixed_identifiers(part1, part2):
     """Compares two non-numeric identifiers chunk by chunk.
     Numeric chunks are compared numerically.
@@ -774,11 +882,11 @@ def _compare_mixed_identifiers(part1, part2):
     """
     chunks1 = _split_mixed_identifier(part1)
     chunks2 = _split_mixed_identifier(part2)
-    
+
     for c1, c2 in zip(chunks1, chunks2):
         type1 = type(c1)
         type2 = type(c2)
-        
+
         if type1 is type2:
             if c1 < c2:
                 return -1
@@ -791,18 +899,19 @@ def _compare_mixed_identifiers(part1, part2):
                 return -1
             else:
                 return 1
-                
+
     if len(chunks1) < len(chunks2):
         return -1
     elif len(chunks1) > len(chunks2):
         return 1
-        
+
     # Tie-breaker fallback to standard lexicographical comparison (e.g. comparing "rc01" vs "rc1")
     if part1 < part2:
         return -1
     elif part1 > part2:
         return 1
     return 0
+
 
 def compare_prereleases(p1, p2):
     """Compares two pre-release strings according to SemVer rules.
@@ -817,14 +926,14 @@ def compare_prereleases(p1, p2):
         return 1
     if not p2:  # stable is higher
         return -1
-        
-    parts1 = p1.split('.')
-    parts2 = p2.split('.')
-    
+
+    parts1 = p1.split(".")
+    parts2 = p2.split(".")
+
     for part1, part2 in zip(parts1, parts2):
         is_num1 = part1.isdigit()
         is_num2 = part2.isdigit()
-        
+
         if is_num1 and is_num2:
             n1 = int(part1)
             n2 = int(part2)
@@ -838,12 +947,13 @@ def compare_prereleases(p1, p2):
                 return res
         else:
             return -1 if is_num1 else 1
-            
+
     if len(parts1) < len(parts2):
         return -1
     elif len(parts1) > len(parts2):
         return 1
     return 0
+
 
 # ⚡ Bolt: Cache semantic version parsing to optimize hot loops during lockfile evaluations.
 # Impact: Reduces parse_semver execution time by ~90% for repeated lookups.
@@ -851,49 +961,67 @@ def compare_prereleases(p1, p2):
 def parse_semver(version_str):
     """Parses a version string into (epoch, major, minor, patch, revision, prerelease)."""
     if not version_str:
-        return (0, 0, 0, 0, 0, '')
-    
+        return (0, 0, 0, 0, 0, "")
+
     clean_str = version_str.strip()
-    if clean_str.lower().startswith('v'):
+    if clean_str.lower().startswith("v"):
         clean_str = clean_str[1:]
-        
-    if '+' in clean_str:
-        clean_str = clean_str.split('+', 1)[0]
-        
+
+    if "+" in clean_str:
+        clean_str = clean_str.split("+", 1)[0]
+
     epoch = 0
-    if '!' in clean_str:
-        parts = clean_str.split('!', 1)
+    if "!" in clean_str:
+        parts = clean_str.split("!", 1)
         try:
             epoch = int(parts[0])
         except ValueError:
             epoch = 0
         clean_str = parts[1]
-        
-    prerelease = ''
-    if '-' in clean_str:
-        clean_str, prerelease = clean_str.split('-', 1)
+
+    prerelease = ""
+    if "-" in clean_str:
+        clean_str, prerelease = clean_str.split("-", 1)
     else:
         m = RE_SEMVER_ALPHA.search(clean_str)
         if m:
             qualifier = m.group(1).lower()
-            if any(q in qualifier for q in ('a', 'b', 'rc', 'cr', 'dev', 'alpha', 'beta', 'preview')):
+            if any(
+                q in qualifier
+                for q in ("a", "b", "rc", "cr", "dev", "alpha", "beta", "preview")
+            ):
                 start_idx = m.start()
                 prerelease = clean_str[start_idx:]
                 clean_str = clean_str[:start_idx]
-                if clean_str.endswith('.'):
+                if clean_str.endswith("."):
                     clean_str = clean_str[:-1]
-                    
+
     if prerelease:
         p_lower = prerelease.lower()
-        if not any(q in p_lower for q in ('a', 'b', 'rc', 'cr', 'dev', 'alpha', 'beta', 'preview', 'snapshot', 'milestone', 'pre')):
-            prerelease = ''
-            
+        if not any(
+            q in p_lower
+            for q in (
+                "a",
+                "b",
+                "rc",
+                "cr",
+                "dev",
+                "alpha",
+                "beta",
+                "preview",
+                "snapshot",
+                "milestone",
+                "pre",
+            )
+        ):
+            prerelease = ""
+
     digits = RE_SEMVER_DIGITS.findall(clean_str)
     major = 0
     minor = 0
     patch = 0
     revision = 0
-    
+
     if len(digits) >= 4:
         major = int(digits[0])
         minor = int(digits[1])
@@ -908,8 +1036,9 @@ def parse_semver(version_str):
         minor = int(digits[1])
     elif len(digits) == 1:
         major = int(digits[0])
-        
+
     return (epoch, major, minor, patch, revision, prerelease)
+
 
 def compare_versions(v1_str, v2_str):
     """Compares two semver version strings.
@@ -920,13 +1049,14 @@ def compare_versions(v1_str, v2_str):
     """
     t1 = parse_semver(v1_str)
     t2 = parse_semver(v2_str)
-    
+
     if t1[:5] < t2[:5]:
         return -1
     elif t1[:5] > t2[:5]:
         return 1
-        
+
     return compare_prereleases(t1[5], t2[5])
+
 
 def fetch_node_schedule():
     """Fetches the official Node.js release schedule from GitHub.
@@ -934,29 +1064,34 @@ def fetch_node_schedule():
         dict: A dictionary mapping major versions to dicts with EOL and maintenance dates.
     """
     url = "https://raw.githubusercontent.com/nodejs/Release/main/schedule.json"
-    
+
     schedule = {}
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Kevlar Dependency Scanner)"})
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "Mozilla/5.0 (Kevlar Dependency Scanner)"}
+        )
         with safe_urlopen(req, timeout=5) as response:
             data = json.loads(response.read().decode("utf-8"))
             for k, v in data.items():
                 major = k[1:] if k.startswith("v") else k
                 schedule[major] = {
                     "maintenance": v.get("maintenance", "N/A"),
-                    "end": v.get("end", "N/A")
+                    "end": v.get("end", "N/A"),
                 }
     except Exception as e:
-        print(f"{COLOR_YELLOW}{ICON_WARN} Warning fetching Node.js release schedule: {e}{COLOR_RESET}")
-        
+        print(
+            f"{COLOR_YELLOW}{ICON_WARN} Warning fetching Node.js release schedule: {e}{COLOR_RESET}"
+        )
+
     return schedule
+
 
 def satisfy_term(version_str, term):
     try:
         term = term.strip()
-        if not term or term in ("*", "x"):
+        if not term or term in {"*", "x"}:
             return True
-            
+
         op = ""
         for possible_op in (">=", "<=", ">", "<", "^", "~", "=="):
             if term.startswith(possible_op):
@@ -964,12 +1099,15 @@ def satisfy_term(version_str, term):
                 break
         if not op and term.startswith("="):
             op = "="
-            
-        ver_part = term[len(op):] if op else term
-        
+
+        ver_part = term[len(op) :] if op else term
+
         _, v_maj, v_min, v_pat, _, _ = parse_semver(version_str)
-        
-        if (ver_part.endswith(".x") or ver_part.endswith(".*")) and op not in ("^", "~"):
+
+        if (ver_part.endswith(".x") or ver_part.endswith(".*")) and op not in {
+            "^",
+            "~",
+        }:
             parts = ver_part.split(".")
             try:
                 if len(parts) == 2:
@@ -979,7 +1117,7 @@ def satisfy_term(version_str, term):
             except ValueError:
                 return False
             return True
-            
+
         if not op:
             parts = ver_part.split(".")
             if len(parts) == 1:
@@ -994,7 +1132,7 @@ def satisfy_term(version_str, term):
                     pass
 
         _, t_maj, t_min, t_pat, _, _ = parse_semver(ver_part)
-        
+
         if op == ">=":
             return compare_versions(version_str, ver_part) >= 0
         elif op == "<=":
@@ -1003,14 +1141,14 @@ def satisfy_term(version_str, term):
             return compare_versions(version_str, ver_part) > 0
         elif op == "<":
             return compare_versions(version_str, ver_part) < 0
-        elif op in ("=", "==", ""):
+        elif op in {"=", "==", ""}:
             return compare_versions(version_str, ver_part) == 0
         elif op == "^":
             if compare_versions(version_str, ver_part) < 0:
                 return False
             if t_maj > 0:
                 return v_maj == t_maj
-            
+
             # Zero series caret evaluation
             clean_ver = ver_part.strip().lower()
             if clean_ver.startswith("v"):
@@ -1019,27 +1157,32 @@ def satisfy_term(version_str, term):
                 clean_ver = clean_ver.split("+", 1)[0]
             if "-" in clean_ver:
                 clean_ver = clean_ver.split("-", 1)[0]
-                
+
             parts = [p.strip() for p in clean_ver.split(".") if p.strip()]
-            
-            is_wildcard_minor = (len(parts) >= 2 and parts[1] in ("x", "*"))
-            is_only_major_zero = (len(parts) == 1 and parts[0] == "0")
+
+            is_wildcard_minor = len(parts) >= 2 and parts[1] in {"x", "*"}
+            is_only_major_zero = len(parts) == 1 and parts[0] == "0"
             if is_only_major_zero or is_wildcard_minor:
                 return v_maj == 0
-                
-            is_wildcard_patch = (len(parts) >= 3 and parts[0] == "0" and parts[1] == "0" and parts[2] in ("x", "*"))
+
+            is_wildcard_patch = (
+                len(parts) >= 3
+                and parts[0] == "0"
+                and parts[1] == "0"
+                and parts[2] in {"x", "*"}
+            )
             if is_wildcard_patch:
                 return v_maj == 0 and v_min == 0 and v_pat == t_pat
-                
+
             if t_min > 0:
                 return v_maj == 0 and v_min == t_min
-                
+
             return v_maj == 0 and v_min == 0 and v_pat == t_pat
-            
+
         elif op == "~":
             if compare_versions(version_str, ver_part) < 0:
                 return False
-                
+
             clean_ver = ver_part.strip().lower()
             if clean_ver.startswith("v"):
                 clean_ver = clean_ver[1:]
@@ -1047,10 +1190,14 @@ def satisfy_term(version_str, term):
                 clean_ver = clean_ver.split("+", 1)[0]
             if "-" in clean_ver:
                 clean_ver = clean_ver.split("-", 1)[0]
-                
-            parts = [p.strip() for p in clean_ver.split(".") if p.strip() and p.strip() not in ("x", "*")]
+
+            parts = [
+                p.strip()
+                for p in clean_ver.split(".")
+                if p.strip() and p.strip() not in ("x", "*")
+            ]
             parts_count = len(parts)
-            
+
             if parts_count >= 2:
                 return v_maj == t_maj and v_min == t_min
             else:
@@ -1059,42 +1206,44 @@ def satisfy_term(version_str, term):
         return True
     return True
 
+
 def check_semver_satisfies(version_str, range_str):
     """Checks if version_str satisfies range_str according to semver rules."""
-    if not range_str or range_str.strip() in ("*", "x", "any"):
+    if not range_str or range_str.strip() in {"*", "x", "any"}:
         return True
-    
-    range_str = re.sub(r'([><=^~])\s+', r'\1', range_str.strip())
+
+    range_str = re.sub(r"([><=^~])\s+", r"\1", range_str.strip())
     or_parts = range_str.split("||")
-    
+
     for or_part in or_parts:
         or_part = or_part.strip()
         if not or_part:
             continue
-            
+
         # Treat commas as logical AND delimiters by replacing them with spaces
         and_terms = or_part.replace(",", " ").split()
         part_satisfied = True
-        
+
         for term in and_terms:
             if not satisfy_term(version_str, term):
                 part_satisfied = False
                 break
-                
+
         if part_satisfied:
             return True
-            
+
     return False
+
 
 def _check_all_targets_unified(targets, check_func, label, max_workers):
     """Unified parallel check runner with try/except wrappers and progress reporting."""
     results = []
     completed = 0
     total = len(targets)
-    
+
     if not targets:
         return results
-        
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(check_func, t): t for t in targets}
         for future in as_completed(futures):
@@ -1112,31 +1261,40 @@ def _check_all_targets_unified(targets, check_func, label, max_workers):
                 target_pkg = futures[future]
                 name = target_pkg.get("name", "unknown")
                 sanitized_msg = _sanitize_error_message(e, name)
-                
+
                 with console_lock:
                     if DEBUG_MODE:
-                        print(f"\n{COLOR_RED}{ICON_ERROR} Error checking {name}: {e}{COLOR_RESET}")
+                        print(
+                            f"\n{COLOR_RED}{ICON_ERROR} Error checking {name}: {e}{COLOR_RESET}"
+                        )
                         traceback.print_exc(file=sys.stdout)
                     else:
-                        print(f"\n{COLOR_RED}{ICON_ERROR} Error checking {name}: {sanitized_msg}{COLOR_RESET}")
-                    
+                        print(
+                            f"\n{COLOR_RED}{ICON_ERROR} Error checking {name}: {sanitized_msg}{COLOR_RESET}"
+                        )
+
                 installed = target_pkg.get("installed", [])
-                versions_to_check = installed if installed else [target_pkg.get("declared")]
+                versions_to_check = (
+                    installed if installed else [target_pkg.get("declared")]
+                )
                 for ver_str in versions_to_check:
-                    results.append({
-                        "name": name,
-                        "declared": ver_str,
-                        "installed": ver_str,
-                        "latest": "unknown",
-                        "status": "error",
-                        "deprecated": False,
-                        "error": sanitized_msg
-                    })
-            
+                    results.append(
+                        {
+                            "name": name,
+                            "declared": ver_str,
+                            "installed": ver_str,
+                            "latest": "unknown",
+                            "status": "error",
+                            "deprecated": False,
+                            "error": sanitized_msg,
+                        }
+                    )
+
     with console_lock:
         sys.stdout.write("\r\033[K")
         sys.stdout.flush()
     return results
+
 
 def _is_major_version_eol(major_version: str, schedule: dict, today_date: date) -> bool:
     """Determines if a specific major version of Node.js is End-of-Life (EOL)."""
@@ -1153,65 +1311,85 @@ def _is_major_version_eol(major_version: str, schedule: dict, today_date: date) 
     except Exception:
         return True
 
+
 def analyze_node_constraint(constraint_str):
     """Analyzes a Node.js version constraint and checks if it permits EOL versions.
     Returns (status, deprecated_msg, error_msg, latest_recommendation).
     """
     FUTURE_MAJOR_PLACEHOLDER = "99"
     DEFAULT_FALLBACK_MAJOR = "22"
-    
+
     schedule = fetch_node_schedule()
     if not schedule:
-        return "error", None, "We cannot recommend a valid version at this time as there is no internet connection.", "unknown"
-        
+        return (
+            "error",
+            None,
+            "We cannot recommend a valid version at this time as there is no internet connection.",
+            "unknown",
+        )
+
     today = date.today()
-    
+
     # Sort and filter known major versions from the schedule keys
-    test_majors = sorted(
-        [k for k in schedule.keys() if k.isdigit()],
-        key=int
-    )
+    test_majors = sorted([k for k in schedule.keys() if k.isdigit()], key=int)
     test_majors.append(FUTURE_MAJOR_PLACEHOLDER)
-    
+
     # Filter for active (non-EOL) even major versions
     active_even_majors = [
-        major for major in test_majors
+        major
+        for major in test_majors
         if major != FUTURE_MAJOR_PLACEHOLDER
         and int(major) % 2 == 0
         and not _is_major_version_eol(major, schedule, today)
     ]
-    latest_lts = active_even_majors[-1] if active_even_majors else DEFAULT_FALLBACK_MAJOR
-    
-    if not constraint_str or constraint_str.strip() in ("*", "x", "any"):
-        return "minor", f"Node.js engine constraint is wildcard or missing. Recommend specifying >={latest_lts}.0.0.", None, f">={latest_lts}.0.0"
-        
+    latest_lts = (
+        active_even_majors[-1] if active_even_majors else DEFAULT_FALLBACK_MAJOR
+    )
+
+    if not constraint_str or constraint_str.strip() in {"*", "x", "any"}:
+        return (
+            "minor",
+            f"Node.js engine constraint is wildcard or missing. Recommend specifying >={latest_lts}.0.0.",
+            None,
+            f">={latest_lts}.0.0",
+        )
+
     # Find all major versions satisfied by the constraint
     satisfied_majors = [
-        major for major in test_majors
+        major
+        for major in test_majors
         if check_semver_satisfies(f"{major}.0.0", constraint_str)
     ]
-    
+
     # Categorize satisfied major versions into EOL and supported
-    eol_majors = [major for major in satisfied_majors if _is_major_version_eol(major, schedule, today)]
-    supported_majors = [major for major in satisfied_majors if not _is_major_version_eol(major, schedule, today)]
-    
+    eol_majors = [
+        major
+        for major in satisfied_majors
+        if _is_major_version_eol(major, schedule, today)
+    ]
+    supported_majors = [
+        major
+        for major in satisfied_majors
+        if not _is_major_version_eol(major, schedule, today)
+    ]
+
     # Map active even majors as integers
     supported_even_majors = [int(major) for major in active_even_majors]
-    
+
     recommendations = []
     if eol_majors:
         highest_eol = max(int(m) for m in eol_majors)
-        
+
         # Previous active supported
         prev_opts = [m for m in supported_even_majors if m < highest_eol]
         if prev_opts:
             recommendations.append(f">={max(prev_opts)}.0.0")
-            
+
         # Next active supported
         next_opts = [m for m in supported_even_majors if m > highest_eol]
         if next_opts:
             recommendations.append(f">={min(next_opts)}.0.0")
-            
+
         # Fallback if none found
         if not recommendations and supported_even_majors:
             recommendations.append(f">={max(supported_even_majors)}.0.0")
@@ -1222,14 +1400,14 @@ def analyze_node_constraint(constraint_str):
             recommendations.append(f">={supported_even_majors[-1]}.0.0")
         elif supported_even_majors:
             recommendations.append(f">={supported_even_majors[-1]}.0.0")
-            
+
     if len(recommendations) > 1:
         recommendation = " or ".join(recommendations)
     elif recommendations:
         recommendation = recommendations[0]
     else:
         recommendation = f">={DEFAULT_FALLBACK_MAJOR}.0.0"
-        
+
     recs_detail = []
     for rec in recommendations:
         m_num = rec.replace(">=", "").split(".")[0]
@@ -1237,11 +1415,11 @@ def analyze_node_constraint(constraint_str):
         m_date = m_info.get("maintenance", "N/A")
         end_date = m_info.get("end", "N/A")
         recs_detail.append(f"v{m_num} (Maintenance: {m_date}, EOL: {end_date})")
-        
+
     detail_str = ""
     if recs_detail:
         detail_str = "\n    * " + "\n    * ".join(recs_detail)
-        
+
     if eol_majors and not supported_majors:
         status = "error"
         msg = f"Node.js constraint '{constraint_str}' only satisfies EOL versions ({', '.join(eol_majors)}). Recommend updating constraint to {recommendation}.{detail_str}"
@@ -1251,8 +1429,13 @@ def analyze_node_constraint(constraint_str):
         msg = f"Node.js constraint '{constraint_str}' allows EOL versions ({', '.join(eol_majors)}). Recommend updating lower bound to {recommendation}.{detail_str}"
         return status, msg, None, recommendation
     else:
-        latest_stable = f"v{supported_even_majors[-1]}" if supported_even_majors else f"v{DEFAULT_FALLBACK_MAJOR}"
+        latest_stable = (
+            f"v{supported_even_majors[-1]}"
+            if supported_even_majors
+            else f"v{DEFAULT_FALLBACK_MAJOR}"
+        )
         return "up-to-date", None, None, latest_stable
+
 
 def find_node_constraint(base_path, pkg_data):
     """Finds Node.js version constraint from package.json, .nvmrc, or .node-version."""
@@ -1260,7 +1443,7 @@ def find_node_constraint(base_path, pkg_data):
         node_req = pkg_data["engines"].get("node")
         if node_req:
             return node_req, "package.json (engines.node)"
-            
+
     nvmrc_path = os.path.join(base_path, ".nvmrc")
     if os.path.exists(nvmrc_path):
         try:
@@ -1269,12 +1452,12 @@ def find_node_constraint(base_path, pkg_data):
                 if content:
                     content = content.split("#")[0].strip()
                     if content and not content.startswith("lts"):
-                        if re.match(r'^v?\d+', content):
+                        if re.match(r"^v?\d+", content):
                             return f"={content}", ".nvmrc"
                         return content, ".nvmrc"
         except Exception:
             pass
-            
+
     node_ver_path = os.path.join(base_path, ".node-version")
     if os.path.exists(node_ver_path):
         try:
@@ -1283,32 +1466,33 @@ def find_node_constraint(base_path, pkg_data):
                 if content:
                     content = content.split("#")[0].strip()
                     if content:
-                        if re.match(r'^v?\d+', content):
+                        if re.match(r"^v?\d+", content):
                             return f"={content}", ".node-version"
                         return content, ".node-version"
         except Exception:
             pass
-            
+
     return None, None
+
 
 def classify_update(installed_str, latest_str):
     """Classifies the update difference between installed and latest version."""
     if not installed_str or not latest_str:
         return "up-to-date"
-        
+
     clean_inst = str(installed_str).strip().lstrip("v").split("+")[0]
     clean_late = str(latest_str).strip().lstrip("v").split("+")[0]
-    
-    if clean_inst == clean_late or clean_late in ("0.0.0", "unknown", ""):
+
+    if clean_inst == clean_late or clean_late in {"0.0.0", "unknown", ""}:
         return "up-to-date"
-        
+
     cmp = compare_versions(installed_str, latest_str)
     if cmp >= 0:
         return "up-to-date"
-        
+
     t_inst = parse_semver(installed_str)
     t_late = parse_semver(latest_str)
-    
+
     if t_late[0] > t_inst[0] or t_late[1] > t_inst[1]:
         return "major"
     elif t_late[2] > t_inst[2]:
@@ -1316,27 +1500,29 @@ def classify_update(installed_str, latest_str):
     else:
         return "patch"
 
+
 def determine_update_type(installed_ver, latest_same_major, latest_absolute):
     """Determines update type, returning minor-major or patch-major if both updates exist."""
-    if not latest_absolute or str(latest_absolute).strip() in ("0.0.0", "unknown", ""):
+    if not latest_absolute or str(latest_absolute).strip() in {"0.0.0", "unknown", ""}:
         return "up-to-date"
-    if not installed_ver or str(installed_ver).strip() in ("0.0.0", "unknown", ""):
+    if not installed_ver or str(installed_ver).strip() in {"0.0.0", "unknown", ""}:
         return "up-to-date"
-        
+
     clean_inst = str(installed_ver).strip().lstrip("v").split("+")[0]
     clean_abs = str(latest_absolute).strip().lstrip("v").split("+")[0]
     if clean_inst == clean_abs:
         return "up-to-date"
-        
+
     abs_type = classify_update(installed_ver, latest_absolute)
     if abs_type == "major" and latest_same_major and latest_same_major != installed_ver:
         clean_same = str(latest_same_major).strip().lstrip("v").split("+")[0]
         if clean_inst and clean_same and clean_inst != clean_same:
             same_major_type = classify_update(clean_inst, clean_same)
-            if same_major_type in ("minor", "patch"):
+            if same_major_type in {"minor", "patch"}:
                 return f"{same_major_type}-major"
-                
+
     return abs_type
+
 
 def find_latest_semver_tiers(installed_ver, all_versions):
     """Finds the latest patch, same-major (minor), and absolute (major) versions.
@@ -1345,16 +1531,16 @@ def find_latest_semver_tiers(installed_ver, all_versions):
     """
     if not installed_ver or not all_versions:
         return (None, None, None)
-    
-    clean_inst = RE_CLEAN_VER.sub('', installed_ver).split('+')[0]
+
+    clean_inst = RE_CLEAN_VER.sub("", installed_ver).split("+")[0]
     inst_parsed = parse_semver(clean_inst)
     inst_major = inst_parsed[1]
     inst_minor = inst_parsed[2]
     installed_is_prerelease = bool(inst_parsed[5])
-    
+
     parsed_versions = []
     for v in all_versions:
-        clean_v = RE_CLEAN_VER.sub('', v).split('+')[0]
+        clean_v = RE_CLEAN_VER.sub("", v).split("+")[0]
         parsed_versions.append((v, parse_semver(clean_v)))
 
     filtered_versions = []
@@ -1362,21 +1548,29 @@ def find_latest_semver_tiers(installed_ver, all_versions):
         if not installed_is_prerelease and parsed[5]:
             continue
         filtered_versions.append((v, parsed))
-        
+
     if not filtered_versions:
         filtered_versions = parsed_versions
-    
+
     def semver_sort_key(item):
         epoch, major, minor, patch, revision, prerelease = item[1]
         is_stable = 1 if not prerelease else 0
-        return (epoch, major, minor, patch, revision, is_stable, PrereleaseKey(prerelease))
-        
+        return (
+            epoch,
+            major,
+            minor,
+            patch,
+            revision,
+            is_stable,
+            PrereleaseKey(prerelease),
+        )
+
     sorted_all = sorted(filtered_versions, key=semver_sort_key)
     if not sorted_all:
         return (None, None, None)
-        
+
     latest_absolute = sorted_all[-1][0]
-    
+
     same_major_versions = []
     same_patch_versions = []
     for v, parsed in sorted_all:
@@ -1384,19 +1578,23 @@ def find_latest_semver_tiers(installed_ver, all_versions):
             same_major_versions.append(v)
             if parsed[2] == inst_minor:
                 same_patch_versions.append(v)
-            
+
     latest_patch = same_patch_versions[-1] if same_patch_versions else None
     latest_same_major = same_major_versions[-1] if same_major_versions else None
-    
+
     return (latest_patch, latest_same_major, latest_absolute)
+
 
 def find_latest_same_major(installed_ver, all_versions):
     """Finds the latest version in all_versions that shares the same major version as installed_ver.
     Returns:
         (latest_same_major, latest_absolute)
     """
-    _, latest_same_major, latest_absolute = find_latest_semver_tiers(installed_ver, all_versions)
+    _, latest_same_major, latest_absolute = find_latest_semver_tiers(
+        installed_ver, all_versions
+    )
     return (latest_same_major, latest_absolute)
+
 
 def format_latest_versions(latest_same_major, latest_absolute):
     """Formats the latest version for display when they differ between same-major and absolute."""
@@ -1405,6 +1603,7 @@ def format_latest_versions(latest_same_major, latest_absolute):
     if not latest_same_major or latest_same_major == latest_absolute:
         return latest_absolute
     return f"{latest_same_major} (latest: {latest_absolute})"
+
 
 def clean_repo_url(url):
     """Normalizes repository URLs from different registries into clean web URLs."""
@@ -1415,10 +1614,10 @@ def clean_repo_url(url):
     if not isinstance(url, str):
         return None
     url = url.strip()
-    
+
     if url.lower().startswith("javascript:"):
         return None
-        
+
     if url.startswith("git+"):
         url = url[4:]
     if url.startswith("git://"):
@@ -1431,20 +1630,21 @@ def clean_repo_url(url):
         url = url[:-4]
     url = url.replace("ssh://git@", "https://")
     url = url.rstrip("/")
-    
+
     try:
         parsed = urllib.parse.urlparse(url)
         if not parsed.scheme:
             if url:
                 url = "https://" + url
             parsed = urllib.parse.urlparse(url)
-            
-        if parsed.scheme not in ("http", "https"):
+
+        if parsed.scheme not in {"http", "https"}:
             return None
     except Exception:
         return None
-        
+
     return url
+
 
 def is_github_url(url):
     """Safely checks if the URL hostname is github.com or a subdomain of it."""
@@ -1457,6 +1657,7 @@ def is_github_url(url):
     except Exception:
         return False
 
+
 def is_gitlab_url(url):
     """Safely checks if the URL hostname is gitlab.com or a subdomain of it."""
     if not url or not isinstance(url, str):
@@ -1467,6 +1668,7 @@ def is_gitlab_url(url):
         return hostname == "gitlab.com" or hostname.endswith(".gitlab.com")
     except Exception:
         return False
+
 
 def get_compare_url(repo_url, installed, latest):
     """Generates a comparison diff link between installed and latest version."""
@@ -1481,17 +1683,19 @@ def get_compare_url(repo_url, installed, latest):
         return f"{repo_url}/-/compare/v{inst_clean}...v{late_clean}"
     return f"{repo_url}/compare/{inst_clean}...{late_clean}"
 
+
 def _fetch_registry_json_or_xml(url, format="json"):
     """Helper to fetch and parse JSON or XML from a URL using safe_urlopen."""
     req = urllib.request.Request(url)
     with safe_urlopen(req, timeout=5) as response:
         raw_data = response.read()
-    
+
     if format == "json":
         return json.loads(raw_data.decode("utf-8"))
     elif format == "xml":
         return safe_et_fromstring(raw_data)
     return raw_data
+
 
 def resolve_npm_repo(name):
     """Fetches the repository URL for an NPM package from registry (lazy-loaded)."""
@@ -1502,9 +1706,12 @@ def resolve_npm_repo(name):
         return clean_repo_url(repo)
     except Exception as e:
         if DEBUG_MODE:
-            print(f"{COLOR_YELLOW}{ICON_WARN} Debug: Failed to resolve NPM repository for '{name}': {e}{COLOR_RESET}")
+            print(
+                f"{COLOR_YELLOW}{ICON_WARN} Debug: Failed to resolve NPM repository for '{name}': {e}{COLOR_RESET}"
+            )
             traceback.print_exc(file=sys.stdout)
     return None
+
 
 def resolve_nuget_repo(name, version):
     """Parses .nuspec XML to find the repository URL of a NuGet package."""
@@ -1515,12 +1722,12 @@ def resolve_nuget_repo(name, version):
         repo_url = None
         proj_url = None
         for elem in root.iter():
-            tag_local = elem.tag.split('}')[-1]
-            if tag_local == 'repository':
-                val = elem.attrib.get('url')
+            tag_local = elem.tag.split("}")[-1]
+            if tag_local == "repository":
+                val = elem.attrib.get("url")
                 if val:
                     repo_url = val
-            elif tag_local == 'projectUrl':
+            elif tag_local == "projectUrl":
                 if elem.text:
                     proj_url = elem.text.strip()
         if repo_url:
@@ -1529,9 +1736,12 @@ def resolve_nuget_repo(name, version):
             return clean_repo_url(proj_url)
     except Exception as e:
         if DEBUG_MODE:
-            print(f"{COLOR_YELLOW}{ICON_WARN} Debug: Failed to resolve NuGet repository for '{name}' (version {version}): {e}{COLOR_RESET}")
+            print(
+                f"{COLOR_YELLOW}{ICON_WARN} Debug: Failed to resolve NuGet repository for '{name}' (version {version}): {e}{COLOR_RESET}"
+            )
             traceback.print_exc(file=sys.stdout)
     return None
+
 
 def resolve_maven_repo(registry_url, group_path, artifact_id, version):
     """Parses .pom XML to find the repository or project URL of a Maven/Gradle package."""
@@ -1541,21 +1751,24 @@ def resolve_maven_repo(registry_url, group_path, artifact_id, version):
         scm_url = None
         proj_url = None
         for elem in root.iter():
-            tag_local = elem.tag.split('}')[-1]
-            if tag_local == 'scm':
+            tag_local = elem.tag.split("}")[-1]
+            if tag_local == "scm":
                 for child in elem:
-                    child_tag = child.tag.split('}')[-1]
-                    if child_tag == 'url':
+                    child_tag = child.tag.split("}")[-1]
+                    if child_tag == "url":
                         scm_url = child.text
-            elif tag_local == 'url':
+            elif tag_local == "url":
                 if elem.text:
                     proj_url = elem.text
         return clean_repo_url(scm_url or proj_url)
     except Exception as e:
         if DEBUG_MODE:
-            print(f"{COLOR_YELLOW}{ICON_WARN} Debug: Failed to resolve Maven repository for '{group_path}:{artifact_id}' (version {version}) from {registry_url}: {e}{COLOR_RESET}")
+            print(
+                f"{COLOR_YELLOW}{ICON_WARN} Debug: Failed to resolve Maven repository for '{group_path}:{artifact_id}' (version {version}) from {registry_url}: {e}{COLOR_RESET}"
+            )
             traceback.print_exc(file=sys.stdout)
     return None
+
 
 def resolve_go_repo(name):
     """Translates Go module names to their repository web URLs."""
@@ -1568,23 +1781,26 @@ def resolve_go_repo(name):
         return f"https://github.com/golang/{parts[2]}"
     return f"https://{name}"
 
+
 # ==============================================================================
 # NPM Checker Logic
 # ==============================================================================
 
+
 def hex_to_base64(hex_str):
     """Converts a SHA-1 hexadecimal string to base64 with a 'sha1-' prefix."""
     try:
-        raw_bytes = codecs.decode(hex_str.strip(), 'hex')
+        raw_bytes = codecs.decode(hex_str.strip(), "hex")
         b64_bytes = base64.b64encode(raw_bytes)
-        return "sha1-" + b64_bytes.decode('utf-8')
+        return "sha1-" + b64_bytes.decode("utf-8")
     except Exception:
         return None
+
 
 def find_npm_files(base_path):
     """Finds package.json and lockfile (package-lock.json, yarn.lock, pnpm-lock.yaml) in path."""
     pkg_path = os.path.join(base_path, "package.json")
-    
+
     lock_files = ["package-lock.json", "yarn.lock", "pnpm-lock.yaml"]
     lock_path = None
     for lf in lock_files:
@@ -1592,15 +1808,16 @@ def find_npm_files(base_path):
         if os.path.exists(path):
             lock_path = path
             break
-            
+
     return (pkg_path if os.path.exists(pkg_path) else None, lock_path)
+
 
 def format_yarn_berry_checksum(checksum_val):
     """Formats a Yarn Berry checksum to Subresource Integrity (SRI) format if possible."""
     # Remove cache version prefix, e.g. "10c0/" or "8/" or "10/"
     if "/" in checksum_val:
         checksum_val = checksum_val.split("/")[-1]
-    
+
     # Check for sha512:, sha256:, or sha1: prefixes
     algo = None
     hash_str = checksum_val
@@ -1619,15 +1836,15 @@ def format_yarn_berry_checksum(checksum_val):
         algo = "sha256"
     elif len(checksum_val) == 40 and all(c in string.hexdigits for c in checksum_val):
         algo = "sha1"
-        
+
     if algo and all(c in string.hexdigits for c in hash_str):
         try:
-            raw_bytes = codecs.decode(hash_str.strip(), 'hex')
+            raw_bytes = codecs.decode(hash_str.strip(), "hex")
             b64_bytes = base64.b64encode(raw_bytes)
             return f"{algo}-{b64_bytes.decode('utf-8')}"
         except Exception:
             pass
-            
+
     # Fallback to replacing colon with hyphen if it's already in sha512: or sha1: form
     if checksum_val.startswith("sha512:"):
         return checksum_val.replace("sha512:", "sha512-", 1)
@@ -1635,8 +1852,9 @@ def format_yarn_berry_checksum(checksum_val):
         return checksum_val.replace("sha256:", "sha256-", 1)
     if checksum_val.startswith("sha1:"):
         return checksum_val.replace("sha1:", "sha1-", 1)
-        
+
     return checksum_val
+
 
 def parse_yarn_lock(filepath):
     """Parses yarn.lock to extract resolved versions and their parent relations.
@@ -1647,7 +1865,7 @@ def parse_yarn_lock(filepath):
     resolved = {}
     parents = {}
     integrity_dict = {}
-    
+
     def extract_pkg_name(part):
         if not part:
             return ""
@@ -1665,7 +1883,7 @@ def parse_yarn_lock(filepath):
                 name = parts[0]
             else:
                 name = part
-        
+
         if name.startswith("npm:"):
             name = name[4:]
         return name
@@ -1677,34 +1895,34 @@ def parse_yarn_lock(filepath):
             current_integrity = None
             in_dependencies = False
             dep_indent = None
-            
+
             for line in f:
                 stripped = line.strip()
                 if not stripped or stripped.startswith("#"):
                     continue
-                
+
                 indent_len = len(line) - len(line.lstrip())
-                
+
                 # Check if we are at the top level (new package definition block)
                 if indent_len == 0:
                     # Save the previous package block's integrity info if valid
                     if current_names and current_version and current_integrity:
                         for name in current_names:
                             integrity_dict[(name, current_version)] = current_integrity
-                    
+
                     # Reset package block state
                     in_dependencies = False
                     dep_indent = None
                     current_names = []
                     current_version = None
                     current_integrity = None
-                    
+
                     # If this is metadata or doesn't end with a colon, skip
                     if not line.rstrip().endswith(":") or "__metadata:" in line:
                         continue
-                    
+
                     header = stripped.rstrip(":")
-                    
+
                     # Parse the package specifier(s) in header, split by comma respecting quotes
                     parts = []
                     current_part = []
@@ -1712,26 +1930,30 @@ def parse_yarn_lock(filepath):
                     for char in header:
                         if char == '"':
                             in_quotes = not in_quotes
-                        elif char == ',' and not in_quotes:
+                        elif char == "," and not in_quotes:
                             parts.append("".join(current_part).strip())
                             current_part = []
                         else:
                             current_part.append(char)
                     if current_part:
                         parts.append("".join(current_part).strip())
-                    
+
                     for part in parts:
                         part = part.strip('"')
                         pkg_name = extract_pkg_name(part)
                         if pkg_name:
                             current_names.append(pkg_name)
-                            
+
                 elif indent_len > 0:
                     # Manage exiting out of dependencies block based on relative indentation
-                    if in_dependencies and dep_indent is not None and indent_len <= dep_indent:
+                    if (
+                        in_dependencies
+                        and dep_indent is not None
+                        and indent_len <= dep_indent
+                    ):
                         in_dependencies = False
                         dep_indent = None
-                    
+
                     if in_dependencies:
                         # Parsing a dependency line
                         if ":" in stripped:
@@ -1743,39 +1965,72 @@ def parse_yarn_lock(filepath):
                                 parents.setdefault(dep_name, set()).add(name)
                     else:
                         # Parsing properties of the current package
-                        if stripped.startswith("version ") or stripped.startswith("version:"):
-                            ver_val = stripped.split(" ", 1)[-1] if " " in stripped else stripped.split(":", 1)[-1]
-                            ver_val = ver_val.strip().strip('"').strip(':').strip()
+                        if stripped.startswith("version ") or stripped.startswith(
+                            "version:"
+                        ):
+                            ver_val = (
+                                stripped.split(" ", 1)[-1]
+                                if " " in stripped
+                                else stripped.split(":", 1)[-1]
+                            )
+                            ver_val = ver_val.strip().strip('"').strip(":").strip()
                             current_version = ver_val
                             for name in current_names:
                                 resolved.setdefault(name, set()).add(ver_val)
-                                
-                        elif stripped.startswith("integrity ") or stripped.startswith("integrity:"):
-                            integrity_val = stripped.split(" ", 1)[-1] if " " in stripped else stripped.split(":", 1)[-1]
-                            integrity_val = integrity_val.strip().strip('"').strip(':').strip()
+
+                        elif stripped.startswith("integrity ") or stripped.startswith(
+                            "integrity:"
+                        ):
+                            integrity_val = (
+                                stripped.split(" ", 1)[-1]
+                                if " " in stripped
+                                else stripped.split(":", 1)[-1]
+                            )
+                            integrity_val = (
+                                integrity_val.strip().strip('"').strip(":").strip()
+                            )
                             current_integrity = integrity_val
-                            
-                        elif stripped.startswith("checksum:") or stripped.startswith("checksum "):
-                            checksum_val = stripped.split(" ", 1)[-1] if " " in stripped else stripped.split(":", 1)[-1]
-                            checksum_val = checksum_val.strip().strip('"').strip(':').strip()
+
+                        elif stripped.startswith("checksum:") or stripped.startswith(
+                            "checksum "
+                        ):
+                            checksum_val = (
+                                stripped.split(" ", 1)[-1]
+                                if " " in stripped
+                                else stripped.split(":", 1)[-1]
+                            )
+                            checksum_val = (
+                                checksum_val.strip().strip('"').strip(":").strip()
+                            )
                             current_integrity = format_yarn_berry_checksum(checksum_val)
-                            
-                        elif any(stripped.startswith(k) for k in ("dependencies:", "optionalDependencies:", "peerDependencies:", "dependencies ", "optionalDependencies ", "peerDependencies ")):
+
+                        elif any(
+                            stripped.startswith(k)
+                            for k in (
+                                "dependencies:",
+                                "optionalDependencies:",
+                                "peerDependencies:",
+                                "dependencies ",
+                                "optionalDependencies ",
+                                "peerDependencies ",
+                            )
+                        ):
                             if not stripped.rstrip().endswith("{}"):
                                 in_dependencies = True
                                 dep_indent = indent_len
-                                
+
             # Save the last package block's integrity info if valid
             if current_names and current_version and current_integrity:
                 for name in current_names:
                     integrity_dict[(name, current_version)] = current_integrity
-                    
+
         parents_clean = {k: list(v) for k, v in parents.items()}
         resolved_clean = {k: list(v) for k, v in resolved.items()}
         return resolved_clean, parents_clean, integrity_dict
     except Exception as e:
         print(f"{COLOR_YELLOW}{ICON_WARN} Warning reading yarn.lock: {e}{COLOR_RESET}")
         return {}, {}, {}
+
 
 def parse_pnpm_lock(filepath):
     """Parses pnpm-lock.yaml to extract resolved versions and their parent relations.
@@ -1792,62 +2047,90 @@ def parse_pnpm_lock(filepath):
             stack = []
             current_pkg = None
             current_version = None
-            
+
             for line in f:
                 stripped = line.strip()
-                if not stripped or stripped.startswith("#") or stripped == "---" or stripped == "...":
+                if (
+                    not stripped
+                    or stripped.startswith("#")
+                    or stripped == "---"
+                    or stripped == "..."
+                ):
                     continue
-                
+
                 indent = len(line) - len(line.lstrip())
-                
+
                 # Maintain the indentation stack: pop states that are at deeper indentation (preserving DEPENDENCIES at equal indent)
                 while stack:
                     top_indent, top_state, _ = stack[-1]
-                    if top_state in ('DEPENDENCIES', 'IMPORTER_DEPS') and indent == top_indent:
+                    if (
+                        top_state in {"DEPENDENCIES", "IMPORTER_DEPS"}
+                        and indent == top_indent
+                    ):
                         break
                     if indent <= top_indent:
                         stack.pop()
                     else:
                         break
-                
-                current_state = stack[-1][1] if stack else 'ROOT'
+
+                current_state = stack[-1][1] if stack else "ROOT"
                 current_pkg = None
                 current_version = None
                 for item in reversed(stack):
-                    if item[1] == 'PACKAGE_BODY' and item[2]:
+                    if item[1] == "PACKAGE_BODY" and item[2]:
                         current_pkg, current_version = item[2]
                         break
-                
+
                 # Check transition out/in of importers, packages, or snapshots block at root level
                 if stripped.startswith("importers:"):
-                    stack.append((indent, 'IMPORTERS', None))
+                    stack.append((indent, "IMPORTERS", None))
                     continue
-                elif stripped.startswith("packages:") or stripped.startswith("snapshots:"):
-                    stack.append((indent, 'PACKAGES', None))
+                elif stripped.startswith("packages:") or stripped.startswith(
+                    "snapshots:"
+                ):
+                    stack.append((indent, "PACKAGES", None))
                     continue
-                
-                if current_state in ('IMPORTERS', 'IMPORTER_ITEM', 'IMPORTER_DEPS'):
-                    if stripped.startswith(("dependencies:", "devDependencies:", "optionalDependencies:", "peerDependencies:")):
-                        while stack and stack[-1][1] in ('IMPORTER_DEPS', 'IMPORTER_DEP_ITEM'):
+
+                if current_state in {"IMPORTERS", "IMPORTER_ITEM", "IMPORTER_DEPS"}:
+                    if stripped.startswith(
+                        (
+                            "dependencies:",
+                            "devDependencies:",
+                            "optionalDependencies:",
+                            "peerDependencies:",
+                        )
+                    ):
+                        while stack and stack[-1][1] in {
+                            "IMPORTER_DEPS",
+                            "IMPORTER_DEP_ITEM",
+                        }:
                             stack.pop()
-                        stack.append((indent, 'IMPORTER_DEPS', None))
+                        stack.append((indent, "IMPORTER_DEPS", None))
                         continue
-                    elif stripped.endswith(":") and current_state in ('IMPORTERS', 'IMPORTER_ITEM'):
+                    elif stripped.endswith(":") and current_state in {
+                        "IMPORTERS",
+                        "IMPORTER_ITEM",
+                    }:
                         imp_name = stripped.rstrip(":").strip("'\"")
                         base_name = imp_name.rsplit("/", 1)[-1]
                         parents.setdefault(imp_name, set()).add("root")
                         parents.setdefault(base_name, set()).add("root")
-                        stack.append((indent, 'IMPORTER_ITEM', imp_name))
+                        stack.append((indent, "IMPORTER_ITEM", imp_name))
                         continue
-                
-                if current_state == 'IMPORTER_DEPS':
+
+                if current_state == "IMPORTER_DEPS":
                     if ":" in stripped:
                         dep_name = stripped.split(":", 1)[0].strip().strip("'\"")
-                        if dep_name and dep_name not in ("specifier", "version") and dep_name not in ("node", "npm", "pnpm", "yarn", "bun", "python"):
+                        if (
+                            dep_name
+                            and dep_name not in {"specifier", "version"}
+                            and dep_name
+                            not in {"node", "npm", "pnpm", "yarn", "bun", "python"}
+                        ):
                             parents.setdefault(dep_name, set()).add("root")
-                            stack.append((indent, 'IMPORTER_DEP_ITEM', dep_name))
-                
-                elif current_state == 'PACKAGES':
+                            stack.append((indent, "IMPORTER_DEP_ITEM", dep_name))
+
+                elif current_state == "PACKAGES":
                     # We are expecting package definitions as keys, e.g., '/direct-dep@1.0.1:'
                     # Remove trailing empty object if present, e.g. "key: {}" -> "key:"
                     raw_line = stripped
@@ -1862,46 +2145,61 @@ def parse_pnpm_lock(filepath):
                         first_part = raw_pkg.split("/", 1)[0]
                         if "." in first_part or "localhost" in first_part:
                             raw_pkg = raw_pkg.split("/", 1)[1]
-                            
+
                     pkg_name = None
                     version = None
-                    
+
                     # Robust separator '@' detection dividing package name from version/peer info
                     if raw_pkg.startswith("@"):
                         at_idx = raw_pkg.find("@", 1)
                     else:
                         at_idx = raw_pkg.find("@")
-                        
+
                     if at_idx != -1:
                         pkg_name = raw_pkg[:at_idx]
-                        version = raw_pkg[at_idx+1:]
-                                
+                        version = raw_pkg[at_idx + 1 :]
+
                     if not pkg_name and "/" in raw_pkg:
                         parts = raw_pkg.rsplit("/", 1)
                         if len(parts) == 2:
                             pkg_name = parts[0]
                             version = parts[1]
-                            
+
                     if not pkg_name:
                         pkg_name = raw_pkg
                         version = "unknown"
-                        
+
                     if version and "(" in version:
                         version = version.split("(", 1)[0]
-                    
-                    if pkg_name and version and pkg_name not in ("node", "npm", "pnpm", "yarn", "bun", "python"):
+
+                    if (
+                        pkg_name
+                        and version
+                        and pkg_name
+                        not in {"node", "npm", "pnpm", "yarn", "bun", "python"}
+                    ):
                         resolved.setdefault(pkg_name, set()).add(version)
                         # Push this package's context onto the stack
-                        stack.append((indent, 'PACKAGE_BODY', (pkg_name, version)))
-                
-                if current_state in ('PACKAGE_BODY', 'DEPENDENCIES'):
-                    if stripped.startswith(("dependencies:", "devDependencies:", "optionalDependencies:", "peerDependencies:")):
-                        while stack and stack[-1][1] in ('DEPENDENCIES', 'DEPENDENCY_ITEM'):
+                        stack.append((indent, "PACKAGE_BODY", (pkg_name, version)))
+
+                if current_state in {"PACKAGE_BODY", "DEPENDENCIES"}:
+                    if stripped.startswith(
+                        (
+                            "dependencies:",
+                            "devDependencies:",
+                            "optionalDependencies:",
+                            "peerDependencies:",
+                        )
+                    ):
+                        while stack and stack[-1][1] in {
+                            "DEPENDENCIES",
+                            "DEPENDENCY_ITEM",
+                        }:
                             stack.pop()
-                        stack.append((indent, 'DEPENDENCIES', None))
+                        stack.append((indent, "DEPENDENCIES", None))
                         continue
 
-                if current_state == 'PACKAGE_BODY':
+                if current_state == "PACKAGE_BODY":
                     # Inside a package block. We check for integrity.
                     if "integrity" in stripped and current_version:
                         parts = stripped.split("integrity", 1)
@@ -1913,43 +2211,60 @@ def parse_pnpm_lock(filepath):
                             val = val.split()[0].strip(",}'\"")
                             if val:
                                 integrity_dict[(current_pkg, current_version)] = val
-                
-                elif current_state == 'DEPENDENCIES':
+
+                elif current_state == "DEPENDENCIES":
                     # We are in a list of dependencies under a package.
                     # Each line is: dependency_name: version
                     if ":" in stripped:
                         dep_name, dep_ver = stripped.split(":", 1)
                         dep_name = dep_name.strip().strip("'\"")
-                        if dep_name and current_pkg and dep_name not in ("node", "npm", "pnpm", "yarn", "bun", "python") and dep_name not in ("specifier", "version", "integrity", "optional", "transitivePeerDependencies"):
+                        if (
+                            dep_name
+                            and current_pkg
+                            and dep_name
+                            not in {"node", "npm", "pnpm", "yarn", "bun", "python"}
+                            and dep_name
+                            not in {
+                                "specifier",
+                                "version",
+                                "integrity",
+                                "optional",
+                                "transitivePeerDependencies",
+                            }
+                        ):
                             parents.setdefault(dep_name, set()).add(current_pkg)
-                            stack.append((indent, 'DEPENDENCY_ITEM', dep_name))
-                            
+                            stack.append((indent, "DEPENDENCY_ITEM", dep_name))
+
         parents_clean = {k: list(v) for k, v in parents.items()}
         resolved_clean = {k: list(v) for k, v in resolved.items()}
         return resolved_clean, parents_clean, integrity_dict
     except Exception as e:
-        print(f"{COLOR_YELLOW}{ICON_WARN} Warning reading pnpm-lock.yaml: {e}{COLOR_RESET}")
+        print(
+            f"{COLOR_YELLOW}{ICON_WARN} Warning reading pnpm-lock.yaml: {e}{COLOR_RESET}"
+        )
         return {}, {}, {}
+
 
 def parse_package_json(filepath):
     """Parses package.json to extract direct dependencies."""
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             data = json.load(f)
-            
+
         dependencies = data.get("dependencies", {})
         dev_dependencies = data.get("devDependencies", {})
         engines = data.get("engines", {})
-        
+
         return {
             "dependencies": dependencies,
             "devDependencies": dev_dependencies,
             "all_direct": {**dependencies, **dev_dependencies},
-            "engines": engines
+            "engines": engines,
         }
     except Exception as e:
         print(f"{COLOR_RED}{ICON_ERROR} Error reading package.json: {e}{COLOR_RESET}")
         return None
+
 
 def parse_package_lock(filepath):
     """Parses package-lock.json to extract resolved versions and their parent relations.
@@ -1959,12 +2274,12 @@ def parse_package_lock(filepath):
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             data = json.load(f)
-            
+
         resolved = {}
         parents = {}
         integrity_dict = {}
         direct_versions = {}
-        
+
         # 1. Parse packages key (v2 and v3 lockfiles)
         if "packages" in data and isinstance(data["packages"], dict):
             # Map path to package name
@@ -1976,7 +2291,7 @@ def parse_package_lock(filepath):
                 parts = pkg_path.split("node_modules/")
                 if parts:
                     path_to_name[pkg_path] = parts[-1]
-                    
+
             for pkg_path, pkg_info in data["packages"].items():
                 if not pkg_path:
                     continue
@@ -1991,7 +2306,7 @@ def parse_package_lock(filepath):
                             integrity_dict[(pkg_name, version)] = integrity
                         if len(parts) == 2 and parts[0] == "":
                             direct_versions[pkg_name] = version
-                        
+
                     # Build parents map
                     deps = pkg_info.get("dependencies", {})
                     dev_deps = pkg_info.get("devDependencies", {})
@@ -2000,7 +2315,7 @@ def parse_package_lock(filepath):
                     all_deps = {**deps, **dev_deps, **peer_deps, **opt_deps}
                     for child_name in all_deps.keys():
                         parents.setdefault(child_name, set()).add(pkg_name)
-                        
+
             # Root & workspace package dependencies
             for pkg_path, pkg_info in data["packages"].items():
                 if isinstance(pkg_info, dict) and "node_modules/" not in pkg_path:
@@ -2008,13 +2323,14 @@ def parse_package_lock(filepath):
                         **pkg_info.get("dependencies", {}),
                         **pkg_info.get("devDependencies", {}),
                         **pkg_info.get("peerDependencies", {}),
-                        **pkg_info.get("optionalDependencies", {})
+                        **pkg_info.get("optionalDependencies", {}),
                     }
                     for child_name in ws_deps.keys():
                         parents.setdefault(child_name, set()).add("root")
-                        
+
         # 2. Parse dependencies key (v1 and v2 fallback)
         if "dependencies" in data and isinstance(data["dependencies"], dict):
+
             def recurse_v1_deps(deps_dict, parent_name="root"):
                 for pkg_name, pkg_info in deps_dict.items():
                     if not isinstance(pkg_info, dict):
@@ -2028,54 +2344,56 @@ def parse_package_lock(filepath):
                         if parent_name == "root":
                             direct_versions[pkg_name] = version
                     parents.setdefault(pkg_name, set()).add(parent_name)
-                    
-                    if "dependencies" in pkg_info and isinstance(pkg_info["dependencies"], dict):
+
+                    if "dependencies" in pkg_info and isinstance(
+                        pkg_info["dependencies"], dict
+                    ):
                         recurse_v1_deps(pkg_info["dependencies"], pkg_name)
-                        
+
             recurse_v1_deps(data["dependencies"])
-            
+
         parents_clean = {k: list(v) for k, v in parents.items()}
         resolved_clean = {k: list(v) for k, v in resolved.items()}
         return resolved_clean, parents_clean, integrity_dict, direct_versions
     except Exception as e:
-        print(f"{COLOR_YELLOW}{ICON_WARN} Warning reading package-lock.json: {e}{COLOR_RESET}")
+        print(
+            f"{COLOR_YELLOW}{ICON_WARN} Warning reading package-lock.json: {e}{COLOR_RESET}"
+        )
         return {}, {}, {}, {}
+
 
 def build_check_targets(pkg_data, lock_data, check_all):
     """Builds list of targets to scan."""
     targets = []
-    
+
     if check_all:
         all_packages = set(lock_data.keys())
         if pkg_data:
             all_packages.update(pkg_data["all_direct"].keys())
-            
+
         for name in sorted(all_packages):
             declared = None
             if pkg_data and name in pkg_data["all_direct"]:
                 declared = pkg_data["all_direct"][name]
             installed = lock_data.get(name, [])
-            targets.append({
-                "name": name,
-                "declared": declared,
-                "installed": installed
-            })
+            targets.append({"name": name, "declared": declared, "installed": installed})
     else:
         if not pkg_data:
-            print(f"{COLOR_RED}{ICON_ERROR} Cannot check direct dependencies: package.json is missing.{COLOR_RESET}")
+            print(
+                f"{COLOR_RED}{ICON_ERROR} Cannot check direct dependencies: package.json is missing.{COLOR_RESET}"
+            )
             return []
-            
+
         for name, declared in sorted(pkg_data["all_direct"].items()):
             installed = lock_data.get(name, [])
-            targets.append({
-                "name": name,
-                "declared": declared,
-                "installed": installed
-            })
-            
+            targets.append({"name": name, "declared": declared, "installed": installed})
+
     return targets
 
-def find_direct_installed_version(pkg_name, declared_constraint, installed_versions, direct_versions_from_lock=None):
+
+def find_direct_installed_version(
+    pkg_name, declared_constraint, installed_versions, direct_versions_from_lock=None
+):
     """
     Given a package name, its declared constraint, and list of installed versions,
     identifies which version is the direct install.
@@ -2084,107 +2402,116 @@ def find_direct_installed_version(pkg_name, declared_constraint, installed_versi
         return None
     if len(installed_versions) == 1:
         return installed_versions[0]
-        
+
     # If the lockfile parser explicitly identified the top-level direct version, use that!
     if direct_versions_from_lock and pkg_name in direct_versions_from_lock:
         v = direct_versions_from_lock[pkg_name]
         if v in installed_versions:
             return v
-            
+
     # Fallback 1: The version that satisfies the declared constraint
     if declared_constraint:
         try:
-            satisfying = [v for v in installed_versions if check_semver_satisfies(v, declared_constraint)]
+            satisfying = [
+                v
+                for v in installed_versions
+                if check_semver_satisfies(v, declared_constraint)
+            ]
             if len(satisfying) == 1:
                 return satisfying[0]
             elif len(satisfying) > 1:
                 return max(satisfying, key=parse_semver)
         except Exception:
             pass
-            
+
     # Fallback 2: The highest installed version
     try:
         return max(installed_versions, key=parse_semver)
     except Exception:
         return installed_versions[-1]
 
+
 def check_npm_package(target):
     """Queries npm registry for package metadata and checks target version."""
     name = target["name"]
     declared = target["declared"]
     installed_versions = target["installed"]
-    
+
     # Helper to check if a version string is explicitly local
     def is_local_version(ver_str):
         if not ver_str:
             return False
         v = ver_str.strip()
         return (
-            v.startswith("file:") or 
-            v.startswith("link:") or 
-            v.startswith("portal:") or 
-            v.startswith("workspace:") or
-            v.startswith("./") or
-            v.startswith("../") or
-            v.startswith("/")
+            v.startswith("file:")
+            or v.startswith("link:")
+            or v.startswith("portal:")
+            or v.startswith("workspace:")
+            or v.startswith("./")
+            or v.startswith("../")
+            or v.startswith("/")
         )
-        
+
     versions_to_check = installed_versions if installed_versions else [declared]
     results = []
-    
+
     try:
         # Properly URL-encode scoped packages (e.g. @babel/core -> @babel%2Fcore)
-        if name.startswith('@'):
-            parts = name.split('/')
+        if name.startswith("@"):
+            parts = name.split("/")
             if len(parts) == 2:
                 encoded_name = f"{parts[0]}%2F{parts[1]}"
             else:
                 encoded_name = urllib.parse.quote(name)
         else:
             encoded_name = urllib.parse.quote(name)
-            
+
         url = f"{URL_NPM_REGISTRY}{encoded_name}"
         req = urllib.request.Request(url)
         # Use abbreviated metadata format header
         req.add_header("Accept", "application/vnd.npm.install-v1+json")
-        
+
         with safe_urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode("utf-8"))
-            
+
         latest_version = data.get("dist-tags", {}).get("latest")
         all_versions_meta = data.get("versions", {})
         all_versions = list(all_versions_meta.keys())
-        
+
         for ver_str in versions_to_check:
             # If the version itself is explicitly local, we treat it as Local/local
             if is_local_version(ver_str):
-                results.append({
-                    "name": name,
-                    "declared": declared,
-                    "installed": ver_str,
-                    "latest": "Local",
-                    "latest_same_major": None,
-                    "latest_absolute": None,
-                    "status": "local",
-                    "deprecated": None,
-                    "error": None,
-                    "repo_url": None,
-                    "compare_url": None,
-                    "releases_url": None,
-                    "mismatch_checksum": False,
-                    "lockfile_checksum": None,
-                    "registry_checksums": []
-                })
+                results.append(
+                    {
+                        "name": name,
+                        "declared": declared,
+                        "installed": ver_str,
+                        "latest": "Local",
+                        "latest_same_major": None,
+                        "latest_absolute": None,
+                        "status": "local",
+                        "deprecated": None,
+                        "error": None,
+                        "repo_url": None,
+                        "compare_url": None,
+                        "releases_url": None,
+                        "mismatch_checksum": False,
+                        "lockfile_checksum": None,
+                        "registry_checksums": [],
+                    }
+                )
                 continue
-                
+
             # Strip ranges prefixes to get base version for check
-            clean_ver = RE_CLEAN_VER.sub('', ver_str) if ver_str else "0.0.0"
+            clean_ver = RE_CLEAN_VER.sub("", ver_str) if ver_str else "0.0.0"
             if not clean_ver:
                 clean_ver = "0.0.0"
-                
-            ver_meta = all_versions_meta.get(clean_ver) or all_versions_meta.get(ver_str) or {}
+
+            ver_meta = (
+                all_versions_meta.get(clean_ver) or all_versions_meta.get(ver_str) or {}
+            )
             deprecation_msg = ver_meta.get("deprecated")
-            
+
             # Check lockfile integrity against registry integrity/shasum
             lockfile_integrity = target.get("integrity", {}).get(ver_str)
             mismatch = False
@@ -2194,206 +2521,231 @@ def check_npm_package(target):
                 dist = ver_meta.get("dist") or {}
                 reg_integrity = dist.get("integrity", "").strip().lower()
                 reg_shasum = dist.get("shasum", "").strip().lower()
-                
-                reg_hashes = [h.strip().lower() for h in reg_integrity.split() if h.strip()]
+
+                reg_hashes = [
+                    h.strip().lower() for h in reg_integrity.split() if h.strip()
+                ]
                 if reg_shasum:
                     reg_shasum_b64 = hex_to_base64(reg_shasum)
                     if reg_shasum_b64:
                         reg_hashes.append(reg_shasum_b64.lower())
-                        
+
                 if reg_hashes and lock_clean not in reg_hashes:
                     mismatch = True
-            
+
             # Find latest same major and absolute latest
-            latest_same_major, latest_absolute = find_latest_same_major(clean_ver, all_versions)
+            latest_same_major, latest_absolute = find_latest_same_major(
+                clean_ver, all_versions
+            )
             if latest_version:
                 latest_absolute = latest_version
             if not latest_same_major:
                 latest_same_major = latest_absolute
-                
-            update_type = determine_update_type(clean_ver, latest_same_major, latest_absolute)
-                
+
+            update_type = determine_update_type(
+                clean_ver, latest_same_major, latest_absolute
+            )
+
             repo_url = None
             compare_url = None
             releases_url = None
-            if update_type in ("major", "minor-major", "patch-major"):
+            if update_type in {"major", "minor-major", "patch-major"}:
                 repo_url = resolve_npm_repo(name)
                 if repo_url:
                     compare_url = get_compare_url(repo_url, clean_ver, latest_absolute)
-                    releases_url = f"{repo_url}/releases" if is_github_url(repo_url) else repo_url
-                    
+                    releases_url = (
+                        f"{repo_url}/releases" if is_github_url(repo_url) else repo_url
+                    )
+
             display_latest = format_latest_versions(latest_same_major, latest_absolute)
-            results.append({
-                "name": name,
-                "declared": declared,
-                "installed": ver_str,
-                "latest": display_latest,
-                "latest_same_major": latest_same_major,
-                "latest_absolute": latest_absolute,
-                "status": update_type,
-                "deprecated": deprecation_msg,
-                "error": None,
-                "repo_url": repo_url,
-                "compare_url": compare_url,
-                "releases_url": releases_url,
-                "mismatch_checksum": mismatch,
-                "lockfile_checksum": lockfile_integrity,
-                "registry_checksums": reg_hashes
-            })
-            
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            for ver_str in versions_to_check:
-                results.append({
+            results.append(
+                {
                     "name": name,
                     "declared": declared,
                     "installed": ver_str,
-                    "latest": "Local",
-                    "latest_same_major": None,
-                    "latest_absolute": None,
-                    "status": "local",
-                    "deprecated": None,
+                    "latest": display_latest,
+                    "latest_same_major": latest_same_major,
+                    "latest_absolute": latest_absolute,
+                    "status": update_type,
+                    "deprecated": deprecation_msg,
                     "error": None,
-                    "repo_url": None,
-                    "compare_url": None,
-                    "releases_url": None,
-                    "mismatch_checksum": False,
-                    "lockfile_checksum": target.get("integrity", {}).get(ver_str),
-                    "registry_checksums": []
-                })
+                    "repo_url": repo_url,
+                    "compare_url": compare_url,
+                    "releases_url": releases_url,
+                    "mismatch_checksum": mismatch,
+                    "lockfile_checksum": lockfile_integrity,
+                    "registry_checksums": reg_hashes,
+                }
+            )
+
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            for ver_str in versions_to_check:
+                results.append(
+                    {
+                        "name": name,
+                        "declared": declared,
+                        "installed": ver_str,
+                        "latest": "Local",
+                        "latest_same_major": None,
+                        "latest_absolute": None,
+                        "status": "local",
+                        "deprecated": None,
+                        "error": None,
+                        "repo_url": None,
+                        "compare_url": None,
+                        "releases_url": None,
+                        "mismatch_checksum": False,
+                        "lockfile_checksum": target.get("integrity", {}).get(ver_str),
+                        "registry_checksums": [],
+                    }
+                )
         else:
             error_msg = f"HTTP {e.code}"
             for ver_str in versions_to_check:
-                results.append({
+                results.append(
+                    {
+                        "name": name,
+                        "declared": declared,
+                        "installed": ver_str,
+                        "latest": None,
+                        "status": "error",
+                        "deprecated": None,
+                        "error": error_msg,
+                        "mismatch_checksum": False,
+                        "lockfile_checksum": target.get("integrity", {}).get(ver_str),
+                        "registry_checksums": [],
+                    }
+                )
+    except Exception as e:
+        for ver_str in versions_to_check:
+            results.append(
+                {
                     "name": name,
                     "declared": declared,
                     "installed": ver_str,
                     "latest": None,
                     "status": "error",
                     "deprecated": None,
-                    "error": error_msg,
+                    "error": str(e),
                     "mismatch_checksum": False,
                     "lockfile_checksum": target.get("integrity", {}).get(ver_str),
-                    "registry_checksums": []
-                })
-    except Exception as e:
-        for ver_str in versions_to_check:
-            results.append({
-                "name": name,
-                "declared": declared,
-                "installed": ver_str,
-                "latest": None,
-                "status": "error",
-                "deprecated": None,
-                "error": str(e),
-                "mismatch_checksum": False,
-                "lockfile_checksum": target.get("integrity", {}).get(ver_str),
-                "registry_checksums": []
-            })
-            
+                    "registry_checksums": [],
+                }
+            )
+
     return results
+
 
 def check_all_targets(targets, max_workers):
     """Executes checks concurrently and renders simple progress."""
     total = len(targets)
     print(f"{COLOR_BOLD}{COLOR_CYAN}Checking {total} packages...{COLOR_RESET}\n")
-    return _check_all_targets_unified(targets, check_npm_package, f"{COLOR_GRAY}[Progress: NPM check]", max_workers)
+    return _check_all_targets_unified(
+        targets, check_npm_package, f"{COLOR_GRAY}[Progress: NPM check]", max_workers
+    )
+
 
 # ==============================================================================
 # OSV Vulnerability Scanning Logic
 # ==============================================================================
 
+
 def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
     """Checks vulnerabilities for all targets using OSV querybatch API.
     Returns a dict mapping (package_name, version) -> list of hydrated vulnerability dicts.
     """
-    print(f"{COLOR_BOLD}{COLOR_CYAN}Querying OSV vulnerability database...{COLOR_RESET}\n")
-    
+    print(
+        f"{COLOR_BOLD}{COLOR_CYAN}Querying OSV vulnerability database...{COLOR_RESET}\n"
+    )
+
     queries = []
     query_mapping = []
-    
+
     for t in targets:
         name = t["name"]
         declared = t["declared"]
         installed_versions = t["installed"]
-        
+
         versions_to_check = installed_versions if installed_versions else [declared]
         for ver_str in versions_to_check:
             # Clean range prefix symbols
-            clean_ver = RE_CLEAN_VER.sub('', ver_str) if ver_str else "0.0.0"
+            clean_ver = RE_CLEAN_VER.sub("", ver_str) if ver_str else "0.0.0"
             if not clean_ver:
                 clean_ver = "0.0.0"
-                
-            queries.append({
-                "package": {
-                    "name": name,
-                    "ecosystem": ecosystem
-                },
-                "version": clean_ver
-            })
+
+            queries.append(
+                {
+                    "package": {"name": name, "ecosystem": ecosystem},
+                    "version": clean_ver,
+                }
+            )
             query_mapping.append((name, ver_str, clean_ver))
-            
+
     if not queries:
         return {}
-        
+
     results_list = []
     chunk_size = 1000
     total_queries = len(queries)
     for i in range(0, total_queries, chunk_size):
-        chunk_queries = queries[i:i + chunk_size]
+        chunk_queries = queries[i : i + chunk_size]
         current_count = min(i + chunk_size, total_queries)
-        sys.stdout.write(f"\r{COLOR_GRAY}[OSV] Sending batch query: {current_count}/{total_queries} packages...{COLOR_RESET}\033[K")
+        sys.stdout.write(
+            f"\r{COLOR_GRAY}[OSV] Sending batch query: {current_count}/{total_queries} packages...{COLOR_RESET}\033[K"
+        )
         sys.stdout.flush()
         try:
             url = URL_OSV_QUERYBATCH
             req = urllib.request.Request(
-                url, 
+                url,
                 data=json.dumps({"queries": chunk_queries}).encode("utf-8"),
-                headers={"Content-Type": "application/json"}
+                headers={"Content-Type": "application/json"},
             )
-            
+
             with safe_urlopen(req, timeout=15) as response:
                 res_data = json.loads(response.read().decode("utf-8"))
-                
+
             results_list.extend(res_data.get("results", []))
         except Exception as e:
             sys.stdout.write("\n")
-            print(f"{COLOR_RED}{ICON_ERROR} Failed to query OSV database batch: {e}{COLOR_RESET}")
+            print(
+                f"{COLOR_RED}{ICON_ERROR} Failed to query OSV database batch: {e}{COLOR_RESET}"
+            )
             # Extend results_list with empty results to maintain index alignment with query_mapping
             results_list.extend([{"vulns": []}] * len(chunk_queries))
-        
+
     # Process batch results and collect vulnerability details
     hydrated_details = {}
     package_to_vuln_ids = {}
-    
+
     total_results = len(results_list)
     for i, res in enumerate(results_list):
         if i >= len(query_mapping):
             break
         name, ver_str, clean_ver = query_mapping[i]
-        
-        sys.stdout.write(f"\r{COLOR_GRAY}[OSV] Hydrating in-memory structures: {i + 1}/{total_results} packages...{COLOR_RESET}\033[K")
+
+        sys.stdout.write(
+            f"\r{COLOR_GRAY}[OSV] Hydrating in-memory structures: {i + 1}/{total_results} packages...{COLOR_RESET}\033[K"
+        )
         sys.stdout.flush()
-        
+
         vulns = res.get("vulns", [])
-        
+
         # Hydrate subsequent pages if next_page_token is present
         next_page_token = res.get("next_page_token")
         while next_page_token:
             try:
                 url = "https://api.osv.dev/v1/query"
                 payload = {
-                    "package": {
-                        "name": name,
-                        "ecosystem": ecosystem
-                    },
+                    "package": {"name": name, "ecosystem": ecosystem},
                     "version": clean_ver,
-                    "page_token": next_page_token
+                    "page_token": next_page_token,
                 }
                 req = urllib.request.Request(
                     url,
                     data=json.dumps(payload).encode("utf-8"),
-                    headers={"Content-Type": "application/json"}
+                    headers={"Content-Type": "application/json"},
                 )
                 with safe_urlopen(req, timeout=10) as page_response:
                     page_data = json.loads(page_response.read().decode("utf-8"))
@@ -2402,7 +2754,7 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
                 next_page_token = page_data.get("next_page_token")
             except Exception:
                 break
-                
+
         if vulns:
             ids = []
             for vuln in vulns:
@@ -2411,7 +2763,7 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
                     ids.append(vuln_id)
                     hydrated_details[vuln_id] = vuln
             package_to_vuln_ids[(name, clean_ver)] = ids
-            
+
     # Clean current line after in-memory hydration
     sys.stdout.write("\r\033[K")
     sys.stdout.flush()
@@ -2420,13 +2772,19 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
     all_vuln_ids = set()
     for ids in package_to_vuln_ids.values():
         all_vuln_ids.update(ids)
-        
-    orphaned_ids = sorted([vid for vid in all_vuln_ids if vid not in hydrated_details or "summary" not in hydrated_details[vid]])
-    
+
+    orphaned_ids = sorted(
+        [
+            vid
+            for vid in all_vuln_ids
+            if vid not in hydrated_details or "summary" not in hydrated_details[vid]
+        ]
+    )
+
     if orphaned_ids:
         completed = 0
         total_orphaned = len(orphaned_ids)
-        
+
         def fetch_vuln_detail(vuln_id):
             try:
                 url = f"{URL_OSV_VULNS}{vuln_id}"
@@ -2434,40 +2792,57 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
                 with safe_urlopen(req, timeout=10) as response:
                     return vuln_id, json.loads(response.read().decode("utf-8"))
             except Exception as e:
-                return vuln_id, {"id": vuln_id, "summary": f"Failed to fetch details: {e}", "severity": "UNKNOWN"}
-                
+                return vuln_id, {
+                    "id": vuln_id,
+                    "summary": f"Failed to fetch details: {e}",
+                    "severity": "UNKNOWN",
+                }
+
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(fetch_vuln_detail, vid): vid for vid in orphaned_ids}
+            futures = {
+                executor.submit(fetch_vuln_detail, vid): vid for vid in orphaned_ids
+            }
             for future in as_completed(futures):
                 completed += 1
                 vid = futures[future]
-                sys.stdout.write(f"\r{COLOR_GRAY}[Progress: {completed}/{total_orphaned}] Fetching missing advisory details for {vid}...{COLOR_RESET}\033[K")
+                sys.stdout.write(
+                    f"\r{COLOR_GRAY}[Progress: {completed}/{total_orphaned}] Fetching missing advisory details for {vid}...{COLOR_RESET}\033[K"
+                )
                 sys.stdout.flush()
-                
+
                 vid_res, detail = future.result()
                 hydrated_details[vid_res] = detail
-                
+
         sys.stdout.write("\r\033[K")
         sys.stdout.flush()
-        
+
     # Map back to packages
     package_to_vulns = {}
     for (name, clean_ver), vids in package_to_vuln_ids.items():
         vuln_list = []
         for vid in vids:
             vuln_data = hydrated_details.get(vid, {})
+
             def _extract_osv_severity(data_dict):
                 sev = "UNKNOWN"
                 if "severity" in data_dict and isinstance(data_dict["severity"], list):
                     for s in data_dict["severity"]:
-                        if s.get("type") in ("CVSS_V4", "CVSS_V3", "CVSS_V2"):
-                            score = s.get('score')
+                        if s.get("type") in {"CVSS_V4", "CVSS_V3", "CVSS_V2"}:
+                            score = s.get("score")
                             if score:
                                 score_str = str(score)
                                 if score_str.startswith("CVSS"):
                                     sev = score_str
                                 else:
-                                    prefix = "CVSS:4.0/" if s.get("type") == "CVSS_V4" else ("CVSS:3.0/" if s.get("type") == "CVSS_V3" else "CVSS:2.0/")
+                                    prefix = (
+                                        "CVSS:4.0/"
+                                        if s.get("type") == "CVSS_V4"
+                                        else (
+                                            "CVSS:3.0/"
+                                            if s.get("type") == "CVSS_V3"
+                                            else "CVSS:2.0/"
+                                        )
+                                    )
                                     sev = f"{prefix}{score_str}"
                             break
                 if sev == "UNKNOWN":
@@ -2476,7 +2851,9 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
                         db_specs.append(data_dict["database_specific"])
                     if isinstance(data_dict.get("affected"), list):
                         for aff in data_dict["affected"]:
-                            if isinstance(aff, dict) and isinstance(aff.get("database_specific"), dict):
+                            if isinstance(aff, dict) and isinstance(
+                                aff.get("database_specific"), dict
+                            ):
                                 db_specs.append(aff["database_specific"])
                     for db_spec in db_specs:
                         sev_val = db_spec.get("severity") or db_spec.get("cvss")
@@ -2491,101 +2868,116 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
 
             # Determine severity
             severity = _extract_osv_severity(vuln_data)
-            
+
             summary = vuln_data.get("summary")
             details = vuln_data.get("details", "")
-            
+
             # If severity is UNKNOWN or summary is missing/generic, try to resolve via aliases already in hydrated_details
-            if (severity == "UNKNOWN" or not summary or summary == "No summary provided") and "aliases" in vuln_data:
+            if (
+                severity == "UNKNOWN" or not summary or summary == "No summary provided"
+            ) and "aliases" in vuln_data:
                 for alias in vuln_data["aliases"]:
                     alias_data = hydrated_details.get(alias)
                     if alias_data:
                         if severity == "UNKNOWN":
                             severity = _extract_osv_severity(alias_data)
-                        
+
                         if not summary or summary == "No summary provided":
                             summary = alias_data.get("summary")
                         if not details:
                             details = alias_data.get("details", "")
-            
-            vuln_list.append({
-                "id": vid,
-                "summary": summary or "No summary provided",
-                "severity": severity,
-                "details": details or ""
-            })
-        
+
+            vuln_list.append(
+                {
+                    "id": vid,
+                    "summary": summary or "No summary provided",
+                    "severity": severity,
+                    "details": details or "",
+                }
+            )
+
         severity_order = {
             "malicious": 5,
             "critical": 4,
             "high": 3,
             "medium": 2,
             "low": 1,
-            "unknown": 0
+            "unknown": 0,
         }
-        vuln_list.sort(key=lambda v: severity_order.get(get_severity_level(v), 0), reverse=True)
+        vuln_list.sort(
+            key=lambda v: severity_order.get(get_severity_level(v), 0), reverse=True
+        )
         package_to_vulns[(name, clean_ver)] = vuln_list
-        
+
     return package_to_vulns
+
 
 def validate_suppressions_schema(data):
     """Manually validates the suppressions JSON data structure to avoid external dependencies."""
     if not isinstance(data, dict):
         raise ValueError("Root element of the JSON file must be a JSON object.")
-        
+
     if "metadata" not in data:
         raise ValueError("Missing required root key: 'metadata'")
     if "suppressions" not in data:
         raise ValueError("Missing required root key: 'suppressions'")
-        
+
     # Validate metadata
     metadata = data["metadata"]
     if not isinstance(metadata, dict):
         raise ValueError("'metadata' must be a JSON object.")
-        
+
     for req_meta in ["version", "last_modified", "approved_by"]:
         if req_meta not in metadata:
             raise ValueError(f"Missing required metadata field: '{req_meta}'")
         if not isinstance(metadata[req_meta], str) or not metadata[req_meta].strip():
             raise ValueError(f"Metadata field '{req_meta}' must be a non-empty string.")
-            
+
     # Validate version pattern (e.g. 1.0 or 1.0.0)
     version = metadata["version"].strip()
     if not re.match(r"^\d+\.\d+(\.\d+)?$", version):
-        raise ValueError(f"Metadata version '{version}' is invalid. Must match pattern 'X.Y' or 'X.Y.Z'.")
-        
+        raise ValueError(
+            f"Metadata version '{version}' is invalid. Must match pattern 'X.Y' or 'X.Y.Z'."
+        )
+
     # Validate last_modified date
     last_mod_str = metadata["last_modified"].strip()
     try:
         datetime.strptime(last_mod_str, "%Y-%m-%d")
     except ValueError:
-        raise ValueError(f"Metadata 'last_modified' '{last_mod_str}' is invalid. Must be in 'YYYY-MM-DD' format.")
-        
+        raise ValueError(
+            f"Metadata 'last_modified' '{last_mod_str}' is invalid. Must be in 'YYYY-MM-DD' format."
+        )
+
     # Validate suppressions
     suppressions = data["suppressions"]
     if not isinstance(suppressions, list):
         raise ValueError("'suppressions' must be a JSON array.")
-        
+
     allowed_reasons = {
         "NOT_AFFECTED_BY_VULNERABILITY",
         "VULNERABILITY_MITIGATED_BY_ENVIRONMENT",
         "COMPENSATING_CONTROL_IMPLEMENTED",
         "FALSE_POSITIVE",
-        "ACCEPTED_TEMPORARY_RISK"
+        "ACCEPTED_TEMPORARY_RISK",
     }
-    
+
     for idx, rule in enumerate(suppressions):
         if not isinstance(rule, dict):
             raise ValueError(f"Suppression rule at index {idx} must be a JSON object.")
-            
+
         # Check required fields
         required_fields = ["id", "package", "reason", "justification", "expires_at"]
         for req_field in required_fields:
             if req_field not in rule:
-                raise ValueError(f"Suppression rule at index {idx} is missing required field: '{req_field}'")
+                raise ValueError(
+                    f"Suppression rule at index {idx} is missing required field: '{req_field}'"
+                )
             if not isinstance(rule[req_field], str) or not rule[req_field].strip():
-                raise ValueError(f"Suppression rule field '{req_field}' at index {idx} must be a non-empty string.")
-                
+                raise ValueError(
+                    f"Suppression rule field '{req_field}' at index {idx} must be a non-empty string."
+                )
+
         # Validate reason enum
         reason = rule["reason"].strip()
         if reason not in allowed_reasons:
@@ -2593,7 +2985,7 @@ def validate_suppressions_schema(data):
                 f"Suppression rule 'reason' at index {idx} is '{reason}'. "
                 f"Must be one of: {', '.join(allowed_reasons)}"
             )
-            
+
         # Validate expires_at date
         expires_at_str = rule["expires_at"].strip()
         try:
@@ -2603,14 +2995,17 @@ def validate_suppressions_schema(data):
                 f"Suppression rule 'expires_at' at index {idx} is '{expires_at_str}'. "
                 f"Must be in 'YYYY-MM-DD' format."
             )
-            
+
         # Validate optional fields
         for opt_field in ["ecosystem", "created_by", "approved_by"]:
             if opt_field in rule:
                 val = rule[opt_field]
                 if val is not None:
                     if not isinstance(val, str) or not val.strip():
-                        raise ValueError(f"Optional field '{opt_field}' at index {idx} must be a non-empty string if specified.")
+                        raise ValueError(
+                            f"Optional field '{opt_field}' at index {idx} must be a non-empty string if specified."
+                        )
+
 
 def apply_vulnerability_suppressions(results, suppress_path, project_path=None):
     """Applies vulnerability suppressions from a JSON file.
@@ -2619,43 +3014,51 @@ def apply_vulnerability_suppressions(results, suppress_path, project_path=None):
     # Initialize suppressed_vulnerabilities key for all results regardless of suppression file existence
     for r in results:
         r["suppressed_vulnerabilities"] = []
-        
+
     file_to_load = None
     if suppress_path:
         file_to_load = suppress_path
         if not os.path.exists(file_to_load):
-            print(f"{COLOR_RED}{ICON_ERROR} Suppress file not found: {suppress_path}{COLOR_RESET}")
+            print(
+                f"{COLOR_RED}{ICON_ERROR} Suppress file not found: {suppress_path}{COLOR_RESET}"
+            )
             sys.exit(1)
     else:
         candidates = []
         if project_path:
             candidates.append(os.path.join(project_path, "kevlar-suppressions.json"))
         candidates.append("kevlar-suppressions.json")
-        
+
         for cand in candidates:
             if os.path.exists(cand):
                 file_to_load = cand
                 break
-            
+
     if not file_to_load:
         return
-        
-    print(f"{COLOR_BOLD}{COLOR_CYAN}Loading suppressions from {file_to_load}...{COLOR_RESET}")
+
+    print(
+        f"{COLOR_BOLD}{COLOR_CYAN}Loading suppressions from {file_to_load}...{COLOR_RESET}"
+    )
     try:
         with open(file_to_load, "r", encoding="utf-8") as f:
             data = json.load(f)
     except Exception as e:
-        print(f"{COLOR_RED}{ICON_ERROR} Failed to parse suppressions file: {e}{COLOR_RESET}")
+        print(
+            f"{COLOR_RED}{ICON_ERROR} Failed to parse suppressions file: {e}{COLOR_RESET}"
+        )
         sys.exit(1)
-        
+
     try:
         validate_suppressions_schema(data)
     except ValueError as e:
-        print(f"{COLOR_RED}{ICON_ERROR} Suppressions file schema validation failed: {e}{COLOR_RESET}")
+        print(
+            f"{COLOR_RED}{ICON_ERROR} Suppressions file schema validation failed: {e}{COLOR_RESET}"
+        )
         sys.exit(1)
-        
+
     suppressions = data.get("suppressions", [])
-    
+
     # Process and filter rules by expiration date
     active_rules = []
     today = date.today()
@@ -2666,24 +3069,26 @@ def apply_vulnerability_suppressions(results, suppress_path, project_path=None):
         except ValueError:
             # Should already be caught by schema validation, but keep as safety fallback
             continue
-            
+
         if expires_at_date < today:
             # Rule has expired, print a warning in COLOR_YELLOW and discard it
-            print(f"{COLOR_YELLOW}{ICON_WARN} Suppression rule for package '{rule['package']}' (vuln: '{rule['id']}') expired on {expires_at_str} and was discarded.{COLOR_RESET}")
+            print(
+                f"{COLOR_YELLOW}{ICON_WARN} Suppression rule for package '{rule['package']}' (vuln: '{rule['id']}') expired on {expires_at_str} and was discarded.{COLOR_RESET}"
+            )
             continue
-            
+
         active_rules.append(rule)
-        
+
     suppressed_count = 0
     for r in results:
         pkg_name = r["name"].lower()
         pkg_tech = r.get("technology", "").lower()
         active_vulns = []
         suppressed_vulns = []
-        
+
         for vuln in r.get("vulnerabilities", []):
             vuln_id = vuln["id"].upper()
-            
+
             matched_rule = None
             for rule in active_rules:
                 # 1. Package must match exactly
@@ -2697,10 +3102,10 @@ def apply_vulnerability_suppressions(results, suppress_path, project_path=None):
                 rule_id = rule["id"].strip().upper()
                 if rule_id != "*" and rule_id != vuln_id:
                     continue
-                    
+
                 matched_rule = rule
                 break
-                
+
             if matched_rule:
                 # Enrich vulnerability with governance metadata
                 vuln["suppressed_reason"] = matched_rule["reason"]
@@ -2710,33 +3115,38 @@ def apply_vulnerability_suppressions(results, suppress_path, project_path=None):
                     vuln["created_by"] = matched_rule["created_by"]
                 if matched_rule.get("approved_by"):
                     vuln["approved_by"] = matched_rule["approved_by"]
-                    
+
                 suppressed_vulns.append(vuln)
                 suppressed_count += 1
-                
+
                 tech_suffix = f" ({pkg_tech})" if pkg_tech else ""
-                print(f"{COLOR_GRAY}[SUPPRESSED] Ignored {vuln['id']} for package '{r['name']}'{tech_suffix} (Reason: {matched_rule['reason']}){COLOR_RESET}")
+                print(
+                    f"{COLOR_GRAY}[SUPPRESSED] Ignored {vuln['id']} for package '{r['name']}'{tech_suffix} (Reason: {matched_rule['reason']}){COLOR_RESET}"
+                )
             else:
                 active_vulns.append(vuln)
-                
+
         r["vulnerabilities"] = active_vulns
         r["suppressed_vulnerabilities"] = suppressed_vulns
-        
+
     if suppressed_count > 0:
-        print(f"\n{COLOR_GREEN}{ICON_OK} Successfully suppressed {suppressed_count} vulnerability alerts.{COLOR_RESET}\n")
+        print(
+            f"\n{COLOR_GREEN}{ICON_OK} Successfully suppressed {suppressed_count} vulnerability alerts.{COLOR_RESET}\n"
+        )
+
 
 def find_direct_parents(name, parents_map, direct_packages):
     """Finds which direct dependencies transitively required the given package."""
     visited = set()
     direct_parents = set()
     queue = [name]
-    
+
     while queue:
         current = queue.pop(0)
         if current in visited:
             continue
         visited.add(current)
-        
+
         curr_parents = parents_map.get(current, [])
         for p in curr_parents:
             if p in direct_packages:
@@ -2746,91 +3156,58 @@ def find_direct_parents(name, parents_map, direct_packages):
                     direct_parents.add(current)
             else:
                 queue.append(p)
-                
+
     return direct_parents
 
-def run_npm_checker(args):
-    """Main orchestrator for npm checker."""
-    pkg_file, lock_file = find_npm_files(args.path)
-    
-    if not pkg_file and not lock_file:
-        print(f"{COLOR_RED}{ICON_ERROR} No package.json or lockfile found in: {args.path}{COLOR_RESET}")
-        return None, None, 0
-        
-    pkg_data = None
-    if pkg_file:
-        print(f"{COLOR_GRAY}{ICON_INFO} Reading package.json...{COLOR_RESET}")
-        pkg_data = parse_package_json(pkg_file)
-        
-    lock_data = {}
-    parents_data = {}
-    integrity_data = {}
-    direct_versions_lock = {}
+
+def _prepare_npm_lock_data(lock_file):
+    lock_data, parents_data, integrity_data, direct_versions_lock = {}, {}, {}, {}
     if lock_file:
         basename = os.path.basename(lock_file)
         if basename == "package-lock.json":
             print(f"{COLOR_GRAY}{ICON_INFO} Reading package-lock.json...{COLOR_RESET}")
-            lock_data, parents_data, integrity_data, direct_versions_lock = parse_package_lock(lock_file)
+            lock_data, parents_data, integrity_data, direct_versions_lock = (
+                parse_package_lock(lock_file)
+            )
         elif basename == "yarn.lock":
             print(f"{COLOR_GRAY}{ICON_INFO} Reading yarn.lock...{COLOR_RESET}")
             lock_data, parents_data, integrity_data = parse_yarn_lock(lock_file)
         elif basename == "pnpm-lock.yaml":
             print(f"{COLOR_GRAY}{ICON_INFO} Reading pnpm-lock.yaml...{COLOR_RESET}")
             lock_data, parents_data, integrity_data = parse_pnpm_lock(lock_file)
-        
-    targets = build_check_targets(pkg_data, lock_data, args.all)
-    for t in targets:
-        t_integrity = {}
-        for ver in t["installed"]:
-            key = (t["name"], ver)
-            if key in integrity_data:
-                t_integrity[ver] = integrity_data[key]
-        t["integrity"] = t_integrity
-    
-    node_constraint, _source = find_node_constraint(args.path, pkg_data)
-    
-    if not targets and not node_constraint:
-        print(f"{COLOR_YELLOW}{ICON_WARN} No packages identified to check.{COLOR_RESET}")
-        return None, None, 0
-        
-    start_time = time.time()
-    results = check_all_targets(targets, args.concurrent) if targets else []
-    
-    # Identify and isolate direct vs transitive results for npm packages
-    # We want to clear the 'declared' constraint for transitive versions of a package
-    # so they are not flagged as configuration drift and are correctly shown as transitive in the report.
-    if pkg_data and "all_direct" in pkg_data:
-        # Group result indices by package name
-        by_name = {}
-        for idx, r in enumerate(results):
-            if not r.get("is_engine", False):
-                by_name.setdefault(r["name"], []).append(idx)
-                
-        for name, indices in by_name.items():
-            if name in pkg_data["all_direct"] and len(indices) > 1:
-                # We have multiple installed versions for a direct dependency.
-                # Find which version is the direct install.
-                declared_constraint = pkg_data["all_direct"][name]
-                installed_versions = [results[idx]["installed"] for idx in indices]
-                
-                # Get direct version
-                direct_ver = find_direct_installed_version(
-                    name, declared_constraint, installed_versions, 
-                    direct_versions_from_lock=direct_versions_lock
-                )
-                
-                # Clear 'declared' for all other versions of this package
-                for idx in indices:
-                    if results[idx]["installed"] != direct_ver:
-                        results[idx]["declared"] = None
-    
-    # Check integrity checksums
+    return lock_data, parents_data, integrity_data, direct_versions_lock
+
+
+def _isolate_direct_npm_results(results, pkg_data, direct_versions_lock):
+    if not (pkg_data and "all_direct" in pkg_data):
+        return
+    by_name = {}
+    for idx, r in enumerate(results):
+        if not r.get("is_engine", False):
+            by_name.setdefault(r["name"], []).append(idx)
+
+    for name, indices in by_name.items():
+        if name in pkg_data["all_direct"] and len(indices) > 1:
+            declared_constraint = pkg_data["all_direct"][name]
+            installed_versions = [results[idx]["installed"] for idx in indices]
+            direct_ver = find_direct_installed_version(
+                name,
+                declared_constraint,
+                installed_versions,
+                direct_versions_from_lock=direct_versions_lock,
+            )
+            for idx in indices:
+                if results[idx]["installed"] != direct_ver:
+                    results[idx]["declared"] = None
+
+
+def _check_npm_integrity(results, lock_file, integrity_data):
     for r in results:
         r["missing_checksum"] = False
         r["weak_checksum"] = False
         if r.get("is_engine", False):
             continue
-            
+
         if lock_file:
             key = (r["name"], r["installed"])
             if key in integrity_data and integrity_data[key]:
@@ -2844,24 +3221,29 @@ def run_npm_checker(args):
             else:
                 r["missing_checksum"] = True
 
-    # Check vulnerabilities via OSV if requested
+
+def _check_npm_vulnerabilities(results, targets, args):
     if getattr(args, "vuls", False):
         tech_info = TECHNOLOGIES["npm"]
-        osv_vulns = check_osv_vulnerabilities(targets, tech_info["osv_ecosystem"], args.concurrent)
-        
-        # Attach vulns back to results
+        osv_vulns = check_osv_vulnerabilities(
+            targets, tech_info["osv_ecosystem"], args.concurrent
+        )
         for r in results:
             key = (r["name"], r["installed"])
             r["vulnerabilities"] = osv_vulns.get(key, [])
     else:
         for r in results:
             r["vulnerabilities"] = []
-            
-    # Check Node.js version if applicable
-    if node_constraint:
-        status, deprecated_msg, error_msg, recommendation = analyze_node_constraint(node_constraint)
-            
-        results.append({
+
+
+def _add_node_constraint_result(results, node_constraint):
+    if not node_constraint:
+        return
+    status, deprecated_msg, error_msg, recommendation = analyze_node_constraint(
+        node_constraint
+    )
+    results.append(
+        {
             "name": "node",
             "declared": node_constraint,
             "installed": "N/A",
@@ -2877,15 +3259,21 @@ def run_npm_checker(args):
             "mismatch_checksum": False,
             "lockfile_checksum": None,
             "registry_checksums": [],
-            "is_engine": True
-        })
-            
-    # Resolve transitive dependency parents & dependency types
-    direct_packages = set(pkg_data["all_direct"].keys()) if pkg_data and "all_direct" in pkg_data else set()
+            "is_engine": True,
+        }
+    )
+
+
+def _resolve_npm_dependency_types(results, pkg_data, parents_data):
+    direct_packages = (
+        set(pkg_data["all_direct"].keys())
+        if pkg_data and "all_direct" in pkg_data
+        else set()
+    )
     if parents_data:
         root_parents = {name for name, pts in parents_data.items() if "root" in pts}
         direct_packages.update(root_parents)
-        
+
     for r in results:
         if not r.get("is_engine", False):
             if r["name"] in direct_packages:
@@ -2894,26 +3282,80 @@ def run_npm_checker(args):
                 r["required_by"] = []
             else:
                 r["dep_type"] = "Transitive"
-                direct_parents = find_direct_parents(r["name"], parents_data, direct_packages)
+                direct_parents = find_direct_parents(
+                    r["name"], parents_data, direct_packages
+                )
                 r["required_by"] = sorted(list(direct_parents - {r["name"]}))
         else:
             r["dep_type"] = "Engine"
             r["required_by"] = []
-            
+
+
+def _assign_npm_integrity_to_targets(targets, integrity_data):
+    for t in targets:
+        t_integrity = {}
+        for ver in t["installed"]:
+            key = (t["name"], ver)
+            if key in integrity_data:
+                t_integrity[ver] = integrity_data[key]
+        t["integrity"] = t_integrity
+
+
+def run_npm_checker(args):
+    """Main orchestrator for npm checker."""
+    pkg_file, lock_file = find_npm_files(args.path)
+
+    if not pkg_file and not lock_file:
+        print(
+            f"{COLOR_RED}{ICON_ERROR} No package.json or lockfile found in: {args.path}{COLOR_RESET}"
+        )
+        return None, None, 0
+
+    pkg_data = None
+    if pkg_file:
+        print(f"{COLOR_GRAY}{ICON_INFO} Reading package.json...{COLOR_RESET}")
+        pkg_data = parse_package_json(pkg_file)
+
+    lock_data, parents_data, integrity_data, direct_versions_lock = (
+        _prepare_npm_lock_data(lock_file)
+    )
+
+    targets = build_check_targets(pkg_data, lock_data, args.all)
+    _assign_npm_integrity_to_targets(targets, integrity_data)
+
+    node_constraint, _source = find_node_constraint(args.path, pkg_data)
+
+    if not targets and not node_constraint:
+        print(
+            f"{COLOR_YELLOW}{ICON_WARN} No packages identified to check.{COLOR_RESET}"
+        )
+        return None, None, 0
+
+    start_time = time.time()
+    results = check_all_targets(targets, args.concurrent) if targets else []
+
+    _isolate_direct_npm_results(results, pkg_data, direct_versions_lock)
+    _check_npm_integrity(results, lock_file, integrity_data)
+    _check_npm_vulnerabilities(results, targets, args)
+    _add_node_constraint_result(results, node_constraint)
+    _resolve_npm_dependency_types(results, pkg_data, parents_data)
+
     elapsed = time.time() - start_time
-    
+
     return results, pkg_data, elapsed
+
 
 # ==============================================================================
 # PIP Checker Logic
 # ==============================================================================
 
+
 def parse_version_to_tuple_marker(v_str):
     """Parses a version string into a tuple of integers for environment marker comparison."""
-    v_str = re.sub(r'^[^\d]+', '', v_str)
+    v_str = re.sub(r"^[^\d]+", "", v_str)
     parts = []
-    for part in v_str.split('.'):
-        m = re.match(r'^(\d+)', part)
+    for part in v_str.split("."):
+        m = re.match(r"^(\d+)", part)
         if m:
             parts.append(int(m.group(1)))
         else:
@@ -2922,31 +3364,32 @@ def parse_version_to_tuple_marker(v_str):
         parts.append(0)
     return tuple(parts)
 
+
 def compare_versions_marker(left, op, right):
     """Compares two version strings based on the given operator for environment markers."""
     left_t = parse_version_to_tuple_marker(str(left))
     right_t = parse_version_to_tuple_marker(str(right))
-    
+
     max_len = max(len(left_t), len(right_t))
     left_t += (0,) * (max_len - len(left_t))
     right_t += (0,) * (max_len - len(right_t))
-    
-    if op == '==' or op == '===':
+
+    if op == "==" or op == "===":
         return left_t == right_t
-    elif op == '!=':
+    elif op == "!=":
         return left_t != right_t
-    elif op == '<':
+    elif op == "<":
         return left_t < right_t
-    elif op == '<=':
+    elif op == "<=":
         return left_t <= right_t
-    elif op == '>':
+    elif op == ">":
         return left_t > right_t
-    elif op == '>=':
+    elif op == ">=":
         return left_t >= right_t
-    elif op == '~=':
+    elif op == "~=":
         if left_t < right_t:
             return False
-        right_orig_parts = [int(p) for p in re.findall(r'\d+', str(right))]
+        right_orig_parts = [int(p) for p in re.findall(r"\d+", str(right))]
         if len(right_orig_parts) > 1:
             upper_bound = list(right_t)
             idx = len(right_orig_parts) - 2
@@ -2961,6 +3404,7 @@ def compare_versions_marker(left, op, right):
             return left_t[0] == right_t[0]
     return False
 
+
 def tokenize_marker(marker_str):
     """Tokenizes a PEP 508 environment marker string."""
     tokens = []
@@ -2972,138 +3416,155 @@ def tokenize_marker(marker_str):
             if char.isspace():
                 pos += 1
                 continue
-            raise ValueError(f"Unexpected character in marker: {char} at position {pos}")
+            raise ValueError(
+                f"Unexpected character in marker: {char} at position {pos}"
+            )
         token = match.group(1)
         tokens.append(token)
         pos = match.end()
     return tokens
+
 
 def parse_and_evaluate_marker(marker_str, env):
     """Parses and evaluates a PEP 508 environment marker expression."""
     tokens = tokenize_marker(marker_str)
     if not tokens:
         return True
-        
+
     idx = [0]
-    
+
     def peek():
         if idx[0] < len(tokens):
             return tokens[idx[0]]
         return None
-        
+
     def consume():
         val = peek()
         if val is not None:
             idx[0] += 1
         return val
-        
+
     def parse_or():
         left = parse_and()
-        while peek() == 'or':
+        while peek() == "or":
             consume()
             right = parse_and()
             left = left or right
         return left
-        
+
     def parse_and():
         left = parse_not()
-        while peek() == 'and':
+        while peek() == "and":
             consume()
             right = parse_not()
             left = left and right
         return left
-        
+
     def parse_not():
-        if peek() == 'not':
+        if peek() == "not":
             consume()
             val = parse_not()
             return not val
         return parse_comparison()
-        
+
     def parse_comparison():
         left_val, left_name = parse_primary()
         op = peek()
-        if op in ('==', '!=', '<=', '>=', '<', '>', '===', '~=', 'in', 'not in'):
+        if op in {"==", "!=", "<=", ">=", "<", ">", "===", "~=", "in", "not in"}:
             consume()
             right_val, right_name = parse_primary()
-            return evaluate_comparison_op(left_val, left_name, op, right_val, right_name)
+            return evaluate_comparison_op(
+                left_val, left_name, op, right_val, right_name
+            )
         return bool(left_val)
-        
+
     def parse_primary():
         token = consume()
-        if token == '(':
+        if token == "(":
             val = parse_or()
-            if consume() != ')':
+            if consume() != ")":
                 raise ValueError("Unmatched parenthesis in marker expression")
             return (val, None)
         if token is None:
             raise ValueError("Unexpected end of expression")
-        if (token.startswith('"') and token.endswith('"')) or (token.startswith("'") and token.endswith("'")):
+        if (token.startswith('"') and token.endswith('"')) or (
+            token.startswith("'") and token.endswith("'")
+        ):
             return (token[1:-1], None)
         if token in env:
             return (env[token], token)
         return (token, None)
-        
+
     result = parse_or()
     if idx[0] < len(tokens):
         raise ValueError(f"Trailing tokens in marker expression: {tokens[idx[0]:]}")
     return result
 
+
 def evaluate_comparison_op(left_val, left_name, op, right_val, right_name):
     """Evaluates a single comparison operation for markers."""
-    is_version = (
-        left_name in ('python_version', 'python_full_version', 'implementation_version', 'platform_version') or
-        right_name in ('python_version', 'python_full_version', 'implementation_version', 'platform_version')
-    )
-    
-    if op in ('in', 'not in'):
+    is_version = left_name in {
+        "python_version",
+        "python_full_version",
+        "implementation_version",
+        "platform_version",
+    } or right_name in {
+        "python_version",
+        "python_full_version",
+        "implementation_version",
+        "platform_version",
+    }
+
+    if op in {"in", "not in"}:
         left_str = str(left_val)
         right_str = str(right_val)
-        if op == 'in':
+        if op == "in":
             return left_str in right_str
         else:
             return left_str not in right_str
-            
-    if is_version and op in ('==', '!=', '<', '<=', '>', '>=', '~='):
+
+    if is_version and op in {"==", "!=", "<", "<=", ">", ">=", "~="}:
         return compare_versions_marker(left_val, op, right_val)
-        
+
     left_str = str(left_val)
     right_str = str(right_val)
-    if op == '==':
+    if op == "==":
         return left_str == right_str
-    elif op == '!=':
+    elif op == "!=":
         return left_str != right_str
-    elif op == '<':
+    elif op == "<":
         return left_str < right_str
-    elif op == '<=':
+    elif op == "<=":
         return left_str <= right_str
-    elif op == '>':
+    elif op == ">":
         return left_str > right_str
-    elif op == '>=':
+    elif op == ">=":
         return left_str >= right_str
-    elif op == '===':
+    elif op == "===":
         return left_str == right_str
-        
+
     return False
+
 
 def get_env_markers():
     """Builds environment markers dictionary for the current interpreter."""
     import platform
+
     py_version_tuple = platform.python_version_tuple()
     python_version = f"{py_version_tuple[0]}.{py_version_tuple[1]}"
     python_full_version = platform.python_version()
-    
+
     impl_ver = ""
     if hasattr(sys, "implementation") and hasattr(sys.implementation, "version"):
         v = sys.implementation.version
         impl_ver = f"{v.major}.{v.minor}.{v.micro}"
         if v.releaselevel != "final":
             impl_ver += f"{v.releaselevel}{v.serial}"
-            
+
     impl_name = ""
     if hasattr(sys, "implementation") and hasattr(sys.implementation, "name"):
         impl_name = sys.implementation.name
-        
+
     return {
         "os_name": os.name,
         "sys_platform": sys.platform,
@@ -3119,11 +3580,12 @@ def get_env_markers():
         "extra": "",
     }
 
+
 def parse_requirements_txt(filepath, seen_files=None, base_dir=None):
     """Parses requirements.txt to extract dependencies and parent traces, supporting PEP 508 and file inclusions."""
     if seen_files is None:
         seen_files = set()
-        
+
     abs_filepath = os.path.abspath(filepath)
 
     if base_dir is None:
@@ -3138,34 +3600,34 @@ def parse_requirements_txt(filepath, seen_files=None, base_dir=None):
     if abs_filepath in seen_files:
         return {}, {}
     seen_files.add(abs_filepath)
-    
+
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             lines = f.readlines()
-            
+
         dependencies = {}
         parents = {}
-        
+
         last_pkg = None
-        
+
         # Preprocess lines to merge continuation lines (ending with \)
         merged_lines = []
         continuation = ""
         for line in lines:
             stripped = line.strip()
-            if stripped.endswith('\\'):
+            if stripped.endswith("\\"):
                 continuation += stripped[:-1].rstrip() + " "
             else:
                 merged_lines.append(continuation + line)
                 continuation = ""
         if continuation:
             merged_lines.append(continuation)
-            
+
         for line in merged_lines:
             stripped = line.strip()
             if not stripped:
                 continue
-                
+
             if stripped.startswith("#"):
                 if stripped.startswith("# via") and last_pkg:
                     parent_part = stripped[5:].strip()
@@ -3174,43 +3636,61 @@ def parse_requirements_txt(filepath, seen_files=None, base_dir=None):
                         if p_clean:
                             parents.setdefault(last_pkg, set()).add(p_clean)
                 continue
-                
+
             comment = ""
             stripped_line = stripped
             if " #" in line:
                 parts = line.split(" #", 1)
                 stripped_line = parts[0].strip()
                 comment = parts[1].strip()
-            elif "#" in line and not any(scheme in line for scheme in ("http://", "https://", "git+")):
+            elif "#" in line and not any(
+                scheme in line for scheme in ("http://", "https://", "git+")
+            ):
                 parts = line.split("#", 1)
                 stripped_line = parts[0].strip()
                 comment = parts[1].strip()
-                
+
             # Handle file inclusions like '-r requirements.txt', '-c constraints.txt', or relative paths like '../requirements.txt'
             inc_target = None
-            is_url = any(s in stripped_line for s in ("http://", "https://", "git+", "svn+", "hg+", "@"))
-            if stripped_line.startswith(("-r ", "-c ", "--requirement ", "--constraint ")):
+            is_url = any(
+                s in stripped_line
+                for s in ("http://", "https://", "git+", "svn+", "hg+", "@")
+            )
+            if stripped_line.startswith(
+                ("-r ", "-c ", "--requirement ", "--constraint ")
+            ):
                 inc_target = stripped_line.split(maxsplit=1)[1].strip()
-            elif not is_url and (stripped_line.startswith((".", "/", "\\")) or stripped_line.endswith((".txt", ".in"))):
+            elif not is_url and (
+                stripped_line.startswith((".", "/", "\\"))
+                or stripped_line.endswith((".txt", ".in"))
+            ):
                 inc_target = stripped_line.lstrip("-e ").strip()
-                
+
             if inc_target:
-                inc_path = os.path.abspath(os.path.join(os.path.dirname(abs_filepath), inc_target))
+                inc_path = os.path.abspath(
+                    os.path.join(os.path.dirname(abs_filepath), inc_target)
+                )
 
                 # Check path traversal: The included file must not escape the initial root base_dir
                 if not _is_safe_path(base_dir, inc_path):
                     continue
 
-                if os.path.exists(inc_path) and os.path.isfile(inc_path) and inc_path not in seen_files:
-                    inc_deps, inc_parents = parse_requirements_txt(inc_path, seen_files, base_dir=base_dir)
+                if (
+                    os.path.exists(inc_path)
+                    and os.path.isfile(inc_path)
+                    and inc_path not in seen_files
+                ):
+                    inc_deps, inc_parents = parse_requirements_txt(
+                        inc_path, seen_files, base_dir=base_dir
+                    )
                     dependencies.update(inc_deps)
                     for k, v in inc_parents.items():
                         parents.setdefault(k, set()).update(v)
                 continue
-                
+
             if stripped_line.startswith("-"):
                 continue
-                
+
             # Separate the requirement from the environment marker (separated by semicolon)
             if ";" in stripped_line:
                 parts = stripped_line.split(";", 1)
@@ -3219,19 +3699,19 @@ def parse_requirements_txt(filepath, seen_files=None, base_dir=None):
             else:
                 req_part = stripped_line
                 marker_part = None
-                
+
             # Parse package name, optional extras, and specifier/URL (PEP 508 names must start with alphanumeric)
             match = re.match(
-                r'^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)(?:\s*\[\s*([A-Za-z0-9_,.-]+)\s*\])?\s*(.*)$',
-                req_part
+                r"^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)(?:\s*\[\s*([A-Za-z0-9_,.-]+)\s*\])?\s*(.*)$",
+                req_part,
             )
             if not match:
                 continue
-                
+
             pkg_name = match.group(1)
             extras = match.group(2)
             rest = match.group(3).strip()
-            
+
             # Evaluate markers if present
             if marker_part:
                 try:
@@ -3239,86 +3719,102 @@ def parse_requirements_txt(filepath, seen_files=None, base_dir=None):
                     if not parse_and_evaluate_marker(marker_part, env):
                         continue
                 except Exception as e:
-                    print(f"{COLOR_YELLOW}{ICON_WARN} Warning evaluating marker '{marker_part}': {e}{COLOR_RESET}")
-            
+                    print(
+                        f"{COLOR_YELLOW}{ICON_WARN} Warning evaluating marker '{marker_part}': {e}{COLOR_RESET}"
+                    )
+
             # Extract version specification or URL
             if rest.startswith("@"):
                 url_part = rest[1:].strip()
                 version_spec = f"@ {url_part}"
             elif rest:
-                version_spec = re.sub(r'([><=^~!]+)\s+', r'\1', rest)
+                version_spec = re.sub(r"([><=^~!]+)\s+", r"\1", rest)
             else:
                 version_spec = "*"
-                
+
             dependencies[pkg_name] = version_spec
             last_pkg = pkg_name
-            
+
             if comment.startswith("via"):
                 parent_part = comment[3:].strip()
                 for p in parent_part.split(","):
                     p_clean = p.strip()
                     if p_clean:
                         parents.setdefault(pkg_name, set()).add(p_clean)
-                        
+
         return dependencies, {k: list(v) for k, v in parents.items()}
     except Exception as e:
-        print(f"{COLOR_RED}{ICON_ERROR} Error reading requirements.txt: {e}{COLOR_RESET}")
+        print(
+            f"{COLOR_RED}{ICON_ERROR} Error reading requirements.txt: {e}{COLOR_RESET}"
+        )
         return None, None
+
 
 def check_pypi_package(target):
     """Queries PyPI registry for package metadata and checks target version."""
     name = target["name"]
     declared = target["declared"]
     installed_versions = target["installed"]
-    
+
     versions_to_check = installed_versions if installed_versions else [declared]
     results = []
-    
+
     try:
         encoded_name = urllib.parse.quote(name)
         url = f"{URL_PYPI_REGISTRY}{encoded_name}/json"
-        
+
         req = urllib.request.Request(url)
         with safe_urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode("utf-8"))
-            
+
         info = data.get("info", {})
         latest_version = info.get("version")
         releases = data.get("releases", {})
         all_versions = list(releases.keys())
-        
+
         for ver_str in versions_to_check:
             # Clean version constraints prefixes
-            clean_ver = RE_CLEAN_VER.sub('', ver_str) if ver_str else "0.0.0"
+            clean_ver = RE_CLEAN_VER.sub("", ver_str) if ver_str else "0.0.0"
             if not clean_ver:
                 clean_ver = "0.0.0"
-                
+
             # Check yanking (deprecation)
             files_list = releases.get(clean_ver) or releases.get(ver_str) or []
             yanked_reason = None
             for file_info in files_list:
                 if isinstance(file_info, dict) and file_info.get("yanked"):
-                    yanked_reason = file_info.get("yanked_reason") or "This release was yanked from PyPI."
+                    yanked_reason = (
+                        file_info.get("yanked_reason")
+                        or "This release was yanked from PyPI."
+                    )
                     break
-                    
+
             # Find latest same major and absolute latest
-            latest_same_major, latest_absolute = find_latest_same_major(clean_ver, all_versions)
+            latest_same_major, latest_absolute = find_latest_same_major(
+                clean_ver, all_versions
+            )
             if latest_version:
                 latest_absolute = latest_version
             if not latest_same_major:
                 latest_same_major = latest_absolute
-                
-            update_type = determine_update_type(clean_ver, latest_same_major, latest_absolute)
-                
+
+            update_type = determine_update_type(
+                clean_ver, latest_same_major, latest_absolute
+            )
+
             repo_url = None
             compare_url = None
             releases_url = None
-            if update_type in ("major", "minor-major", "patch-major"):
+            if update_type in {"major", "minor-major", "patch-major"}:
                 urls = info.get("project_urls") or {}
                 raw_url = None
                 for key in ["Source", "Repository", "Code", "Homepage"]:
                     for k, v in urls.items():
-                        if key.lower() in k.lower() and v and is_github_url(clean_repo_url(v)):
+                        if (
+                            key.lower() in k.lower()
+                            and v
+                            and is_github_url(clean_repo_url(v))
+                        ):
                             raw_url = v
                             break
                     if raw_url:
@@ -3337,55 +3833,67 @@ def check_pypi_package(target):
                 repo_url = clean_repo_url(raw_url)
                 if repo_url:
                     compare_url = get_compare_url(repo_url, clean_ver, latest_absolute)
-                    releases_url = f"{repo_url}/releases" if is_github_url(repo_url) else repo_url
-                    
+                    releases_url = (
+                        f"{repo_url}/releases" if is_github_url(repo_url) else repo_url
+                    )
+
             display_latest = format_latest_versions(latest_same_major, latest_absolute)
-            results.append({
-                "name": name,
-                "declared": declared,
-                "installed": ver_str,
-                "latest": display_latest,
-                "latest_same_major": latest_same_major,
-                "latest_absolute": latest_absolute,
-                "status": update_type,
-                "deprecated": yanked_reason,
-                "error": None,
-                "repo_url": repo_url,
-                "compare_url": compare_url,
-                "releases_url": releases_url
-            })
-            
+            results.append(
+                {
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": display_latest,
+                    "latest_same_major": latest_same_major,
+                    "latest_absolute": latest_absolute,
+                    "status": update_type,
+                    "deprecated": yanked_reason,
+                    "error": None,
+                    "repo_url": repo_url,
+                    "compare_url": compare_url,
+                    "releases_url": releases_url,
+                }
+            )
+
     except urllib.error.HTTPError as e:
         error_msg = "Not Found" if e.code == 404 else f"HTTP {e.code}"
         for ver_str in versions_to_check:
-            results.append({
-                "name": name,
-                "declared": declared,
-                "installed": ver_str,
-                "latest": None,
-                "status": "error",
-                "deprecated": None,
-                "error": error_msg
-            })
+            results.append(
+                {
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": None,
+                    "status": "error",
+                    "deprecated": None,
+                    "error": error_msg,
+                }
+            )
     except Exception as e:
         for ver_str in versions_to_check:
-            results.append({
-                "name": name,
-                "declared": declared,
-                "installed": ver_str,
-                "latest": None,
-                "status": "error",
-                "deprecated": None,
-                "error": str(e)
-            })
-            
+            results.append(
+                {
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": None,
+                    "status": "error",
+                    "deprecated": None,
+                    "error": str(e),
+                }
+            )
+
     return results
+
 
 def check_all_pip_targets(targets, max_workers):
     """Executes PyPI checks concurrently and renders simple progress."""
     total = len(targets)
     print(f"{COLOR_BOLD}{COLOR_CYAN}Checking {total} packages...{COLOR_RESET}\n")
-    return _check_all_targets_unified(targets, check_pypi_package, f"{COLOR_GRAY}[Progress: PyPI check]", max_workers)
+    return _check_all_targets_unified(
+        targets, check_pypi_package, f"{COLOR_GRAY}[Progress: PyPI check]", max_workers
+    )
+
 
 def find_pip_files(base_path):
     """Finds manifest and lockfile for python/pip technologies."""
@@ -3393,23 +3901,24 @@ def find_pip_files(base_path):
     pyproject = os.path.join(base_path, "pyproject.toml")
     if os.path.exists(poetry_lock) and os.path.exists(pyproject):
         return pyproject, poetry_lock, "poetry"
-        
+
     pdm_lock = os.path.join(base_path, "pdm.lock")
     if os.path.exists(pdm_lock) and os.path.exists(pyproject):
         return pyproject, pdm_lock, "pdm"
-        
+
     pipfile_lock = os.path.join(base_path, "Pipfile.lock")
     if os.path.exists(pipfile_lock):
         return None, pipfile_lock, "pipenv"
-        
+
     req_file = os.path.join(base_path, "requirements.txt")
     if os.path.exists(req_file):
         return req_file, None, "pip"
-        
+
     if os.path.exists(pyproject):
         return pyproject, None, "pyproject"
-        
+
     return None, None, None
+
 
 def _iter_lock_blocks(filepath):
     """Helper generator to read a lockfile line by line and yield blocks
@@ -3424,6 +3933,7 @@ def _iter_lock_blocks(filepath):
             else:
                 current_block.append(line)
         yield "".join(current_block)
+
 
 def parse_poetry_lock(filepath):
     """Parses poetry.lock to extract resolved versions and their parent relations.
@@ -3440,37 +3950,47 @@ def parse_poetry_lock(filepath):
             name = None
             version = None
             in_deps = False
-            
+
             for line in lines:
                 stripped = line.strip()
                 if not stripped:
                     continue
-                if stripped.startswith("[[") or (stripped.startswith("[") and not stripped.startswith("[package.dependencies]")):
+                if stripped.startswith("[[") or (
+                    stripped.startswith("[")
+                    and not stripped.startswith("[package.dependencies]")
+                ):
                     in_deps = False
                 if stripped.startswith("[package.dependencies]"):
                     in_deps = True
                     continue
-                    
+
                 if not in_deps:
                     if stripped.startswith("name ="):
                         name = stripped.split("=", 1)[1].strip().strip('"').strip("'")
                     elif stripped.startswith("version ="):
-                        version = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+                        version = (
+                            stripped.split("=", 1)[1].strip().strip('"').strip("'")
+                        )
                 else:
                     if "=" in stripped:
-                        dep_name = stripped.split("=", 1)[0].strip().strip('"').strip("'")
+                        dep_name = (
+                            stripped.split("=", 1)[0].strip().strip('"').strip("'")
+                        )
                         if dep_name and name:
                             parents.setdefault(dep_name, set()).add(name)
-                            
+
             if name and version:
                 resolved.setdefault(name, set()).add(version)
-                
+
         parents_clean = {k: list(v) for k, v in parents.items()}
         resolved_clean = {k: list(v) for k, v in resolved.items()}
         return resolved_clean, parents_clean
     except Exception as e:
-        print(f"{COLOR_YELLOW}{ICON_WARN} Warning reading poetry.lock: {e}{COLOR_RESET}")
+        print(
+            f"{COLOR_YELLOW}{ICON_WARN} Warning reading poetry.lock: {e}{COLOR_RESET}"
+        )
         return {}, {}
+
 
 def parse_pdm_lock(filepath):
     """Parses pdm.lock to extract resolved versions and their parent relations.
@@ -3487,42 +4007,48 @@ def parse_pdm_lock(filepath):
             name = None
             version = None
             in_deps = False
-            
+
             for line in lines:
                 stripped = line.strip()
                 if not stripped:
                     continue
-                if stripped.startswith("[[") or (stripped.startswith("[") and not stripped.startswith("dependencies =")):
+                if stripped.startswith("[[") or (
+                    stripped.startswith("[")
+                    and not stripped.startswith("dependencies =")
+                ):
                     in_deps = False
                 if stripped.startswith("dependencies = ["):
                     in_deps = True
                     continue
-                    
+
                 if not in_deps:
                     if stripped.startswith("name ="):
                         name = stripped.split("=", 1)[1].strip().strip('"').strip("'")
                     elif stripped.startswith("version ="):
-                        version = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+                        version = (
+                            stripped.split("=", 1)[1].strip().strip('"').strip("'")
+                        )
                 else:
                     if stripped == "]":
                         in_deps = False
                     else:
                         item = stripped.rstrip(",").strip().strip('"').strip("'")
                         if item:
-                            match = re.match(r'^([a-zA-Z0-9\-_.]+)', item)
+                            match = re.match(r"^([a-zA-Z0-9\-_.]+)", item)
                             if match and name:
                                 dep_name = match.group(1)
                                 parents.setdefault(dep_name, set()).add(name)
-                                
+
             if name and version:
                 resolved.setdefault(name, set()).add(version)
-                
+
         parents_clean = {k: list(v) for k, v in parents.items()}
         resolved_clean = {k: list(v) for k, v in resolved.items()}
         return resolved_clean, parents_clean
     except Exception as e:
         print(f"{COLOR_YELLOW}{ICON_WARN} Warning reading pdm.lock: {e}{COLOR_RESET}")
         return {}, {}
+
 
 def parse_pipfile_lock(filepath):
     """Parses Pipfile.lock to extract resolved versions.
@@ -3533,7 +4059,7 @@ def parse_pipfile_lock(filepath):
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             data = json.load(f)
-            
+
         for section in ["default", "develop"]:
             deps = data.get(section, {})
             for name, info in deps.items():
@@ -3542,12 +4068,15 @@ def parse_pipfile_lock(filepath):
                     if version.startswith("=="):
                         version = version[2:]
                     resolved.setdefault(name, set()).add(version)
-                    
+
         resolved_clean = {k: list(v) for k, v in resolved.items()}
         return resolved_clean, {}
     except Exception as e:
-        print(f"{COLOR_YELLOW}{ICON_WARN} Warning reading Pipfile.lock: {e}{COLOR_RESET}")
+        print(
+            f"{COLOR_YELLOW}{ICON_WARN} Warning reading Pipfile.lock: {e}{COLOR_RESET}"
+        )
         return {}, {}
+
 
 def parse_pep508(dep_string):
     """Parses a PEP 508 dependency string.
@@ -3556,23 +4085,24 @@ def parse_pep508(dep_string):
     """
     if not isinstance(dep_string, str):
         return None, None
-    req_part = dep_string.split(';', 1)[0].strip()
+    req_part = dep_string.split(";", 1)[0].strip()
     if not req_part:
         return None, None
-    match = re.match(r'^([a-zA-Z0-9\-_\.]+)(.*)$', req_part)
+    match = re.match(r"^([a-zA-Z0-9\-_\.]+)(.*)$", req_part)
     if not match:
         return None, None
     name = match.group(1)
     rest = match.group(2).strip()
-    if rest.startswith('['):
-        extra_match = re.match(r'^\[[^\]]*\](.*)$', rest)
+    if rest.startswith("["):
+        extra_match = re.match(r"^\[[^\]]*\](.*)$", rest)
         if extra_match:
             rest = extra_match.group(1).strip()
-    if rest.startswith('(') and rest.endswith(')'):
+    if rest.startswith("(") and rest.endswith(")"):
         rest = rest[1:-1].strip()
-    rest = re.sub(r'([><=^~!]+)\s+', r'\1', rest)
+    rest = re.sub(r"([><=^~!]+)\s+", r"\1", rest)
     version_spec = rest if rest else "*"
     return name, version_spec
+
 
 def parse_pyproject_toml(filepath):
     """Parses pyproject.toml to extract direct dependencies.
@@ -3583,7 +4113,7 @@ def parse_pyproject_toml(filepath):
     try:
         with open(filepath, "rb") as f:
             data = tomllib.load(f)
-            
+
         def process_poetry_deps(deps_dict):
             if not isinstance(deps_dict, dict):
                 return
@@ -3629,13 +4159,13 @@ def parse_pyproject_toml(filepath):
             poetry = tool.get("poetry", {})
             if isinstance(poetry, dict):
                 process_poetry_deps(poetry.get("dependencies"))
-                
+
                 group = poetry.get("group", {})
                 if isinstance(group, dict):
                     for group_table in group.values():
                         if isinstance(group_table, dict):
                             process_poetry_deps(group_table.get("dependencies"))
-                            
+
                 process_poetry_deps(poetry.get("dev-dependencies"))
 
             # 3. PDM
@@ -3662,7 +4192,7 @@ def parse_pyproject_toml(filepath):
                             elif isinstance(v, dict):
                                 ver = v.get("version")
                                 dependencies[k] = ver if isinstance(ver, str) else "*"
-                                
+
                 pdm_deps = pdm.get("dependencies")
                 if isinstance(pdm_deps, list):
                     for dep in pdm_deps:
@@ -3684,26 +4214,33 @@ def parse_pyproject_toml(filepath):
                             elif isinstance(v, dict):
                                 ver = v.get("version")
                                 dependencies[k] = ver if isinstance(ver, str) else "*"
-                                
+
         return dependencies
     except Exception as e:
-        print(f"{COLOR_YELLOW}{ICON_WARN} Warning reading pyproject.toml: {e}{COLOR_RESET}")
+        print(
+            f"{COLOR_YELLOW}{ICON_WARN} Warning reading pyproject.toml: {e}{COLOR_RESET}"
+        )
         return {}
+
 
 def run_pip_checker(args):
     """Main orchestrator for pip checker."""
     manifest_file, lock_file, tech_type = find_pip_files(args.path)
-    
+
     if not manifest_file and not lock_file:
-        print(f"{COLOR_RED}{ICON_ERROR} No requirements.txt, poetry.lock, Pipfile.lock, or pyproject.toml found in: {args.path}{COLOR_RESET}")
+        print(
+            f"{COLOR_RED}{ICON_ERROR} No requirements.txt, poetry.lock, Pipfile.lock, or pyproject.toml found in: {args.path}{COLOR_RESET}"
+        )
         return None, None, 0
-        
+
     direct_deps = {}
     lock_deps = {}
     parents_data = {}
-    
+
     if tech_type == "poetry":
-        print(f"{COLOR_GRAY}{ICON_INFO} Reading pyproject.toml (Poetry)...{COLOR_RESET}")
+        print(
+            f"{COLOR_GRAY}{ICON_INFO} Reading pyproject.toml (Poetry)...{COLOR_RESET}"
+        )
         direct_deps = parse_pyproject_toml(manifest_file)
         print(f"{COLOR_GRAY}{ICON_INFO} Reading poetry.lock...{COLOR_RESET}")
         lock_deps, parents_data = parse_poetry_lock(lock_file)
@@ -3727,50 +4264,50 @@ def run_pip_checker(args):
             version = spec[2:] if spec.startswith("==") else ""
             if version:
                 lock_deps[name] = [version]
-                
+
     targets = []
     if args.all and lock_deps:
         for name, versions in lock_deps.items():
             declared = direct_deps.get(name)
-            targets.append({
-                "name": name,
-                "declared": declared,
-                "installed": versions
-            })
+            targets.append({"name": name, "declared": declared, "installed": versions})
     else:
         for name, declared in sorted(direct_deps.items()):
             versions = lock_deps.get(name, [])
-            if not versions and declared and not any(c in declared for c in [">", "<", "~", "*", "^"]):
+            if (
+                not versions
+                and declared
+                and not any(c in declared for c in [">", "<", "~", "*", "^"])
+            ):
                 clean_ver = declared[2:] if declared.startswith("==") else declared
                 versions = [clean_ver]
-            targets.append({
-                "name": name,
-                "declared": declared,
-                "installed": versions
-            })
-            
+            targets.append({"name": name, "declared": declared, "installed": versions})
+
     if not targets:
-        print(f"{COLOR_YELLOW}{ICON_WARN} No Python packages identified to check.{COLOR_RESET}")
+        print(
+            f"{COLOR_YELLOW}{ICON_WARN} No Python packages identified to check.{COLOR_RESET}"
+        )
         return None, None, 0
-        
+
     start_time = time.time()
     results = check_all_pip_targets(targets, args.concurrent)
-    
+
     if getattr(args, "vuls", False):
         tech_info = TECHNOLOGIES["pip"]
-        osv_vulns = check_osv_vulnerabilities(targets, tech_info["osv_ecosystem"], args.concurrent)
-        
+        osv_vulns = check_osv_vulnerabilities(
+            targets, tech_info["osv_ecosystem"], args.concurrent
+        )
+
         for r in results:
             key = (r["name"], r["installed"])
             r["vulnerabilities"] = osv_vulns.get(key, [])
     else:
         for r in results:
             r["vulnerabilities"] = []
-            
+
     for r in results:
         parents_list = parents_data.get(r["name"], [])
         r["required_by"] = sorted(parents_list)
-        
+
     all_direct = {}
     for r in results:
         parents_list = parents_data.get(r["name"], [])
@@ -3782,26 +4319,40 @@ def run_pip_checker(args):
                     break
         else:
             is_direct = r["name"] in direct_deps
-            
+
         if is_direct:
             all_direct[r["name"]] = direct_deps.get(r["name"], "0.0.0")
-            
+
     elapsed = time.time() - start_time
-    
-    pkg_data_deps = {k: v[0] if isinstance(v, list) and v else v for k, v in lock_deps.items()} if lock_deps else direct_deps
-    
-    return results, {"dependencies": pkg_data_deps, "devDependencies": {}, "all_direct": all_direct}, elapsed
+
+    pkg_data_deps = (
+        {k: v[0] if isinstance(v, list) and v else v for k, v in lock_deps.items()}
+        if lock_deps
+        else direct_deps
+    )
+
+    return (
+        results,
+        {
+            "dependencies": pkg_data_deps,
+            "devDependencies": {},
+            "all_direct": all_direct,
+        },
+        elapsed,
+    )
+
 
 # ==============================================================================
 # NuGet Checker Logic
 # ==============================================================================
+
 
 def find_and_parse_cpm_versions(start_path):
     """Walks up from start_path looking for Directory.Packages.props and parses central versions."""
     current = os.path.abspath(start_path)
     if os.path.isfile(current):
         current = os.path.dirname(current)
-        
+
     while True:
         cpm_file = os.path.join(current, "Directory.Packages.props")
         if os.path.exists(cpm_file):
@@ -3822,14 +4373,17 @@ def find_and_parse_cpm_versions(start_path):
                             cpm_versions[pkg_include] = version
                 return cpm_versions
             except Exception as e:
-                print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Directory.Packages.props: {e}{COLOR_RESET}")
-                
+                print(
+                    f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Directory.Packages.props: {e}{COLOR_RESET}"
+                )
+
         parent = os.path.dirname(current)
         if parent == current:
             break
         current = parent
-        
+
     return {}
+
 
 def parse_sln_file(sln_path):
     """Parses a .sln or .slnx solution file to retrieve relative paths to all project files."""
@@ -3838,16 +4392,19 @@ def parse_sln_file(sln_path):
         sln_dir = os.path.dirname(os.path.abspath(sln_path))
         if sln_path.lower().endswith(".slnx"):
             try:
-                import xml.etree.ElementTree as ET
-                tree = ET.parse(sln_path)
+                tree = safe_et_parse(sln_path)
                 root = tree.getroot()
                 for elem in root.iter("Project"):
                     rel_p = elem.get("Path")
                     if rel_p:
                         norm_path = rel_p.replace("\\", "/")
                         if norm_path.endswith((".csproj", ".vbproj", ".fsproj")):
-                            full_path = os.path.abspath(os.path.join(sln_dir, norm_path))
-                            if _is_safe_path(sln_dir, full_path) and os.path.exists(full_path):
+                            full_path = os.path.abspath(
+                                os.path.join(sln_dir, norm_path)
+                            )
+                            if _is_safe_path(sln_dir, full_path) and os.path.exists(
+                                full_path
+                            ):
                                 project_paths.append(full_path)
             except Exception:
                 with open(sln_path, "r", encoding="utf-8-sig", errors="ignore") as f:
@@ -3857,14 +4414,16 @@ def parse_sln_file(sln_path):
                     norm_path = m.replace("\\", "/")
                     if norm_path.endswith((".csproj", ".vbproj", ".fsproj")):
                         full_path = os.path.abspath(os.path.join(sln_dir, norm_path))
-                        if _is_safe_path(sln_dir, full_path) and os.path.exists(full_path):
+                        if _is_safe_path(sln_dir, full_path) and os.path.exists(
+                            full_path
+                        ):
                             project_paths.append(full_path)
         else:
             with open(sln_path, "r", encoding="utf-8-sig", errors="ignore") as f:
                 content = f.read()
-                
+
             matches = RE_CSPROJ_SLN.findall(content)
-            
+
             for m in matches:
                 norm_path = m.replace("\\", "/")
                 if norm_path.endswith((".csproj", ".vbproj", ".fsproj")):
@@ -3872,52 +4431,67 @@ def parse_sln_file(sln_path):
                     if _is_safe_path(sln_dir, full_path) and os.path.exists(full_path):
                         project_paths.append(full_path)
     except Exception as e:
-        print(f"{COLOR_YELLOW}{ICON_WARN} Warning reading solution file: {e}{COLOR_RESET}")
-        
+        print(
+            f"{COLOR_YELLOW}{ICON_WARN} Warning reading solution file: {e}{COLOR_RESET}"
+        )
+
     return project_paths
+
 
 def find_nuget_files(path):
     """Finds Solution file (.sln / .slnx), MSBuild project files, and assets files."""
     sln_file = None
     manifests = []
     assets_files = []
-    
+
     abs_path = os.path.abspath(path)
     if os.path.isfile(abs_path):
         if abs_path.lower().endswith((".sln", ".slnx")):
             sln_file = abs_path
-        elif abs_path.endswith((".csproj", ".vbproj", ".fsproj")) or abs_path.endswith("packages.config"):
+        elif abs_path.endswith((".csproj", ".vbproj", ".fsproj")) or abs_path.endswith(
+            "packages.config"
+        ):
             manifests = [abs_path]
     elif os.path.isdir(abs_path):
-        sln_candidates = [os.path.join(abs_path, f) for f in os.listdir(abs_path) if f.lower().endswith((".sln", ".slnx"))]
+        sln_candidates = [
+            os.path.join(abs_path, f)
+            for f in os.listdir(abs_path)
+            if f.lower().endswith((".sln", ".slnx"))
+        ]
         if sln_candidates:
             sln_file = sln_candidates[0]
         else:
             files = os.listdir(abs_path)
             for f in files:
-                if f.endswith((".csproj", ".vbproj", ".fsproj")) or f == "packages.config":
+                if (
+                    f.endswith((".csproj", ".vbproj", ".fsproj"))
+                    or f == "packages.config"
+                ):
                     manifests = [os.path.join(abs_path, f)]
                     break
-                    
+
     if sln_file:
-        print(f"{COLOR_GRAY}{ICON_INFO} Solution file detected: {os.path.basename(sln_file)}{COLOR_RESET}")
+        print(
+            f"{COLOR_GRAY}{ICON_INFO} Solution file detected: {os.path.basename(sln_file)}{COLOR_RESET}"
+        )
         manifests = parse_sln_file(sln_file)
-        
+
     for manifest in manifests:
         proj_dir = os.path.dirname(manifest)
         obj_dir = os.path.join(proj_dir, "obj")
         assets = os.path.join(obj_dir, "project.assets.json")
         if os.path.exists(assets):
             assets_files.append(assets)
-            
+
     return manifests, assets_files
+
 
 def parse_csproj_or_config(path, cpm_versions=None):
     """Finds and parses MSBuild project files (.csproj, .vbproj, .fsproj) or packages.config files in a directory."""
     dependencies = {}
     if cpm_versions is None:
         cpm_versions = find_and_parse_cpm_versions(path)
-        
+
     config_file = os.path.join(path, "packages.config")
     if os.path.exists(config_file):
         try:
@@ -3930,45 +4504,52 @@ def parse_csproj_or_config(path, cpm_versions=None):
                     dependencies[pkg_id] = version or "*"
             return dependencies
         except Exception as e:
-            print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing packages.config: {e}{COLOR_RESET}")
-            
+            print(
+                f"{COLOR_YELLOW}{ICON_WARN} Warning parsing packages.config: {e}{COLOR_RESET}"
+            )
+
     try:
-        proj_files = [f for f in os.listdir(path) if f.endswith((".csproj", ".vbproj", ".fsproj"))]
+        proj_files = [
+            f for f in os.listdir(path) if f.endswith((".csproj", ".vbproj", ".fsproj"))
+        ]
         if proj_files:
             csproj_path = os.path.join(path, proj_files[0])
             tree = safe_et_parse(csproj_path)
             root = tree.getroot()
-            
+
             for elem in root.iter():
                 tag_local = elem.tag.split("}")[-1]
                 if tag_local == "PackageReference":
                     pkg_include = elem.get("Include") or elem.get("Update")
                     version = elem.get("Version")
-                    
+
                     if not version:
                         ver_elem = elem.find("Version")
                         if ver_elem is not None:
                             version = ver_elem.text
-                            
+
                     if pkg_include:
                         ver = version or cpm_versions.get(pkg_include) or "*"
                         dependencies[pkg_include] = ver
-                        
+
             return dependencies
     except Exception as e:
-        print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing project files: {e}{COLOR_RESET}")
-        
+        print(
+            f"{COLOR_YELLOW}{ICON_WARN} Warning parsing project files: {e}{COLOR_RESET}"
+        )
+
     return {}
+
 
 def parse_project_assets(filepath):
     """Parses project.assets.json to extract exact resolved versions and parent relationships."""
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             data = json.load(f)
-            
+
         resolved = {}
         parents = {}
-        
+
         libraries = data.get("libraries", {})
         for lib_key, lib_info in libraries.items():
             if lib_info.get("type") == "package":
@@ -3976,7 +4557,7 @@ def parse_project_assets(filepath):
                 if len(parts) == 2:
                     name, version = parts
                     resolved.setdefault(name, set()).add(version)
-                    
+
         targets = data.get("targets", {})
         for _target_name, target_libs in targets.items():
             for lib_key, lib_info in target_libs.items():
@@ -3984,167 +4565,197 @@ def parse_project_assets(filepath):
                 if len(parts) != 2:
                     continue
                 parent_name = parts[0]
-                
+
                 deps = lib_info.get("dependencies", {})
                 for child_name in deps.keys():
                     parents.setdefault(child_name, set()).add(parent_name)
-                    
+
         project_info = data.get("project", {})
         frameworks = project_info.get("frameworks", {})
         for _fw_name, fw_info in frameworks.items():
             deps = fw_info.get("dependencies", {})
             for child_name in deps.keys():
                 parents.setdefault(child_name, set()).add("root")
-                
+
         resolved_clean = {k: list(v) for k, v in resolved.items()}
         parents_clean = {k: list(v) for k, v in parents.items()}
         return resolved_clean, parents_clean
     except Exception as e:
-        print(f"{COLOR_YELLOW}{ICON_WARN} Warning reading project.assets.json: {e}{COLOR_RESET}")
+        print(
+            f"{COLOR_YELLOW}{ICON_WARN} Warning reading project.assets.json: {e}{COLOR_RESET}"
+        )
         return {}, {}
+
 
 def check_nuget_package(target):
     """Queries NuGet registry for package metadata and checks target version."""
     name = target["name"]
     declared = target["declared"]
     installed_versions = target["installed"]
-    
+
     versions_to_check = installed_versions if installed_versions else [declared]
     results = []
-    
+
     try:
         encoded_name = urllib.parse.quote(name.lower())
         url = f"{URL_NUGET_REGISTRY}{encoded_name}/index.json"
-        
+
         req = urllib.request.Request(url)
         with safe_urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode("utf-8"))
-            
+
         versions_list = data.get("versions", [])
-        
+
         stable_versions = []
         for v in versions_list:
             if "-" not in v:
                 stable_versions.append(v)
-                
+
         valid_versions = stable_versions if stable_versions else versions_list
-        
+
         for ver_str in versions_to_check:
-            clean_ver = RE_CLEAN_VER.sub('', ver_str) if ver_str else "0.0.0"
+            clean_ver = RE_CLEAN_VER.sub("", ver_str) if ver_str else "0.0.0"
             if not clean_ver:
                 clean_ver = "0.0.0"
-                
-            latest_same_major, latest_absolute = find_latest_same_major(clean_ver, valid_versions)
+
+            latest_same_major, latest_absolute = find_latest_same_major(
+                clean_ver, valid_versions
+            )
             if not latest_same_major:
                 latest_same_major = latest_absolute
-                
-            update_type = determine_update_type(clean_ver, latest_same_major, latest_absolute)
-                
+
+            update_type = determine_update_type(
+                clean_ver, latest_same_major, latest_absolute
+            )
+
             repo_url = None
             compare_url = None
             releases_url = None
-            if update_type in ("major", "minor-major", "patch-major"):
+            if update_type in {"major", "minor-major", "patch-major"}:
                 repo_url = resolve_nuget_repo(name, latest_absolute)
                 if repo_url:
                     compare_url = get_compare_url(repo_url, clean_ver, latest_absolute)
-                    releases_url = f"{repo_url}/releases" if is_github_url(repo_url) else repo_url
-                    
+                    releases_url = (
+                        f"{repo_url}/releases" if is_github_url(repo_url) else repo_url
+                    )
+
             display_latest = format_latest_versions(latest_same_major, latest_absolute)
-            results.append({
-                "name": name,
-                "declared": declared,
-                "installed": ver_str,
-                "latest": display_latest,
-                "latest_same_major": latest_same_major,
-                "latest_absolute": latest_absolute,
-                "status": update_type,
-                "deprecated": None,
-                "error": None,
-                "repo_url": repo_url,
-                "compare_url": compare_url,
-                "releases_url": releases_url
-            })
-            
+            results.append(
+                {
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": display_latest,
+                    "latest_same_major": latest_same_major,
+                    "latest_absolute": latest_absolute,
+                    "status": update_type,
+                    "deprecated": None,
+                    "error": None,
+                    "repo_url": repo_url,
+                    "compare_url": compare_url,
+                    "releases_url": releases_url,
+                }
+            )
+
     except urllib.error.HTTPError as e:
         error_msg = "Not Found" if e.code == 404 else f"HTTP {e.code}"
         for ver_str in versions_to_check:
-            results.append({
-                "name": name,
-                "declared": declared,
-                "installed": ver_str,
-                "latest": None,
-                "status": "error",
-                "deprecated": None,
-                "error": error_msg
-            })
+            results.append(
+                {
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": None,
+                    "status": "error",
+                    "deprecated": None,
+                    "error": error_msg,
+                }
+            )
     except Exception as e:
         for ver_str in versions_to_check:
-            results.append({
-                "name": name,
-                "declared": declared,
-                "installed": ver_str,
-                "latest": None,
-                "status": "error",
-                "deprecated": None,
-                "error": str(e)
-            })
-            
+            results.append(
+                {
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": None,
+                    "status": "error",
+                    "deprecated": None,
+                    "error": str(e),
+                }
+            )
+
     return results
+
 
 def check_all_nuget_targets(targets, max_workers):
     """Executes NuGet checks concurrently and renders simple progress."""
     total = len(targets)
     print(f"{COLOR_BOLD}{COLOR_CYAN}Checking {total} packages...{COLOR_RESET}\n")
-    return _check_all_targets_unified(targets, check_nuget_package, f"{COLOR_GRAY}[Progress: NuGet check]", max_workers)
+    return _check_all_targets_unified(
+        targets,
+        check_nuget_package,
+        f"{COLOR_GRAY}[Progress: NuGet check]",
+        max_workers,
+    )
+
 
 def run_nuget_checker(args):
     """Main orchestrator for NuGet checker."""
     manifests, assets_files = find_nuget_files(args.path)
-    
+
     if not manifests and not assets_files:
-        print(f"{COLOR_RED}{ICON_ERROR} No C# / VB.NET project files or project.assets.json found in: {args.path}{COLOR_RESET}")
+        print(
+            f"{COLOR_RED}{ICON_ERROR} No C# / VB.NET project files or project.assets.json found in: {args.path}{COLOR_RESET}"
+        )
         return None, None, 0
-        
+
     pkg_data = {}
-    print(f"{COLOR_GRAY}{ICON_INFO} Reading C# / VB.NET project references...{COLOR_RESET}")
+    print(
+        f"{COLOR_GRAY}{ICON_INFO} Reading C# / VB.NET project references...{COLOR_RESET}"
+    )
     for manifest in manifests:
         proj_dir = os.path.dirname(manifest)
         cpm_versions = find_and_parse_cpm_versions(proj_dir)
         proj_deps = parse_csproj_or_config(proj_dir, cpm_versions)
         pkg_data.update(proj_deps)
-        
+
     lock_data = {}
     parents_data = {}
     if assets_files:
-        print(f"{COLOR_GRAY}{ICON_INFO} Reading project.assets.json files...{COLOR_RESET}")
+        print(
+            f"{COLOR_GRAY}{ICON_INFO} Reading project.assets.json files...{COLOR_RESET}"
+        )
         for assets_file in assets_files:
             proj_lock, proj_parents = parse_project_assets(assets_file)
             for k, v_list in proj_lock.items():
                 lock_data.setdefault(k, set()).update(v_list)
             for k, p_list in proj_parents.items():
                 parents_data.setdefault(k, set()).update(p_list)
-                
+
         lock_data = {k: list(v) for k, v in lock_data.items()}
         parents_data = {k: list(v) for k, v in parents_data.items()}
-        
+
     targets = build_check_targets(
-        {"all_direct": pkg_data} if pkg_data else None,
-        lock_data,
-        args.all
+        {"all_direct": pkg_data} if pkg_data else None, lock_data, args.all
     )
-    
+
     if not targets:
-        print(f"{COLOR_YELLOW}{ICON_WARN} No packages identified to check.{COLOR_RESET}")
+        print(
+            f"{COLOR_YELLOW}{ICON_WARN} No packages identified to check.{COLOR_RESET}"
+        )
         return None, None, 0
-        
+
     start_time = time.time()
     results = check_all_nuget_targets(targets, args.concurrent)
-    
+
     # Check vulnerabilities via OSV if requested
     if getattr(args, "vuls", False):
         tech_info = TECHNOLOGIES["nuget"]
-        osv_vulns = check_osv_vulnerabilities(targets, tech_info["osv_ecosystem"], args.concurrent)
-        
+        osv_vulns = check_osv_vulnerabilities(
+            targets, tech_info["osv_ecosystem"], args.concurrent
+        )
+
         # Attach vulns back to results
         for r in results:
             key = (r["name"], r["installed"])
@@ -4152,26 +4763,32 @@ def run_nuget_checker(args):
     else:
         for r in results:
             r["vulnerabilities"] = []
-            
+
     # Resolve transitive dependency parents
     direct_packages = set(pkg_data.keys()) if pkg_data else set()
     for r in results:
         direct_parents = find_direct_parents(r["name"], parents_data, direct_packages)
         r["required_by"] = sorted(list(direct_parents - {r["name"]}))
-            
+
     elapsed = time.time() - start_time
-    
-    return results, {"dependencies": pkg_data, "devDependencies": {}, "all_direct": pkg_data}, elapsed
+
+    return (
+        results,
+        {"dependencies": pkg_data, "devDependencies": {}, "all_direct": pkg_data},
+        elapsed,
+    )
+
 
 # ==============================================================================
 # PHP / Composer Checker Logic
 # ==============================================================================
 
+
 def find_composer_files(path):
     """Finds composer.json and composer.lock in a directory."""
     manifest = None
     lock_file = None
-    
+
     if os.path.exists(path):
         if os.path.isdir(path):
             candidates = os.listdir(path)
@@ -4192,216 +4809,260 @@ def find_composer_files(path):
                 json_cand = os.path.join(json_dir, "composer.json")
                 if os.path.exists(json_cand):
                     manifest = json_cand
-                    
+
     return manifest, lock_file
+
 
 def parse_composer_json(filepath):
     """Parses composer.json for direct production and development dependencies."""
     dependencies = {}
     devDependencies = {}
-    
+
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             data = json.load(f)
-            
+
         def filter_deps(deps_dict):
             filtered = {}
             for name, constraint in deps_dict.items():
                 if "/" in name:
                     filtered[name] = constraint
             return filtered
-            
+
         req = data.get("require", {})
         req_dev = data.get("require-dev", {})
-        
+
         dependencies = filter_deps(req)
         devDependencies = filter_deps(req_dev)
-        
+
     except Exception as e:
-        print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing composer.json: {e}{COLOR_RESET}")
-        
+        print(
+            f"{COLOR_YELLOW}{ICON_WARN} Warning parsing composer.json: {e}{COLOR_RESET}"
+        )
+
     return dependencies, devDependencies
+
 
 def parse_composer_lock(filepath):
     """Parses composer.lock for resolved package versions and parent relationships."""
     resolved = {}
     parents = {}
-    
+
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             data = json.load(f)
-            
+
         packages = data.get("packages", []) + data.get("packages-dev", [])
-        
+
         for pkg in packages:
             name = pkg.get("name")
             version = pkg.get("version")
             if name and version:
                 clean_ver = version.lstrip("v")
                 resolved.setdefault(name, set()).add(clean_ver)
-                
+
                 reqs = pkg.get("require", {})
                 for child_name in reqs.keys():
                     if "/" in child_name:
                         parents.setdefault(child_name, set()).add(name)
-                        
+
     except Exception as e:
-        print(f"{COLOR_YELLOW}{ICON_WARN} Warning reading composer.lock: {e}{COLOR_RESET}")
-        
+        print(
+            f"{COLOR_YELLOW}{ICON_WARN} Warning reading composer.lock: {e}{COLOR_RESET}"
+        )
+
     resolved_clean = {k: list(v) for k, v in resolved.items()}
     parents_clean = {k: list(v) for k, v in parents.items()}
     return resolved_clean, parents_clean
+
 
 def check_composer_package(target):
     """Queries Packagist registry for composer package metadata."""
     name = target["name"]
     declared = target["declared"]
     installed_versions = target["installed"]
-    
+
     versions_to_check = installed_versions if installed_versions else [declared]
     results = []
-    
+
     try:
         name_lower = name.lower()
         url = f"{URL_PACKAGIST_REGISTRY}{name_lower}.json"
-        
+
         req = urllib.request.Request(url)
         with safe_urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode("utf-8"))
-            
+
         packages = data.get("packages", {})
         pkg_data = packages.get(name_lower, [])
-        
+
         versions_list = []
         for item in pkg_data:
             v_str = item.get("version")
             if v_str:
                 versions_list.append(v_str.lstrip("v"))
-                
+
         stable_versions = []
         for v in versions_list:
             v_lower = v.lower()
-            if not any(x in v_lower for x in ("-", "dev", "alpha", "beta", "rc", "patch")):
-                if re.match(r'^\d+\.\d+(?:\.\d+)?(?:\.\d+)?$', v):
+            if not any(
+                x in v_lower for x in ("-", "dev", "alpha", "beta", "rc", "patch")
+            ):
+                if re.match(r"^\d+\.\d+(?:\.\d+)?(?:\.\d+)?$", v):
                     stable_versions.append(v)
-                    
+
         valid_versions = stable_versions if stable_versions else versions_list
-        
+
         for ver_str in versions_to_check:
             clean_ver = ver_str.lstrip("v") if ver_str else "0.0.0"
             if not clean_ver or clean_ver == "0.0.0":
                 clean_ver = "0.0.0"
-                
-            latest_same_major, latest_absolute = find_latest_same_major(clean_ver, valid_versions)
+
+            latest_same_major, latest_absolute = find_latest_same_major(
+                clean_ver, valid_versions
+            )
             if not latest_same_major:
                 latest_same_major = latest_absolute
-                
-            update_type = determine_update_type(clean_ver, latest_same_major, latest_absolute)
-                
+
+            update_type = determine_update_type(
+                clean_ver, latest_same_major, latest_absolute
+            )
+
             repo_url = None
             compare_url = None
             releases_url = None
-            if update_type in ("major", "minor-major", "patch-major"):
+            if update_type in {"major", "minor-major", "patch-major"}:
                 raw_url = None
                 for item in pkg_data:
                     v_str = item.get("version", "").lstrip("v")
                     if v_str == latest_absolute:
-                        raw_url = item.get("source", {}).get("url") or item.get("homepage")
+                        raw_url = item.get("source", {}).get("url") or item.get(
+                            "homepage"
+                        )
                         break
                 if not raw_url and pkg_data:
-                    raw_url = pkg_data[0].get("source", {}).get("url") or pkg_data[0].get("homepage")
+                    raw_url = pkg_data[0].get("source", {}).get("url") or pkg_data[
+                        0
+                    ].get("homepage")
                 repo_url = clean_repo_url(raw_url)
                 if repo_url:
                     compare_url = get_compare_url(repo_url, clean_ver, latest_absolute)
-                    releases_url = f"{repo_url}/releases" if is_github_url(repo_url) else repo_url
-                    
+                    releases_url = (
+                        f"{repo_url}/releases" if is_github_url(repo_url) else repo_url
+                    )
+
             display_latest = format_latest_versions(latest_same_major, latest_absolute)
-            results.append({
-                "name": name,
-                "declared": declared,
-                "installed": ver_str,
-                "latest": display_latest,
-                "latest_same_major": latest_same_major,
-                "latest_absolute": latest_absolute,
-                "status": update_type,
-                "deprecated": None,
-                "error": None,
-                "repo_url": repo_url,
-                "compare_url": compare_url,
-                "releases_url": releases_url
-            })
-            
+            results.append(
+                {
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": display_latest,
+                    "latest_same_major": latest_same_major,
+                    "latest_absolute": latest_absolute,
+                    "status": update_type,
+                    "deprecated": None,
+                    "error": None,
+                    "repo_url": repo_url,
+                    "compare_url": compare_url,
+                    "releases_url": releases_url,
+                }
+            )
+
     except urllib.error.HTTPError as e:
         error_msg = "Not Found" if e.code == 404 else f"HTTP {e.code}"
         for ver_str in versions_to_check:
-            results.append({
-                "name": name,
-                "declared": declared,
-                "installed": ver_str,
-                "latest": None,
-                "status": "error",
-                "deprecated": None,
-                "error": error_msg
-            })
+            results.append(
+                {
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": None,
+                    "status": "error",
+                    "deprecated": None,
+                    "error": error_msg,
+                }
+            )
     except Exception as e:
         for ver_str in versions_to_check:
-            results.append({
-                "name": name,
-                "declared": declared,
-                "installed": ver_str,
-                "latest": None,
-                "status": "error",
-                "deprecated": None,
-                "error": str(e)
-            })
-            
+            results.append(
+                {
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": None,
+                    "status": "error",
+                    "deprecated": None,
+                    "error": str(e),
+                }
+            )
+
     return results
+
 
 def check_all_composer_targets(targets, max_workers):
     """Executes Packagist checks concurrently and renders simple progress."""
     total = len(targets)
     print(f"{COLOR_BOLD}{COLOR_CYAN}Checking {total} packages...{COLOR_RESET}\n")
-    return _check_all_targets_unified(targets, check_composer_package, f"{COLOR_GRAY}[Progress: Composer check]", max_workers)
+    return _check_all_targets_unified(
+        targets,
+        check_composer_package,
+        f"{COLOR_GRAY}[Progress: Composer check]",
+        max_workers,
+    )
+
 
 def run_composer_checker(args):
     """Main orchestrator for PHP / Composer checker."""
     manifest, lock_file = find_composer_files(args.path)
-    
+
     if not manifest and not lock_file:
-        print(f"{COLOR_RED}{ICON_ERROR} No composer.json or composer.lock found in: {args.path}{COLOR_RESET}")
+        print(
+            f"{COLOR_RED}{ICON_ERROR} No composer.json or composer.lock found in: {args.path}{COLOR_RESET}"
+        )
         return None, None, 0
-        
+
     dependencies = {}
     devDependencies = {}
     if manifest:
-        print(f"{COLOR_GRAY}{ICON_INFO} Reading composer.json dependencies...{COLOR_RESET}")
+        print(
+            f"{COLOR_GRAY}{ICON_INFO} Reading composer.json dependencies...{COLOR_RESET}"
+        )
         dependencies, devDependencies = parse_composer_json(manifest)
-        
+
     lock_data = {}
     parents_data = {}
     if lock_file:
         print(f"{COLOR_GRAY}{ICON_INFO} Reading composer.lock...{COLOR_RESET}")
         lock_data, parents_data = parse_composer_lock(lock_file)
-        
+
     all_direct = {**dependencies, **devDependencies}
     targets = build_check_targets(
-        {"dependencies": dependencies, "devDependencies": devDependencies, "all_direct": all_direct},
+        {
+            "dependencies": dependencies,
+            "devDependencies": devDependencies,
+            "all_direct": all_direct,
+        },
         lock_data,
-        args.all
+        args.all,
     )
-    
+
     if not targets:
-        print(f"{COLOR_YELLOW}{ICON_WARN} No packages identified to check.{COLOR_RESET}")
+        print(
+            f"{COLOR_YELLOW}{ICON_WARN} No packages identified to check.{COLOR_RESET}"
+        )
         return None, None, 0
-        
+
     start_time = time.time()
     results = check_all_composer_targets(targets, args.concurrent)
-    
+
     # Check vulnerabilities via OSV if requested
     if getattr(args, "vuls", False):
         tech_info = TECHNOLOGIES["php"]
-        osv_vulns = check_osv_vulnerabilities(targets, tech_info["osv_ecosystem"], args.concurrent)
-        
+        osv_vulns = check_osv_vulnerabilities(
+            targets, tech_info["osv_ecosystem"], args.concurrent
+        )
+
         # Attach vulns back to results
         for r in results:
             key = (r["name"], r["installed"])
@@ -4409,20 +5070,30 @@ def run_composer_checker(args):
     else:
         for r in results:
             r["vulnerabilities"] = []
-            
+
     # Resolve transitive dependency parents
     direct_packages = set(all_direct.keys())
     for r in results:
         direct_parents = find_direct_parents(r["name"], parents_data, direct_packages)
         r["required_by"] = sorted(list(direct_parents - {r["name"]}))
-            
+
     elapsed = time.time() - start_time
-    
-    return results, {"dependencies": dependencies, "devDependencies": devDependencies, "all_direct": all_direct}, elapsed
+
+    return (
+        results,
+        {
+            "dependencies": dependencies,
+            "devDependencies": devDependencies,
+            "all_direct": all_direct,
+        },
+        elapsed,
+    )
+
 
 # ==============================================================================
 # Java / Maven Checker Logic
 # ==============================================================================
+
 
 def parse_maven_dependency_management(root, prefix, properties):
     """Parses dependencyManagement section to extract centrally managed versions."""
@@ -4435,28 +5106,29 @@ def parse_maven_dependency_management(root, prefix, properties):
                 g_elem = dep.find(f"{prefix}groupId")
                 a_elem = dep.find(f"{prefix}artifactId")
                 v_elem = dep.find(f"{prefix}version")
-                
+
                 if g_elem is not None and a_elem is not None and v_elem is not None:
                     group = g_elem.text.strip() if g_elem.text else ""
                     artifact = a_elem.text.strip() if a_elem.text else ""
                     version = v_elem.text.strip() if v_elem.text else ""
-                    
+
                     # Interpolate properties
                     for prop_name, prop_val in properties.items():
                         group = group.replace(prop_name, prop_val)
                         artifact = artifact.replace(prop_name, prop_val)
                         version = version.replace(prop_name, prop_val)
-                        
+
                     if group and artifact and version:
                         dep_mgmt[f"{group}:{artifact}"] = version
     return dep_mgmt
+
 
 def find_root_maven_pom(manifest_path):
     """Climbs parent pom.xml files via <relativePath> or parent directories to find top-level monorepo pom.xml."""
     curr = os.path.abspath(manifest_path)
     visited = set()
     root_pom = curr
-    
+
     while curr and os.path.exists(curr) and curr not in visited:
         visited.add(curr)
         root_pom = curr
@@ -4465,31 +5137,38 @@ def find_root_maven_pom(manifest_path):
             root = tree.getroot()
             ns = root.tag.split("}")[0].lstrip("{") if "}" in root.tag else ""
             prefix = f"{{{ns}}}" if ns else ""
-            
+
             parent_elem = root.find(f"{prefix}parent")
             if parent_elem is not None:
                 rel_elem = parent_elem.find(f"{prefix}relativePath")
-                rel_path = rel_elem.text.strip() if (rel_elem is not None and rel_elem.text) else "../pom.xml"
-                parent_pom_path = os.path.abspath(os.path.join(os.path.dirname(curr), rel_path))
+                rel_path = (
+                    rel_elem.text.strip()
+                    if (rel_elem is not None and rel_elem.text)
+                    else "../pom.xml"
+                )
+                parent_pom_path = os.path.abspath(
+                    os.path.join(os.path.dirname(curr), rel_path)
+                )
                 if os.path.exists(parent_pom_path):
                     curr = parent_pom_path
                     continue
             break
         except Exception:
             break
-            
+
     return root_pom
+
 
 def find_all_maven_poms(root_pom_path, base_dir=None, visited=None):
     """Recursively finds all module pom.xml files declared in a parent pom.xml."""
     if visited is None:
         visited = set()
-        
+
     abs_root_pom = os.path.abspath(root_pom_path)
     root_dir = os.path.dirname(abs_root_pom)
     if base_dir is None:
         base_dir = root_dir
-        
+
     poms = []
     if _is_safe_path(base_dir, abs_root_pom):
         if abs_root_pom in visited:
@@ -4498,100 +5177,130 @@ def find_all_maven_poms(root_pom_path, base_dir=None, visited=None):
         poms.append(abs_root_pom)
     else:
         return poms
-        
+
     try:
         if os.path.exists(abs_root_pom):
             tree = safe_et_parse(abs_root_pom)
             root = tree.getroot()
-            
+
             ns = ""
             if "}" in root.tag:
                 ns = root.tag.split("}")[0].lstrip("{")
             prefix = f"{{{ns}}}" if ns else ""
-            
+
             modules_elem = root.find(f"{prefix}modules")
             if modules_elem is not None:
                 for mod in modules_elem.findall(f"{prefix}module"):
                     if mod.text:
                         module_name = mod.text.strip()
                         module_path = module_name.replace("\\", "/")
-                        module_pom = os.path.abspath(os.path.join(root_dir, module_path, "pom.xml"))
-                        if _is_safe_path(base_dir, module_pom) and os.path.exists(module_pom):
-                            poms.extend(find_all_maven_poms(module_pom, base_dir=base_dir, visited=visited))
+                        module_pom = os.path.abspath(
+                            os.path.join(root_dir, module_path, "pom.xml")
+                        )
+                        if _is_safe_path(base_dir, module_pom) and os.path.exists(
+                            module_pom
+                        ):
+                            poms.extend(
+                                find_all_maven_poms(
+                                    module_pom, base_dir=base_dir, visited=visited
+                                )
+                            )
     except Exception:
         pass
-        
+
     seen = set()
     unique_poms = []
     for p in poms:
         if p not in seen:
             seen.add(p)
             unique_poms.append(p)
-            
+
     return unique_poms
 
-def parse_maven_pom_recursive(filepath, parent_dep_mgmt=None, seen_files=None, base_dir=None):
+
+def parse_maven_pom_recursive(
+    filepath, parent_dep_mgmt=None, seen_files=None, base_dir=None
+):
     """Parses Maven pom.xml recursively, resolving parent project properties and dependencyManagement."""
     if seen_files is None:
         seen_files = set()
-        
+
     abs_path = os.path.abspath(filepath)
     if base_dir is None:
         base_dir = os.path.dirname(abs_path)
-        
+
     if not _is_safe_path(base_dir, abs_path):
         return {}, {}, {}
-        
+
     if abs_path in seen_files:
         return {}, {}, {}
-        
+
     seen_files.add(abs_path)
-    
+
     dependencies = {}
     properties = {}
     dep_mgmt = {}
-    
+
     if parent_dep_mgmt is not None:
         dep_mgmt.update(parent_dep_mgmt)
-        
+
     try:
         if _is_safe_path(base_dir, abs_path) and os.path.exists(abs_path):
             tree = safe_et_parse(abs_path)
             root = tree.getroot()
-            
+
             ns = ""
             if "}" in root.tag:
                 ns = root.tag.split("}")[0].lstrip("{")
             prefix = f"{{{ns}}}" if ns else ""
-            
+
             # 1. Resolve parent POM first if declared
             parent_elem = root.find(f"{prefix}parent")
             if parent_elem is not None:
                 rel_path_elem = parent_elem.find(f"{prefix}relativePath")
-                rel_path = rel_path_elem.text.strip() if (rel_path_elem is not None and rel_path_elem.text) else "../pom.xml"
-                parent_pom_path = os.path.abspath(os.path.join(os.path.dirname(abs_path), rel_path))
+                rel_path = (
+                    rel_path_elem.text.strip()
+                    if (rel_path_elem is not None and rel_path_elem.text)
+                    else "../pom.xml"
+                )
+                parent_pom_path = os.path.abspath(
+                    os.path.join(os.path.dirname(abs_path), rel_path)
+                )
                 if os.path.exists(parent_pom_path):
                     parent_dir = os.path.dirname(parent_pom_path)
-                    _p_deps, p_props, p_dep_mgmt = parse_maven_pom_recursive(parent_pom_path, parent_dep_mgmt, seen_files, base_dir=parent_dir)
+                    _p_deps, p_props, p_dep_mgmt = parse_maven_pom_recursive(
+                        parent_pom_path,
+                        parent_dep_mgmt,
+                        seen_files,
+                        base_dir=parent_dir,
+                    )
                     properties.update(p_props)
                     dep_mgmt.update(p_dep_mgmt)
-                    
+
             # 2. Parse local properties
             props_elem = root.find(f"{prefix}properties")
             if props_elem is not None:
                 for elem in props_elem:
                     tag_local = elem.tag.split("}")[-1]
                     properties[f"${{{tag_local}}}"] = (elem.text or "").strip()
-                    
-            properties["${project.version}"] = (root.findtext(f"{prefix}version") or "").strip()
-            properties["${project.groupId}"] = (root.findtext(f"{prefix}groupId") or "").strip()
-            
+
+            properties["${project.version}"] = (
+                root.findtext(f"{prefix}version") or ""
+            ).strip()
+            properties["${project.groupId}"] = (
+                root.findtext(f"{prefix}groupId") or ""
+            ).strip()
+
             if parent_elem is not None:
                 if not properties["${project.version}"]:
-                    properties["${project.version}"] = (parent_elem.findtext(f"{prefix}version") or "").strip()
+                    properties["${project.version}"] = (
+                        parent_elem.findtext(f"{prefix}version") or ""
+                    ).strip()
                 if not properties["${project.groupId}"]:
-                    properties["${project.groupId}"] = (parent_elem.findtext(f"{prefix}groupId") or "").strip()
-                    
+                    properties["${project.groupId}"] = (
+                        parent_elem.findtext(f"{prefix}groupId") or ""
+                    ).strip()
+
             # Interpolate properties recursively in properties dictionary
             for _ in range(5):
                 prop_changed = False
@@ -4607,7 +5316,7 @@ def parse_maven_pom_recursive(filepath, parent_dep_mgmt=None, seen_files=None, b
             # 3. Parse local dependencyManagement
             local_dep_mgmt = parse_maven_dependency_management(root, prefix, properties)
             dep_mgmt.update(local_dep_mgmt)
-            
+
             # 4. Parse active dependencies
             deps_elem = root.find(f"{prefix}dependencies")
             if deps_elem is not None:
@@ -4615,11 +5324,11 @@ def parse_maven_pom_recursive(filepath, parent_dep_mgmt=None, seen_files=None, b
                     g_elem = dep.find(f"{prefix}groupId")
                     a_elem = dep.find(f"{prefix}artifactId")
                     v_elem = dep.find(f"{prefix}version")
-                    
+
                     if g_elem is not None and a_elem is not None:
                         group = g_elem.text.strip() if g_elem.text else ""
                         artifact = a_elem.text.strip() if a_elem.text else ""
-                        
+
                         for _ in range(5):
                             changed = False
                             for prop_name, prop_val in properties.items():
@@ -4632,7 +5341,7 @@ def parse_maven_pom_recursive(filepath, parent_dep_mgmt=None, seen_files=None, b
                                         changed = True
                             if not changed:
                                 break
-                            
+
                         if group and artifact:
                             coord = f"{group}:{artifact}"
                             version = "*"
@@ -4640,7 +5349,7 @@ def parse_maven_pom_recursive(filepath, parent_dep_mgmt=None, seen_files=None, b
                                 version = v_elem.text.strip()
                             elif coord in dep_mgmt:
                                 version = dep_mgmt[coord]
-                                
+
                             for _ in range(5):
                                 changed = False
                                 for prop_name, prop_val in properties.items():
@@ -4649,23 +5358,28 @@ def parse_maven_pom_recursive(filepath, parent_dep_mgmt=None, seen_files=None, b
                                         changed = True
                                 if not changed:
                                     break
-                                
+
                             if "${" in version:
-                                print(f"{COLOR_YELLOW}{ICON_WARN} Unresolved version property '{version}' for Maven package '{coord}' in {os.path.basename(filepath)}{COLOR_RESET}")
-                                
+                                print(
+                                    f"{COLOR_YELLOW}{ICON_WARN} Unresolved version property '{version}' for Maven package '{coord}' in {os.path.basename(filepath)}{COLOR_RESET}"
+                                )
+
                             dependencies[coord] = version
-                            
+
     except Exception as e:
         print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing pom.xml: {e}{COLOR_RESET}")
-        
+
     return dependencies, properties, dep_mgmt
+
 
 def parse_maven_pom(filepath, parent_dep_mgmt=None, base_dir=None):
     """Parses Maven pom.xml for direct dependencies, resolving parent properties and dependencyManagement."""
     deps, _, _ = parse_maven_pom_recursive(filepath, parent_dep_mgmt, base_dir=base_dir)
     return deps
 
+
 _MAVEN_REMOTE_POM_CACHE = {}
+
 
 def fetch_remote_maven_pom(group_id, artifact_id, version, custom_registries=None):
     """Fetches and parses a .pom XML file for a Maven artifact from remote registries."""
@@ -4674,13 +5388,19 @@ def fetch_remote_maven_pom(group_id, artifact_id, version, custom_registries=Non
     cache_key = (group_id, artifact_id, version)
     if cache_key in _MAVEN_REMOTE_POM_CACHE:
         return _MAVEN_REMOTE_POM_CACHE[cache_key]
-        
+
     group_path = group_id.replace(".", "/")
     use_google_maven = (
-        group_id.startswith(("androidx.", "com.google.android.", "com.android.", "android.arch."))
+        group_id.startswith(
+            ("androidx.", "com.google.android.", "com.android.", "android.arch.")
+        )
         or "android" in group_id
     )
-    base_registries = [URL_GOOGLE_MAVEN, URL_MAVEN_REGISTRY] if use_google_maven else [URL_MAVEN_REGISTRY, URL_GOOGLE_MAVEN]
+    base_registries = (
+        [URL_GOOGLE_MAVEN, URL_MAVEN_REGISTRY]
+        if use_google_maven
+        else [URL_MAVEN_REGISTRY, URL_GOOGLE_MAVEN]
+    )
     registries = []
     if custom_registries:
         for r in custom_registries:
@@ -4689,7 +5409,7 @@ def fetch_remote_maven_pom(group_id, artifact_id, version, custom_registries=Non
     for r in base_registries:
         if r not in registries:
             registries.append(r)
-    
+
     root = None
     for registry_url in registries:
         url = f"{registry_url}{group_path}/{artifact_id}/{version}/{artifact_id}-{version}.pom"
@@ -4699,11 +5419,14 @@ def fetch_remote_maven_pom(group_id, artifact_id, version, custom_registries=Non
                 break
         except Exception:
             continue
-            
+
     _MAVEN_REMOTE_POM_CACHE[cache_key] = root
     return root
 
-def resolve_maven_transitive_dependencies(direct_deps, max_depth=3, max_workers=10, custom_registries=None):
+
+def resolve_maven_transitive_dependencies(
+    direct_deps, max_depth=3, max_workers=10, custom_registries=None
+):
     """
     Recursively fetches remote .pom files for Maven dependencies to extract transitive dependencies
     and build required_by parent relationships.
@@ -4712,35 +5435,37 @@ def resolve_maven_transitive_dependencies(direct_deps, max_depth=3, max_workers=
     required_by_map = {coord: set() for coord in direct_deps}
     dep_types = {coord: "Direct" for coord in direct_deps}
     visited = set()
-    
+
     current_level = []
     for coord, ver in direct_deps.items():
         if ":" in coord and ver and ver != "*":
             current_level.append((coord, ver))
-            
+
     depth = 0
     while current_level and depth < max_depth:
         next_level_items = []
-        
+
         def _process_item(item):
             parent_coord, version = item
             if (parent_coord, version) in visited:
                 return []
             visited.add((parent_coord, version))
-            
+
             if ":" not in parent_coord:
                 return []
-                
+
             group_id, artifact_id = parent_coord.split(":", 1)
-            pom_root = fetch_remote_maven_pom(group_id, artifact_id, version, custom_registries=custom_registries)
+            pom_root = fetch_remote_maven_pom(
+                group_id, artifact_id, version, custom_registries=custom_registries
+            )
             if pom_root is None:
                 return []
-                
+
             ns = ""
             if "}" in pom_root.tag:
                 ns = pom_root.tag.split("}")[0].lstrip("{")
             prefix = f"{{{ns}}}" if ns else ""
-            
+
             # Extract local properties for interpolation
             properties = {}
             props_elem = pom_root.find(f"{prefix}properties")
@@ -4748,33 +5473,52 @@ def resolve_maven_transitive_dependencies(direct_deps, max_depth=3, max_workers=
                 for elem in props_elem:
                     tag_local = elem.tag.split("}")[-1]
                     properties[f"${{{tag_local}}}"] = (elem.text or "").strip()
-                    
+
             properties["${project.version}"] = version
             properties["${project.groupId}"] = group_id
             properties["${pom.version}"] = version
-            
+
             parent_dep_mgmt = {}
             parent_elem = pom_root.find(f"{prefix}parent")
             if parent_elem is not None:
                 p_group = parent_elem.findtext(f"{prefix}groupId") or ""
                 p_artifact = parent_elem.findtext(f"{prefix}artifactId") or ""
                 p_version = parent_elem.findtext(f"{prefix}version") or ""
-                p_group, p_artifact, p_version = p_group.strip(), p_artifact.strip(), p_version.strip()
+                p_group, p_artifact, p_version = (
+                    p_group.strip(),
+                    p_artifact.strip(),
+                    p_version.strip(),
+                )
                 if p_group and p_artifact and p_version:
-                    parent_pom_root = fetch_remote_maven_pom(p_group, p_artifact, p_version, custom_registries=custom_registries)
+                    parent_pom_root = fetch_remote_maven_pom(
+                        p_group,
+                        p_artifact,
+                        p_version,
+                        custom_registries=custom_registries,
+                    )
                     if parent_pom_root is not None:
-                        p_ns = parent_pom_root.tag.split("}")[0].lstrip("{") if "}" in parent_pom_root.tag else ""
+                        p_ns = (
+                            parent_pom_root.tag.split("}")[0].lstrip("{")
+                            if "}" in parent_pom_root.tag
+                            else ""
+                        )
                         p_prefix = f"{{{p_ns}}}" if p_ns else ""
                         p_props_elem = parent_pom_root.find(f"{p_prefix}properties")
                         if p_props_elem is not None:
                             for elem in p_props_elem:
                                 tag_local = elem.tag.split("}")[-1]
-                                properties[f"${{{tag_local}}}"] = (elem.text or "").strip()
-                        parent_dep_mgmt = parse_maven_dependency_management(parent_pom_root, p_prefix, properties)
-                        
-            local_dep_mgmt = parse_maven_dependency_management(pom_root, prefix, properties)
+                                properties[f"${{{tag_local}}}"] = (
+                                    elem.text or ""
+                                ).strip()
+                        parent_dep_mgmt = parse_maven_dependency_management(
+                            parent_pom_root, p_prefix, properties
+                        )
+
+            local_dep_mgmt = parse_maven_dependency_management(
+                pom_root, prefix, properties
+            )
             parent_dep_mgmt.update(local_dep_mgmt)
-            
+
             deps_elem = pom_root.find(f"{prefix}dependencies")
             extracted = []
             if deps_elem is not None:
@@ -4784,54 +5528,69 @@ def resolve_maven_transitive_dependencies(direct_deps, max_depth=3, max_workers=
                     v_elem = dep.find(f"{prefix}version")
                     s_elem = dep.find(f"{prefix}scope")
                     opt_elem = dep.find(f"{prefix}optional")
-                    
-                    scope = (s_elem.text.strip() if (s_elem is not None and s_elem.text) else "compile").lower()
-                    if scope in ("test", "provided", "system"):
+
+                    scope = (
+                        s_elem.text.strip()
+                        if (s_elem is not None and s_elem.text)
+                        else "compile"
+                    ).lower()
+                    if scope in {"test", "provided", "system"}:
                         continue
-                        
-                    if opt_elem is not None and opt_elem.text and opt_elem.text.strip().lower() == "true":
+
+                    if (
+                        opt_elem is not None
+                        and opt_elem.text
+                        and opt_elem.text.strip().lower() == "true"
+                    ):
                         continue
-                        
+
                     if g_elem is not None and a_elem is not None:
                         c_group = g_elem.text.strip() if g_elem.text else ""
                         c_artifact = a_elem.text.strip() if a_elem.text else ""
-                        c_version = v_elem.text.strip() if (v_elem is not None and v_elem.text) else "*"
-                        
+                        c_version = (
+                            v_elem.text.strip()
+                            if (v_elem is not None and v_elem.text)
+                            else "*"
+                        )
+
                         for prop_k, prop_v in properties.items():
                             if prop_v:
                                 c_group = c_group.replace(prop_k, prop_v)
                                 c_artifact = c_artifact.replace(prop_k, prop_v)
                                 c_version = c_version.replace(prop_k, prop_v)
-                                
+
                         c_coord = f"{c_group}:{c_artifact}"
-                        if (c_version == "*" or c_version.startswith("${")) and c_coord in parent_dep_mgmt:
+                        if (
+                            c_version == "*" or c_version.startswith("${")
+                        ) and c_coord in parent_dep_mgmt:
                             c_version = parent_dep_mgmt[c_coord]
-                            
+
                         if c_group and c_artifact and not c_version.startswith("${"):
                             extracted.append((parent_coord, c_coord, c_version))
-                            
+
             return extracted
 
         workers = min(max_workers, max(1, len(current_level)))
         with ThreadPoolExecutor(max_workers=workers) as executor:
             results_lists = list(executor.map(_process_item, current_level))
-            
+
         for item_results in results_lists:
             for parent_coord, child_coord, child_version in item_results:
                 if child_coord not in required_by_map:
                     required_by_map[child_coord] = set()
                 required_by_map[child_coord].add(parent_coord)
-                
+
                 if child_coord not in all_deps:
                     all_deps[child_coord] = child_version
                     dep_types[child_coord] = "Transitive"
                     if child_version and child_version != "*":
                         next_level_items.append((child_coord, child_version))
-                        
+
         current_level = next_level_items
         depth += 1
-        
+
     return all_deps, required_by_map, dep_types
+
 
 def check_maven_package(target):
     """Queries Maven Central Repository for package metadata."""
@@ -4839,23 +5598,29 @@ def check_maven_package(target):
     declared = target["declared"]
     installed_versions = target["installed"]
     custom_registries = target.get("custom_registries", [])
-    
+
     versions_to_check = installed_versions if installed_versions else [declared]
     results = []
-    
+
     try:
         if ":" not in name:
             raise ValueError(f"Invalid Maven coordinate structure: {name}")
-            
+
         group_id, artifact_id = name.split(":", 1)
         group_path = group_id.replace(".", "/")
         use_google_maven = (
-            group_id.startswith(("androidx.", "com.google.android.", "com.android.", "android.arch."))
+            group_id.startswith(
+                ("androidx.", "com.google.android.", "com.android.", "android.arch.")
+            )
             or "android" in group_id
         )
-        
+
         xml_data = None
-        base_registries = [URL_GOOGLE_MAVEN, URL_MAVEN_REGISTRY] if use_google_maven else [URL_MAVEN_REGISTRY, URL_GOOGLE_MAVEN]
+        base_registries = (
+            [URL_GOOGLE_MAVEN, URL_MAVEN_REGISTRY]
+            if use_google_maven
+            else [URL_MAVEN_REGISTRY, URL_GOOGLE_MAVEN]
+        )
         registries = []
         if custom_registries:
             for r in custom_registries:
@@ -4864,7 +5629,7 @@ def check_maven_package(target):
         for r in base_registries:
             if r not in registries:
                 registries.append(r)
-        
+
         last_error = None
         successful_registry = URL_MAVEN_REGISTRY
         for registry_url in registries:
@@ -4879,7 +5644,7 @@ def check_maven_package(target):
             except Exception as e:
                 last_error = e
                 continue
-                
+
         versions_list = []
         if xml_data is not None:
             root = safe_et_fromstring(xml_data)
@@ -4905,10 +5670,12 @@ def check_maven_package(target):
                         versions_list.append(str(v_val))
             except Exception as solr_err:
                 last_error = solr_err
-                
+
         if not versions_list:
-            raise ValueError(f"Failed to fetch metadata from Maven or Google registries: {last_error or 'Not found'}")
-            
+            raise ValueError(
+                f"Failed to fetch metadata from Maven or Google registries: {last_error or 'Not found'}"
+            )
+
         stable_versions = []
         for v in versions_list:
             v_lower = v.lower()
@@ -4921,76 +5688,97 @@ def check_maven_package(target):
                     is_prerelease = True
             if not is_prerelease:
                 stable_versions.append(v)
-                
+
         valid_versions = stable_versions if stable_versions else versions_list
-        
+
         for ver_str in versions_to_check:
-            clean_ver = RE_CLEAN_VER.sub('', ver_str) if ver_str else "0.0.0"
+            clean_ver = RE_CLEAN_VER.sub("", ver_str) if ver_str else "0.0.0"
             if not clean_ver:
                 clean_ver = "0.0.0"
-                
-            latest_same_major, latest_absolute = find_latest_same_major(clean_ver, valid_versions)
+
+            latest_same_major, latest_absolute = find_latest_same_major(
+                clean_ver, valid_versions
+            )
             if not latest_same_major:
                 latest_same_major = latest_absolute
-                
-            update_type = determine_update_type(clean_ver, latest_same_major, latest_absolute)
-                
+
+            update_type = determine_update_type(
+                clean_ver, latest_same_major, latest_absolute
+            )
+
             repo_url = None
             compare_url = None
             releases_url = None
-            if update_type in ("major", "minor-major", "patch-major"):
-                repo_url = resolve_maven_repo(successful_registry, group_path, artifact_id, latest_absolute)
+            if update_type in {"major", "minor-major", "patch-major"}:
+                repo_url = resolve_maven_repo(
+                    successful_registry, group_path, artifact_id, latest_absolute
+                )
                 if repo_url:
                     compare_url = get_compare_url(repo_url, clean_ver, latest_absolute)
-                    releases_url = f"{repo_url}/releases" if is_github_url(repo_url) else repo_url
-                    
+                    releases_url = (
+                        f"{repo_url}/releases" if is_github_url(repo_url) else repo_url
+                    )
+
             display_latest = format_latest_versions(latest_same_major, latest_absolute)
-            results.append({
-                "name": name,
-                "declared": declared,
-                "installed": ver_str,
-                "latest": display_latest,
-                "latest_same_major": latest_same_major,
-                "latest_absolute": latest_absolute,
-                "status": update_type,
-                "deprecated": None,
-                "error": None,
-                "repo_url": repo_url,
-                "compare_url": compare_url,
-                "releases_url": releases_url
-            })
-            
+            results.append(
+                {
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": display_latest,
+                    "latest_same_major": latest_same_major,
+                    "latest_absolute": latest_absolute,
+                    "status": update_type,
+                    "deprecated": None,
+                    "error": None,
+                    "repo_url": repo_url,
+                    "compare_url": compare_url,
+                    "releases_url": releases_url,
+                }
+            )
+
     except urllib.error.HTTPError as e:
         error_msg = "Not Found" if e.code == 404 else f"HTTP {e.code}"
         for ver_str in versions_to_check:
-            results.append({
-                "name": name,
-                "declared": declared,
-                "installed": ver_str,
-                "latest": None,
-                "status": "error",
-                "deprecated": None,
-                "error": error_msg
-            })
+            results.append(
+                {
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": None,
+                    "status": "error",
+                    "deprecated": None,
+                    "error": error_msg,
+                }
+            )
     except Exception as e:
         for ver_str in versions_to_check:
-            results.append({
-                "name": name,
-                "declared": declared,
-                "installed": ver_str,
-                "latest": None,
-                "status": "error",
-                "deprecated": None,
-                "error": str(e)
-            })
-            
+            results.append(
+                {
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": None,
+                    "status": "error",
+                    "deprecated": None,
+                    "error": str(e),
+                }
+            )
+
     return results
+
 
 def check_all_maven_targets(targets, max_workers):
     """Executes Maven Repository checks concurrently and renders simple progress."""
     total = len(targets)
     print(f"{COLOR_BOLD}{COLOR_CYAN}Checking {total} packages...{COLOR_RESET}\n")
-    return _check_all_targets_unified(targets, check_maven_package, f"{COLOR_GRAY}[Progress: Maven check]", max_workers)
+    return _check_all_targets_unified(
+        targets,
+        check_maven_package,
+        f"{COLOR_GRAY}[Progress: Maven check]",
+        max_workers,
+    )
+
 
 def run_maven_checker(args):
     """Main orchestrator for Maven dependency checker, supporting multi-module poms recursively."""
@@ -5002,11 +5790,11 @@ def run_maven_checker(args):
                 manifest = cand
         elif os.path.isfile(args.path) and args.path.endswith("pom.xml"):
             manifest = args.path
-            
+
     if not manifest:
         print(f"{COLOR_RED}{ICON_ERROR} No pom.xml found in: {args.path}{COLOR_RESET}")
         return None, None, 0
-        
+
     manifest_dir = os.path.dirname(os.path.abspath(manifest))
     print(f"{COLOR_GRAY}{ICON_INFO} Resolving Maven module tree...{COLOR_RESET}")
     root_manifest = find_root_maven_pom(manifest)
@@ -5014,10 +5802,12 @@ def run_maven_checker(args):
     all_poms = find_all_maven_poms(root_manifest, base_dir=root_manifest_dir)
     if os.path.abspath(manifest) not in [os.path.abspath(p) for p in all_poms]:
         all_poms.append(os.path.abspath(manifest))
-    
+
     if len(all_poms) > 1:
-        print(f"{COLOR_GRAY}{ICON_INFO} Multi-module project detected. Found {len(all_poms)} modules.{COLOR_RESET}")
-        
+        print(
+            f"{COLOR_GRAY}{ICON_INFO} Multi-module project detected. Found {len(all_poms)} modules.{COLOR_RESET}"
+        )
+
     # 1. Parse root pom.xml for centralized dependencyManagement versions
     root_dep_mgmt = {}
     try:
@@ -5026,7 +5816,7 @@ def run_maven_checker(args):
             root = tree.getroot()
             ns = root.tag.split("}")[0].lstrip("{") if "}" in root.tag else ""
             prefix = f"{{{ns}}}" if ns else ""
-            
+
             # Base properties for root dependencyManagement
             properties = {}
             props_elem = root.find(f"{prefix}properties")
@@ -5034,40 +5824,50 @@ def run_maven_checker(args):
                 for elem in props_elem:
                     tag_local = elem.tag.split("}")[-1]
                     properties[f"${{{tag_local}}}"] = (elem.text or "").strip()
-                    
-            properties["${project.version}"] = (root.findtext(f"{prefix}version") or "").strip()
-            properties["${project.groupId}"] = (root.findtext(f"{prefix}groupId") or "").strip()
-            
+
+            properties["${project.version}"] = (
+                root.findtext(f"{prefix}version") or ""
+            ).strip()
+            properties["${project.groupId}"] = (
+                root.findtext(f"{prefix}groupId") or ""
+            ).strip()
+
             root_dep_mgmt = parse_maven_dependency_management(root, prefix, properties)
     except Exception as e:
-        print(f"{COLOR_YELLOW}{ICON_WARN} Warning reading root dependencyManagement: {e}{COLOR_RESET}")
-        
+        print(
+            f"{COLOR_YELLOW}{ICON_WARN} Warning reading root dependencyManagement: {e}{COLOR_RESET}"
+        )
+
     # 2. Extract local monorepo module coordinates, project groupIds, and custom repositories
     local_modules = set()
     local_group_ids = set()
     custom_registries = []
-    
+
     for pom_path in all_poms:
         try:
             tree = safe_et_parse(pom_path)
             root_elem = tree.getroot()
-            m_ns = root_elem.tag.split("}")[0].lstrip("{") if "}" in root_elem.tag else ""
+            m_ns = (
+                root_elem.tag.split("}")[0].lstrip("{") if "}" in root_elem.tag else ""
+            )
             m_prefix = f"{{{m_ns}}}" if m_ns else ""
-            
+
             g_elem = root_elem.find(f"{m_prefix}groupId")
             if g_elem is None or not g_elem.text:
                 parent_elem = root_elem.find(f"{m_prefix}parent")
                 if parent_elem is not None:
                     g_elem = parent_elem.find(f"{m_prefix}groupId")
             a_elem = root_elem.find(f"{m_prefix}artifactId")
-            
+
             group = g_elem.text.strip() if (g_elem is not None and g_elem.text) else ""
-            artifact = a_elem.text.strip() if (a_elem is not None and a_elem.text) else ""
+            artifact = (
+                a_elem.text.strip() if (a_elem is not None and a_elem.text) else ""
+            )
             if group:
                 local_group_ids.add(group)
             if group and artifact:
                 local_modules.add(f"{group}:{artifact}")
-                
+
             repos_elem = root_elem.find(f"{m_prefix}repositories")
             if repos_elem is not None:
                 for repo in repos_elem.findall(f"{m_prefix}repository"):
@@ -5076,7 +5876,10 @@ def run_maven_checker(args):
                         u = url_elem.text.strip()
                         if not u.endswith("/"):
                             u += "/"
-                        if u.startswith(("http://", "https://")) and u not in custom_registries:
+                        if (
+                            u.startswith(("http://", "https://"))
+                            and u not in custom_registries
+                        ):
                             custom_registries.append(u)
         except Exception:
             pass
@@ -5087,67 +5890,83 @@ def run_maven_checker(args):
     for pom in all_poms:
         pom_deps = parse_maven_pom(pom, root_dep_mgmt, base_dir=manifest_dir)
         pkg_data.update(pom_deps)
-        
+
     direct_deps = dict(pkg_data)
-    
+
     # 4. Resolve transitive dependencies via remote POM resolution
-    print(f"{COLOR_GRAY}{ICON_INFO} Resolving Maven transitive dependency tree...{COLOR_RESET}")
+    print(
+        f"{COLOR_GRAY}{ICON_INFO} Resolving Maven transitive dependency tree...{COLOR_RESET}"
+    )
     all_deps, required_by_map, dep_types = resolve_maven_transitive_dependencies(
         direct_deps,
         max_depth=3,
         max_workers=getattr(args, "concurrent", 10),
-        custom_registries=custom_registries
+        custom_registries=custom_registries,
     )
-        
+
     remote_targets = []
     local_results = []
-    
+
     for name, version in all_deps.items():
-        is_direct = (name in direct_deps)
+        is_direct = name in direct_deps
         if not getattr(args, "all", True) and not is_direct:
             continue
         declared_ver = direct_deps.get(name, "Transitive")
         installed_ver = version if version != "*" else (direct_deps.get(name) or "*")
-        
+
         g_id = name.split(":", 1)[0] if ":" in name else ""
-        is_internal_module = (name in local_modules) or (g_id and g_id in local_group_ids)
-        
+        is_internal_module = (name in local_modules) or (
+            g_id and g_id in local_group_ids
+        )
+
         if is_internal_module:
-            local_results.append({
-                "name": name,
-                "declared": declared_ver,
-                "installed": installed_ver,
-                "latest": installed_ver,
-                "latest_same_major": installed_ver,
-                "latest_absolute": installed_ver,
-                "status": "local",
-                "deprecated": None,
-                "error": None,
-                "repo_url": None,
-                "compare_url": None,
-                "releases_url": None
-            })
+            local_results.append(
+                {
+                    "name": name,
+                    "declared": declared_ver,
+                    "installed": installed_ver,
+                    "latest": installed_ver,
+                    "latest_same_major": installed_ver,
+                    "latest_absolute": installed_ver,
+                    "status": "local",
+                    "deprecated": None,
+                    "error": None,
+                    "repo_url": None,
+                    "compare_url": None,
+                    "releases_url": None,
+                }
+            )
         else:
-            remote_targets.append({
-                "name": name,
-                "declared": declared_ver,
-                "installed": [installed_ver] if installed_ver != "*" else [],
-                "custom_registries": custom_registries
-            })
-            
+            remote_targets.append(
+                {
+                    "name": name,
+                    "declared": declared_ver,
+                    "installed": [installed_ver] if installed_ver != "*" else [],
+                    "custom_registries": custom_registries,
+                }
+            )
+
     if not remote_targets and not local_results:
-        print(f"{COLOR_YELLOW}{ICON_WARN} No packages identified to check.{COLOR_RESET}")
+        print(
+            f"{COLOR_YELLOW}{ICON_WARN} No packages identified to check.{COLOR_RESET}"
+        )
         return None, None, 0
-        
+
     start_time = time.time()
-    results = check_all_maven_targets(remote_targets, args.concurrent) if remote_targets else []
+    results = (
+        check_all_maven_targets(remote_targets, args.concurrent)
+        if remote_targets
+        else []
+    )
     results.extend(local_results)
-    
+
     # Check vulnerabilities via OSV if requested
     if getattr(args, "vuls", False) and remote_targets:
         tech_info = TECHNOLOGIES["maven"]
-        osv_vulns = check_osv_vulnerabilities(remote_targets, tech_info["osv_ecosystem"], args.concurrent)
-        
+        osv_vulns = check_osv_vulnerabilities(
+            remote_targets, tech_info["osv_ecosystem"], args.concurrent
+        )
+
         for r in results:
             if r["status"] != "local":
                 key = (r["name"], r["installed"])
@@ -5157,20 +5976,26 @@ def run_maven_checker(args):
     else:
         for r in results:
             r["vulnerabilities"] = []
-            
+
     for r in results:
         name = r["name"]
         parents = sorted(list(required_by_map.get(name, set())))
         r["required_by"] = parents
         r["dep_type"] = dep_types.get(name, "Transitive" if parents else "Direct")
-        
+
     elapsed = time.time() - start_time
-    
-    return results, {"dependencies": all_deps, "devDependencies": {}, "all_direct": direct_deps}, elapsed
+
+    return (
+        results,
+        {"dependencies": all_deps, "devDependencies": {}, "all_direct": direct_deps},
+        elapsed,
+    )
+
 
 # ==============================================================================
 # Go Modules Checker Logic
 # ==============================================================================
+
 
 def escape_go_module(name):
     """Encodes uppercase characters in Go module paths using the ! scheme."""
@@ -5181,6 +6006,7 @@ def escape_go_module(name):
         else:
             escaped += char
     return escaped
+
 
 def parse_go_work(filepath):
     """Parses go.work workspace files for module directories in 'use' blocks/directives."""
@@ -5201,22 +6027,27 @@ def parse_go_work(filepath):
                 elif in_use_block and line_clean == ")":
                     in_use_block = False
                     continue
-                
+
                 parts = line_clean.split()
                 if in_use_block:
                     rel_path = parts[0]
-                    mod_path = os.path.abspath(os.path.join(base_dir, rel_path, "go.mod"))
+                    mod_path = os.path.abspath(
+                        os.path.join(base_dir, rel_path, "go.mod")
+                    )
                     if os.path.exists(mod_path):
                         modules.append(mod_path)
                 elif line_clean.startswith("use "):
                     if len(parts) >= 2:
                         rel_path = parts[1]
-                        mod_path = os.path.abspath(os.path.join(base_dir, rel_path, "go.mod"))
+                        mod_path = os.path.abspath(
+                            os.path.join(base_dir, rel_path, "go.mod")
+                        )
                         if os.path.exists(mod_path):
                             modules.append(mod_path)
     except Exception as e:
         print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing go.work: {e}{COLOR_RESET}")
     return modules
+
 
 def parse_go_mod(filepath):
     """Parses go.mod for direct, indirect, tools, replacements, excludes, and retractions."""
@@ -5225,28 +6056,34 @@ def parse_go_mod(filepath):
     local_replacements = {}
     excluded_versions = {}
     retracted_versions = {}
-    
+
     if not filepath or not os.path.exists(filepath):
-        return dependencies, devDependencies, local_replacements, excluded_versions, retracted_versions
-        
+        return (
+            dependencies,
+            devDependencies,
+            local_replacements,
+            excluded_versions,
+            retracted_versions,
+        )
+
     raw_reqs = []
     replacements = {}
     replacements_ver = {}
-    
+
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             lines = f.readlines()
-            
+
         in_require_block = False
         in_exclude_block = False
         in_retract_block = False
         in_tool_block = False
-        
+
         for line in lines:
             line_clean = line.strip()
             if not line_clean or line_clean.startswith("//"):
                 continue
-                
+
             is_indirect = False
             if "//" in line_clean:
                 parts = line_clean.split("//", 1)
@@ -5256,10 +6093,10 @@ def parse_go_mod(filepath):
                     is_indirect = True
             else:
                 line_content = line_clean
-                
+
             if not line_content:
                 continue
-                
+
             if line_content.startswith("require") and line_content.endswith("("):
                 in_require_block = True
                 continue
@@ -5293,20 +6130,28 @@ def parse_go_mod(filepath):
                 left_parts = left.strip().split()
                 if left_parts and left_parts[0] == "replace":
                     left_parts = left_parts[1:]
-                    
+
                 right_parts = right.strip().split()
                 left_pkg = left_parts[0] if left_parts else None
                 left_ver = left_parts[1] if len(left_parts) >= 2 else None
 
                 if left_pkg and right_parts:
                     target_path = right_parts[0]
-                    is_local_path = target_path.startswith('.') or target_path.startswith('/') or target_path.startswith('\\') or len(right_parts) == 1
+                    is_local_path = (
+                        target_path.startswith(".")
+                        or target_path.startswith("/")
+                        or target_path.startswith("\\")
+                        or len(right_parts) == 1
+                    )
                     if is_local_path:
                         local_replacements[left_pkg] = target_path
                     elif len(right_parts) >= 2:
                         new_path, new_version = right_parts[0], right_parts[1]
                         if left_ver:
-                            replacements_ver[(left_pkg, left_ver)] = (new_path, new_version)
+                            replacements_ver[(left_pkg, left_ver)] = (
+                                new_path,
+                                new_version,
+                            )
                         else:
                             replacements[left_pkg] = (new_path, new_version)
                 continue
@@ -5355,21 +6200,28 @@ def parse_go_mod(filepath):
         for pkg, ver, is_indir in raw_reqs:
             final_pkg = pkg
             final_ver = ver
-            
+
             if (pkg, ver) in replacements_ver:
                 final_pkg, final_ver = replacements_ver[(pkg, ver)]
             elif pkg in replacements:
                 final_pkg, final_ver = replacements[pkg]
-                
+
             if is_indir:
                 devDependencies[final_pkg] = final_ver
             else:
                 dependencies[final_pkg] = final_ver
-                
+
     except Exception as e:
         print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing go.mod: {e}{COLOR_RESET}")
-        
-    return dependencies, devDependencies, local_replacements, excluded_versions, retracted_versions
+
+    return (
+        dependencies,
+        devDependencies,
+        local_replacements,
+        excluded_versions,
+        retracted_versions,
+    )
+
 
 def check_go_package(target):
     """Queries proxy.golang.org for Go module versions list."""
@@ -5378,14 +6230,14 @@ def check_go_package(target):
     installed_versions = target["installed"]
     excluded_set = target.get("excluded_versions") or set()
     retracted_set = target.get("retracted_versions") or set()
-    
+
     versions_to_check = installed_versions if installed_versions else [declared]
     results = []
-    
+
     try:
         candidate_name = name
         resp_data = None
-        
+
         while True:
             try:
                 escaped_name = escape_go_module(candidate_name)
@@ -5399,95 +6251,123 @@ def check_go_package(target):
                     candidate_name = candidate_name.rsplit("/", 1)[0]
                 else:
                     raise err
-            
+
         versions_list = [v.strip() for v in resp_data.split("\n") if v.strip()]
-        
+
         stable_versions = []
         for v in versions_list:
             v_lower = v.lower()
             if not any(x in v_lower for x in ("-", "alpha", "beta", "rc", "dev")):
                 clean_v = v.split("+")[0]
                 stable_versions.append((v, clean_v))
-                
-        valid_versions = stable_versions if stable_versions else [(v, v.split("+")[0]) for v in versions_list]
-        
+
+        valid_versions = (
+            stable_versions
+            if stable_versions
+            else [(v, v.split("+")[0]) for v in versions_list]
+        )
+
         # Exclude versions specified in exclude / retract directives
         if excluded_set or retracted_set:
-            filtered = [item for item in valid_versions if item[0] not in excluded_set and item[0] not in retracted_set]
+            filtered = [
+                item
+                for item in valid_versions
+                if item[0] not in excluded_set and item[0] not in retracted_set
+            ]
             if filtered:
                 valid_versions = filtered
-        
+
         all_versions = [item[0] for item in valid_versions]
-        
+
         for ver_str in versions_to_check:
-            latest_same_major, latest_absolute = find_latest_same_major(ver_str, all_versions)
+            latest_same_major, latest_absolute = find_latest_same_major(
+                ver_str, all_versions
+            )
             if not latest_same_major:
                 latest_same_major = latest_absolute
-                
+
             clean_ver = ver_str.lstrip("v").split("+")[0] if ver_str else ""
-            clean_latest_absolute = latest_absolute.lstrip("v").split("+")[0] if latest_absolute else ""
-            clean_latest_same = latest_same_major.lstrip("v").split("+")[0] if latest_same_major else ""
-            update_type = determine_update_type(ver_str, latest_same_major, latest_absolute)
-                
+            clean_latest_absolute = (
+                latest_absolute.lstrip("v").split("+")[0] if latest_absolute else ""
+            )
+            clean_latest_same = (
+                latest_same_major.lstrip("v").split("+")[0] if latest_same_major else ""
+            )
+            update_type = determine_update_type(
+                ver_str, latest_same_major, latest_absolute
+            )
+
             repo_url = None
             compare_url = None
             releases_url = None
-            if update_type in ("major", "minor-major", "patch-major"):
+            if update_type in {"major", "minor-major", "patch-major"}:
                 repo_url = resolve_go_repo(name)
                 if repo_url:
                     compare_url = get_compare_url(repo_url, clean_ver, latest_absolute)
-                    releases_url = f"{repo_url}/releases" if is_github_url(repo_url) else repo_url
-                    
+                    releases_url = (
+                        f"{repo_url}/releases" if is_github_url(repo_url) else repo_url
+                    )
+
             display_latest = format_latest_versions(latest_same_major, latest_absolute)
-            results.append({
-                "name": name,
-                "declared": declared,
-                "installed": ver_str,
-                "latest": display_latest,
-                "latest_same_major": latest_same_major,
-                "latest_absolute": latest_absolute,
-                "status": update_type,
-                "deprecated": None,
-                "error": None,
-                "repo_url": repo_url,
-                "compare_url": compare_url,
-                "releases_url": releases_url,
-                "dep_type": target.get("dep_type", "Direct")
-            })
-            
+            results.append(
+                {
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": display_latest,
+                    "latest_same_major": latest_same_major,
+                    "latest_absolute": latest_absolute,
+                    "status": update_type,
+                    "deprecated": None,
+                    "error": None,
+                    "repo_url": repo_url,
+                    "compare_url": compare_url,
+                    "releases_url": releases_url,
+                    "dep_type": target.get("dep_type", "Direct"),
+                }
+            )
+
     except urllib.error.HTTPError as e:
         error_msg = "Not Found" if e.code == 404 else f"HTTP {e.code}"
         for ver_str in versions_to_check:
-            results.append({
-                "name": name,
-                "declared": declared,
-                "installed": ver_str,
-                "latest": None,
-                "status": "error",
-                "deprecated": None,
-                "error": error_msg,
-                "dep_type": target.get("dep_type", "Direct")
-            })
+            results.append(
+                {
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": None,
+                    "status": "error",
+                    "deprecated": None,
+                    "error": error_msg,
+                    "dep_type": target.get("dep_type", "Direct"),
+                }
+            )
     except Exception as e:
         for ver_str in versions_to_check:
-            results.append({
-                "name": name,
-                "declared": declared,
-                "installed": ver_str,
-                "latest": None,
-                "status": "error",
-                "deprecated": None,
-                "error": str(e),
-                "dep_type": target.get("dep_type", "Direct")
-            })
-            
+            results.append(
+                {
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": None,
+                    "status": "error",
+                    "deprecated": None,
+                    "error": str(e),
+                    "dep_type": target.get("dep_type", "Direct"),
+                }
+            )
+
     return results
+
 
 def check_all_go_targets(targets, max_workers):
     """Executes Go modules checks concurrently and renders simple progress."""
     total = len(targets)
     print(f"{COLOR_BOLD}{COLOR_CYAN}Checking {total} packages...{COLOR_RESET}\n")
-    return _check_all_targets_unified(targets, check_go_package, f"{COLOR_GRAY}[Progress: Go check]", max_workers)
+    return _check_all_targets_unified(
+        targets, check_go_package, f"{COLOR_GRAY}[Progress: Go check]", max_workers
+    )
+
 
 def resolve_go_parent_graph(direct_deps, max_workers=10):
     """
@@ -5498,7 +6378,7 @@ def resolve_go_parent_graph(direct_deps, max_workers=10):
     parents = {}
     if not direct_deps:
         return parents
-        
+
     total = len(direct_deps)
     completed = 0
     lock = threading.Lock()
@@ -5513,7 +6393,7 @@ def resolve_go_parent_graph(direct_deps, max_workers=10):
                 req = urllib.request.Request(url)
                 with safe_urlopen(req, timeout=6) as response:
                     mod_text = response.read().decode("utf-8")
-                    
+
                 in_require_block = False
                 for line in mod_text.splitlines():
                     line_clean = line.strip()
@@ -5525,16 +6405,24 @@ def resolve_go_parent_graph(direct_deps, max_workers=10):
                     elif in_require_block and line_clean == ")":
                         in_require_block = False
                         continue
-                        
-                    line_content = line_clean.split("//", 1)[0].strip() if "//" in line_clean else line_clean
+
+                    line_content = (
+                        line_clean.split("//", 1)[0].strip()
+                        if "//" in line_clean
+                        else line_clean
+                    )
                     if not line_content:
                         continue
-                        
+
                     parts = line_content.split()
                     if in_require_block and len(parts) >= 2:
                         child_pkg = parts[0]
                         parents.setdefault(child_pkg, set()).add(name)
-                    elif not in_require_block and line_content.startswith("require") and len(parts) >= 3:
+                    elif (
+                        not in_require_block
+                        and line_content.startswith("require")
+                        and len(parts) >= 3
+                    ):
                         child_pkg = parts[1]
                         parents.setdefault(child_pkg, set()).add(name)
             except Exception:
@@ -5543,10 +6431,14 @@ def resolve_go_parent_graph(direct_deps, max_workers=10):
         with lock:
             completed += 1
             pct = int((completed / total) * 100)
-            sys.stdout.write(f"\r{COLOR_GRAY}{ICON_INFO} Resolving parent dependency graph for Go modules: {completed}/{total} ({pct}%)...{COLOR_RESET}")
+            sys.stdout.write(
+                f"\r{COLOR_GRAY}{ICON_INFO} Resolving parent dependency graph for Go modules: {completed}/{total} ({pct}%)...{COLOR_RESET}"
+            )
             sys.stdout.flush()
 
-    sys.stdout.write(f"{COLOR_GRAY}{ICON_INFO} Resolving parent dependency graph for Go modules: 0/{total} (0%)...{COLOR_RESET}")
+    sys.stdout.write(
+        f"{COLOR_GRAY}{ICON_INFO} Resolving parent dependency graph for Go modules: 0/{total} (0%)...{COLOR_RESET}"
+    )
     sys.stdout.flush()
 
     with ThreadPoolExecutor(max_workers=min(max_workers, 15)) as executor:
@@ -5555,6 +6447,7 @@ def resolve_go_parent_graph(direct_deps, max_workers=10):
     sys.stdout.write("\n")
     sys.stdout.flush()
     return parents
+
 
 def parse_go_sum(filepath):
     """Parses go.sum file into dict mapping (module, version) -> h1_hash."""
@@ -5578,11 +6471,16 @@ def parse_go_sum(filepath):
         print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing go.sum: {e}{COLOR_RESET}")
     return checksums
 
+
 def verify_go_checksums(results, go_sum_path, max_workers=10):
     """Verifies local go.sum entries against sum.golang.org Checksum Database."""
-    has_sum_file = os.path.exists(go_sum_path) if (go_sum_path and os.path.exists(go_sum_path)) else False
+    has_sum_file = (
+        os.path.exists(go_sum_path)
+        if (go_sum_path and os.path.exists(go_sum_path))
+        else False
+    )
     local_checksums = parse_go_sum(go_sum_path) if has_sum_file else {}
-    
+
     if not has_sum_file:
         for r in results:
             if r.get("status") != "local":
@@ -5597,10 +6495,10 @@ def verify_go_checksums(results, go_sum_path, max_workers=10):
         installed = r.get("installed") or r.get("declared")
         if isinstance(installed, list):
             installed = installed[0] if installed else None
-        
+
         if not installed:
             continue
-            
+
         key = (name, installed)
         if key not in local_checksums:
             r["missing_checksum"] = True
@@ -5623,15 +6521,17 @@ def verify_go_checksums(results, go_sum_path, max_workers=10):
             req = urllib.request.Request(url)
             with safe_urlopen(req, timeout=6) as response:
                 resp_text = response.read().decode("utf-8")
-            
+
             official_hash = None
             prefix = f"{name} {ver} h1:"
             for line in resp_text.splitlines():
                 if line.startswith(prefix):
                     official_hash = line.split(prefix, 1)[1].strip()
                     break
-                    
-            if official_hash and (f"h1:{official_hash}" != local_hash and official_hash != local_hash):
+
+            if official_hash and (
+                f"h1:{official_hash}" != local_hash and official_hash != local_hash
+            ):
                 r["mismatch_checksum"] = True
             elif official_hash:
                 r["checksum_verified"] = True
@@ -5641,10 +6541,14 @@ def verify_go_checksums(results, go_sum_path, max_workers=10):
         with lock:
             completed += 1
             pct = int((completed / total) * 100)
-            sys.stdout.write(f"\r{COLOR_GRAY}{ICON_INFO} Verifying go.sum checksums against sum.golang.org: {completed}/{total} ({pct}%)...{COLOR_RESET}")
+            sys.stdout.write(
+                f"\r{COLOR_GRAY}{ICON_INFO} Verifying go.sum checksums against sum.golang.org: {completed}/{total} ({pct}%)...{COLOR_RESET}"
+            )
             sys.stdout.flush()
 
-    sys.stdout.write(f"{COLOR_GRAY}{ICON_INFO} Verifying go.sum checksums against sum.golang.org: 0/{total} (0%)...{COLOR_RESET}")
+    sys.stdout.write(
+        f"{COLOR_GRAY}{ICON_INFO} Verifying go.sum checksums against sum.golang.org: 0/{total} (0%)...{COLOR_RESET}"
+    )
     sys.stdout.flush()
 
     with ThreadPoolExecutor(max_workers=min(max_workers, 15)) as executor:
@@ -5652,6 +6556,7 @@ def verify_go_checksums(results, go_sum_path, max_workers=10):
 
     sys.stdout.write("\n")
     sys.stdout.flush()
+
 
 def run_go_checker(args):
     """Main orchestrator for Go Modules checker with workspace (go.work) and local replace support."""
@@ -5666,11 +6571,13 @@ def run_go_checker(args):
                 manifests.append(cand)
         elif os.path.isfile(args.path) and args.path.endswith("go.mod"):
             manifests.append(args.path)
-            
+
     if not manifests:
-        print(f"{COLOR_RED}{ICON_ERROR} No go.mod or go.work found in: {args.path}{COLOR_RESET}")
+        print(
+            f"{COLOR_RED}{ICON_ERROR} No go.mod or go.work found in: {args.path}{COLOR_RESET}"
+        )
         return None, None, 0
-        
+
     all_deps = {}
     all_dev_deps = {}
     all_local_replacements = {}
@@ -5678,7 +6585,9 @@ def run_go_checker(args):
     all_retracted = {}
 
     for manifest in manifests:
-        print(f"{COLOR_GRAY}{ICON_INFO} Reading {os.path.basename(manifest)}...{COLOR_RESET}")
+        print(
+            f"{COLOR_GRAY}{ICON_INFO} Reading {os.path.basename(manifest)}...{COLOR_RESET}"
+        )
         deps, dev_deps, local_reps, ex_vers, ret_vers = parse_go_mod(manifest)
         all_deps.update(deps)
         all_dev_deps.update(dev_deps)
@@ -5690,87 +6599,101 @@ def run_go_checker(args):
 
     targets = []
     local_results = []
-    
+
     for name, declared_ver in all_deps.items():
         if name in all_local_replacements:
             loc_path = all_local_replacements[name]
-            local_results.append({
-                "name": name,
-                "declared": declared_ver,
-                "installed": declared_ver,
-                "latest": f"Local ({loc_path})",
-                "latest_same_major": declared_ver,
-                "latest_absolute": declared_ver,
-                "status": "local",
-                "deprecated": None,
-                "error": None,
-                "repo_url": None,
-                "compare_url": None,
-                "releases_url": None,
-                "dep_type": "Direct",
-                "required_by": []
-            })
+            local_results.append(
+                {
+                    "name": name,
+                    "declared": declared_ver,
+                    "installed": declared_ver,
+                    "latest": f"Local ({loc_path})",
+                    "latest_same_major": declared_ver,
+                    "latest_absolute": declared_ver,
+                    "status": "local",
+                    "deprecated": None,
+                    "error": None,
+                    "repo_url": None,
+                    "compare_url": None,
+                    "releases_url": None,
+                    "dep_type": "Direct",
+                    "required_by": [],
+                }
+            )
         else:
-            targets.append({
-                "name": name,
-                "declared": declared_ver,
-                "installed": [declared_ver] if declared_ver else [],
-                "dep_type": "Direct",
-                "excluded_versions": all_excluded.get(name, set()),
-                "retracted_versions": all_retracted.get("_global", set())
-            })
+            targets.append(
+                {
+                    "name": name,
+                    "declared": declared_ver,
+                    "installed": [declared_ver] if declared_ver else [],
+                    "dep_type": "Direct",
+                    "excluded_versions": all_excluded.get(name, set()),
+                    "retracted_versions": all_retracted.get("_global", set()),
+                }
+            )
 
     for name, declared_ver in all_dev_deps.items():
         dep_kind = "Dev" if declared_ver == "tool" else "Transitive"
         if name in all_local_replacements:
             loc_path = all_local_replacements[name]
-            local_results.append({
-                "name": name,
-                "declared": declared_ver,
-                "installed": declared_ver,
-                "latest": f"Local ({loc_path})",
-                "latest_same_major": declared_ver,
-                "latest_absolute": declared_ver,
-                "status": "local",
-                "deprecated": None,
-                "error": None,
-                "repo_url": None,
-                "compare_url": None,
-                "releases_url": None,
-                "dep_type": dep_kind,
-                "required_by": ["indirect"] if dep_kind == "Transitive" else []
-            })
+            local_results.append(
+                {
+                    "name": name,
+                    "declared": declared_ver,
+                    "installed": declared_ver,
+                    "latest": f"Local ({loc_path})",
+                    "latest_same_major": declared_ver,
+                    "latest_absolute": declared_ver,
+                    "status": "local",
+                    "deprecated": None,
+                    "error": None,
+                    "repo_url": None,
+                    "compare_url": None,
+                    "releases_url": None,
+                    "dep_type": dep_kind,
+                    "required_by": ["indirect"] if dep_kind == "Transitive" else [],
+                }
+            )
         else:
-            targets.append({
-                "name": name,
-                "declared": declared_ver,
-                "installed": [declared_ver] if declared_ver else [],
-                "dep_type": dep_kind,
-                "excluded_versions": all_excluded.get(name, set()),
-                "retracted_versions": all_retracted.get("_global", set())
-            })
-        
+            targets.append(
+                {
+                    "name": name,
+                    "declared": declared_ver,
+                    "installed": [declared_ver] if declared_ver else [],
+                    "dep_type": dep_kind,
+                    "excluded_versions": all_excluded.get(name, set()),
+                    "retracted_versions": all_retracted.get("_global", set()),
+                }
+            )
+
     start_time = time.time()
     results = check_all_go_targets(targets, args.concurrent) if targets else []
     results.extend(local_results)
-    
+
     # Check vulnerabilities via OSV if requested
     if getattr(args, "vuls", False):
         tech_info = TECHNOLOGIES["go"]
-        osv_vulns = check_osv_vulnerabilities([t for t in targets if t.get("installed")], tech_info["osv_ecosystem"], args.concurrent)
-        
+        osv_vulns = check_osv_vulnerabilities(
+            [t for t in targets if t.get("installed")],
+            tech_info["osv_ecosystem"],
+            args.concurrent,
+        )
+
         for r in results:
             key = (r["name"], r["installed"])
             r["vulnerabilities"] = osv_vulns.get(key, [])
-            
+
             # Alert if an excluded version in go.mod could contain a fix for this vulnerability
             pkg_ex = all_excluded.get(r["name"], set())
             if pkg_ex and r.get("vulnerabilities"):
-                r["excluded_warning"] = f"Version(s) {', '.join(sorted(pkg_ex))} are explicitly excluded in go.mod and may contain fix patches for detected vulnerabilities."
+                r["excluded_warning"] = (
+                    f"Version(s) {', '.join(sorted(pkg_ex))} are explicitly excluded in go.mod and may contain fix patches for detected vulnerabilities."
+                )
     else:
         for r in results:
             r["vulnerabilities"] = []
-            
+
     # Resolve exact parent dependency tree via GOPROXY
     parent_map = resolve_go_parent_graph(all_deps, getattr(args, "concurrent", 10))
 
@@ -5799,20 +6722,26 @@ def run_go_checker(args):
             sum_file = cand_sum
 
     verify_go_checksums(results, sum_file, getattr(args, "concurrent", 10))
-        
+
     elapsed = time.time() - start_time
-    
-    return results, {"dependencies": all_deps, "devDependencies": {}, "all_direct": all_deps}, elapsed
+
+    return (
+        results,
+        {"dependencies": all_deps, "devDependencies": {}, "all_direct": all_deps},
+        elapsed,
+    )
+
 
 # ==============================================================================
 # Rust (Cargo) Scanning Logic
 # ==============================================================================
 
+
 def find_rust_files(path):
     """Finds Cargo.toml and Cargo.lock files."""
     toml_path = None
     lock_path = None
-    
+
     if os.path.exists(path):
         if os.path.isdir(path):
             t = os.path.join(path, "Cargo.toml")
@@ -5832,15 +6761,16 @@ def find_rust_files(path):
                 t = os.path.join(os.path.dirname(path), "Cargo.toml")
                 if os.path.exists(t):
                     toml_path = t
-                    
+
     return toml_path, lock_path
+
 
 def parse_cargo_toml(filepath):
     """Parses Cargo.toml to extract direct dependency names."""
     dependencies = set()
     if not filepath or not os.path.exists(filepath):
         return dependencies
-        
+
     current_section = None
     is_specific_pkg_section = False
     try:
@@ -5849,41 +6779,55 @@ def parse_cargo_toml(filepath):
                 line = line.strip()
                 if not line or line.startswith("#"):
                     continue
-                    
+
                 # Detect sections, e.g. [dependencies], [dependencies.tokio], [target.'...'.dependencies.plist]
-                m_sec = re.match(r'^\[([^\]]+)\]', line)
+                m_sec = re.match(r"^\[([^\]]+)\]", line)
                 if m_sec:
                     current_section = m_sec.group(1).strip()
                     is_specific_pkg_section = False
-                    
+
                     # Extract package name from section header like [dependencies.clap] or [target.'...'.dependencies.clap]
-                    m_sub = re.search(r'(?:dependencies|dev-dependencies|build-dependencies)\.([a-zA-Z0-9_-]+)$', current_section)
+                    m_sub = re.search(
+                        r"(?:dependencies|dev-dependencies|build-dependencies)\.([a-zA-Z0-9_-]+)$",
+                        current_section,
+                    )
                     if m_sub:
                         dependencies.add(m_sub.group(1))
                         is_specific_pkg_section = True
                     continue
-                    
+
                 # Check dependency sections
-                is_dep_section = (
-                    current_section in ("dependencies", "dev-dependencies", "build-dependencies")
-                    or (current_section and (
+                is_dep_section = current_section in {
+                    "dependencies",
+                    "dev-dependencies",
+                    "build-dependencies",
+                } or (
+                    current_section
+                    and (
                         "dependencies" in current_section
                         or "dev-dependencies" in current_section
                         or "build-dependencies" in current_section
-                    ))
+                    )
                 )
-                
+
                 if is_dep_section and not is_specific_pkg_section:
                     # Match name = "version" or name = { ... }
-                    m_dep = re.match(r'^([a-zA-Z0-9_-]+)\s*=', line)
+                    m_dep = re.match(r"^([a-zA-Z0-9_-]+)\s*=", line)
                     if m_dep:
                         dep_name = m_dep.group(1).strip()
-                        if dep_name not in ("version", "optional", "features", "default-features", "path"):
+                        if dep_name not in {
+                            "version",
+                            "optional",
+                            "features",
+                            "default-features",
+                            "path",
+                        }:
                             dependencies.add(dep_name)
     except Exception as e:
         print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Cargo.toml: {e}{COLOR_RESET}")
-        
+
     return dependencies
+
 
 def parse_cargo_lock(filepath):
     """Parses Cargo.lock to extract all resolved package names, versions, and build parent tree.
@@ -5893,11 +6837,11 @@ def parse_cargo_lock(filepath):
     parents = {}
     if not filepath or not os.path.exists(filepath):
         return resolved, parents
-        
+
     try:
         with open(filepath, "rb") as f:
             data = tomllib.load(f)
-            
+
         packages = data.get("package", [])
         if isinstance(packages, list):
             for pkg in packages:
@@ -5907,9 +6851,9 @@ def parse_cargo_lock(filepath):
                 version = pkg.get("version")
                 if not name or not version:
                     continue
-                    
+
                 resolved.setdefault(name, set()).add(version)
-                
+
                 deps = pkg.get("dependencies", [])
                 if isinstance(deps, list):
                     for dep in deps:
@@ -5918,13 +6862,14 @@ def parse_cargo_lock(filepath):
                         dep_name = dep.split()[0] if dep else ""
                         if dep_name:
                             parents.setdefault(dep_name, set()).add(name)
-                            
+
     except Exception as e:
         print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Cargo.lock: {e}{COLOR_RESET}")
-        
+
     resolved_clean = {k: list(v) for k, v in resolved.items()}
     parents_clean = {k: list(v) for k, v in parents.items()}
     return resolved_clean, parents_clean
+
 
 def get_crates_index_url(crate_name):
     """Generates the official Cargo sparse index CDN URL for a crate."""
@@ -5940,21 +6885,22 @@ def get_crates_index_url(crate_name):
         prefix = f"{name[:2]}/{name[2:4]}/{name}"
     return f"https://index.crates.io/{prefix}"
 
+
 def check_rust_package(target):
     """Queries crates.io index/API for crate metadata and checks target version."""
     name = target["name"]
     declared = target["declared"]
     installed_versions = target["installed"]
-    
+
     versions_to_check = installed_versions if installed_versions else [declared]
     results = []
-    
+
     try:
         all_versions = []
         yanked_versions = set()
         repo_url_raw = None
         latest_version = None
-        
+
         # 1. Primary: Fast official CDN Cargo sparse index (no rate limits)
         url_index = get_crates_index_url(name)
         req_index = urllib.request.Request(url_index)
@@ -5978,136 +6924,161 @@ def check_rust_package(target):
                     fetched_index = True
         except Exception:
             pass
-            
+
         # 2. Fallback: REST API if sparse index call failed or returned no versions
         if not fetched_index:
             url = f"{URL_RUST_REGISTRY}{urllib.parse.quote(name)}"
             req = urllib.request.Request(url)
             req.add_header("User-Agent", f"Kevlar-CheckDeps/{VERSION}")
-            
+
             with safe_urlopen(req, timeout=10) as response:
                 data = json.loads(response.read().decode("utf-8"))
-                
+
             crate_info = data.get("crate", {})
-            latest_version = crate_info.get("max_stable_version") or crate_info.get("max_version")
+            latest_version = crate_info.get("max_stable_version") or crate_info.get(
+                "max_version"
+            )
             repo_url_raw = crate_info.get("repository") or crate_info.get("homepage")
-            
+
             versions_meta = data.get("versions", [])
             for v_meta in versions_meta:
                 if v_meta.get("yanked"):
                     yanked_versions.add(v_meta.get("num"))
-                    
+
             all_versions = [v.get("num") for v in versions_meta if v.get("num")]
-            
+
         for ver_str in versions_to_check:
-            clean_ver = RE_CLEAN_VER.sub('', ver_str) if ver_str else "0.0.0"
+            clean_ver = RE_CLEAN_VER.sub("", ver_str) if ver_str else "0.0.0"
             if not clean_ver:
                 clean_ver = "0.0.0"
-                
-            latest_same_major, latest_absolute = find_latest_same_major(clean_ver, all_versions)
+
+            latest_same_major, latest_absolute = find_latest_same_major(
+                clean_ver, all_versions
+            )
             if latest_version:
                 latest_absolute = latest_version
             if not latest_same_major:
                 latest_same_major = latest_absolute
-                
-            status = determine_update_type(clean_ver, latest_same_major, latest_absolute)
-            
+
+            status = determine_update_type(
+                clean_ver, latest_same_major, latest_absolute
+            )
+
             is_deprecated = clean_ver in yanked_versions
-            
+
             repo_url = None
             compare_url = None
             releases_url = None
-            if status in ("major", "minor-major", "patch-major"):
+            if status in {"major", "minor-major", "patch-major"}:
                 if not repo_url_raw:
-                    repo_url_raw = f"https://github.com/rust-lang/{name}" if is_github_url(f"https://github.com/rust-lang/{name}") else None
+                    repo_url_raw = (
+                        f"https://github.com/rust-lang/{name}"
+                        if is_github_url(f"https://github.com/rust-lang/{name}")
+                        else None
+                    )
                 repo_url = clean_repo_url(repo_url_raw)
                 if repo_url:
                     compare_url = get_compare_url(repo_url, clean_ver, latest_absolute)
-                    releases_url = f"{repo_url}/releases" if is_github_url(repo_url) else repo_url
-                    
+                    releases_url = (
+                        f"{repo_url}/releases" if is_github_url(repo_url) else repo_url
+                    )
+
             display_latest = format_latest_versions(latest_same_major, latest_absolute)
-            results.append({
-                "name": name,
-                "declared": ver_str,
-                "installed": clean_ver,
-                "latest": display_latest or "unknown",
-                "latest_same_major": latest_same_major,
-                "latest_absolute": latest_absolute,
-                "status": status,
-                "deprecated": is_deprecated,
-                "error": None,
-                "repo_url": repo_url,
-                "compare_url": compare_url,
-                "releases_url": releases_url
-            })
+            results.append(
+                {
+                    "name": name,
+                    "declared": ver_str,
+                    "installed": clean_ver,
+                    "latest": display_latest or "unknown",
+                    "latest_same_major": latest_same_major,
+                    "latest_absolute": latest_absolute,
+                    "status": status,
+                    "deprecated": is_deprecated,
+                    "error": None,
+                    "repo_url": repo_url,
+                    "compare_url": compare_url,
+                    "releases_url": releases_url,
+                }
+            )
     except Exception as e:
         for ver_str in versions_to_check:
-            results.append({
-                "name": name,
-                "declared": ver_str,
-                "installed": ver_str,
-                "latest": "unknown",
-                "status": "error",
-                "deprecated": False,
-                "error": str(e)
-            })
-            
+            results.append(
+                {
+                    "name": name,
+                    "declared": ver_str,
+                    "installed": ver_str,
+                    "latest": "unknown",
+                    "status": "error",
+                    "deprecated": False,
+                    "error": str(e),
+                }
+            )
+
     return results
+
 
 def check_all_rust_targets(targets, max_workers):
     """Checks all Rust target crates in parallel."""
     rust_workers = min(max_workers, 5) if max_workers else 5
-    return _check_all_targets_unified(targets, check_rust_package, "[Rust] Checking registry", rust_workers)
+    return _check_all_targets_unified(
+        targets, check_rust_package, "[Rust] Checking registry", rust_workers
+    )
+
 
 def run_rust_checker(args):
     """Main orchestrator for Rust Cargo checker."""
     toml_path, lock_path = find_rust_files(args.path)
     if not toml_path and not lock_path:
-        print(f"{COLOR_RED}{ICON_ERROR} No Cargo.toml or Cargo.lock found in: {args.path}{COLOR_RESET}")
+        print(
+            f"{COLOR_RED}{ICON_ERROR} No Cargo.toml or Cargo.lock found in: {args.path}{COLOR_RESET}"
+        )
         return None, None, 0
-        
+
     print(f"{COLOR_GRAY}{ICON_INFO} Reading Cargo files...{COLOR_RESET}")
     direct = parse_cargo_toml(toml_path)
     resolved, parents = parse_cargo_lock(lock_path)
-    
+
     if not resolved and direct:
         resolved = {name: ["0.0.0"] for name in direct}
-        
-    pkg_data = {
-        "all_direct": {name: name for name in direct},
-        "dependencies": resolved
-    }
-    
+
+    pkg_data = {"all_direct": {name: name for name in direct}, "dependencies": resolved}
+
     targets = []
     for name, versions in resolved.items():
         if not args.all and name not in direct:
             continue
         declared = versions[0] if versions else None
-        targets.append({
-            "name": name,
-            "declared": declared,
-            "installed": versions if versions != ["0.0.0"] else []
-        })
-        
+        targets.append(
+            {
+                "name": name,
+                "declared": declared,
+                "installed": versions if versions != ["0.0.0"] else [],
+            }
+        )
+
     if not targets:
-        print(f"{COLOR_YELLOW}{ICON_WARN} No Rust packages identified to check.{COLOR_RESET}")
+        print(
+            f"{COLOR_YELLOW}{ICON_WARN} No Rust packages identified to check.{COLOR_RESET}"
+        )
         return None, None, 0
-        
+
     start_time = time.time()
     results = check_all_rust_targets(targets, args.concurrent)
-    
+
     # Check vulnerabilities via OSV if requested
     if getattr(args, "vuls", False):
         tech_info = TECHNOLOGIES["rust"]
-        osv_vulns = check_osv_vulnerabilities(targets, tech_info["osv_ecosystem"], args.concurrent)
-        
+        osv_vulns = check_osv_vulnerabilities(
+            targets, tech_info["osv_ecosystem"], args.concurrent
+        )
+
         for r in results:
             key = (r["name"], r["installed"])
             r["vulnerabilities"] = osv_vulns.get(key, [])
     else:
         for r in results:
             r["vulnerabilities"] = []
-            
+
     # Resolve transitive dependency parents & dep_type
     for r in results:
         if r["name"] in direct:
@@ -6117,20 +7088,22 @@ def run_rust_checker(args):
             r["declared"] = None
         direct_parents = find_direct_parents(r["name"], parents, direct)
         r["required_by"] = sorted(list(direct_parents - {r["name"]}))
-            
+
     elapsed = time.time() - start_time
-    
+
     return results, pkg_data, elapsed
+
 
 # ==============================================================================
 # Ruby (Bundler) Scanning Logic
 # ==============================================================================
 
+
 def find_ruby_files(path):
     """Finds Gemfile and Gemfile.lock files."""
     gemfile_path = None
     lock_path = None
-    
+
     if os.path.exists(path):
         if os.path.isdir(path):
             g = os.path.join(path, "Gemfile")
@@ -6150,30 +7123,32 @@ def find_ruby_files(path):
                 g = os.path.join(os.path.dirname(path), "Gemfile")
                 if os.path.exists(g):
                     gemfile_path = g
-                    
+
     return gemfile_path, lock_path
+
 
 def parse_gemfile(filepath):
     """Parses Gemfile to extract direct dependency names."""
     dependencies = set()
     if not filepath or not os.path.exists(filepath):
         return dependencies
-        
+
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line or line.startswith("#"):
                     continue
-                    
+
                 # gem 'rails', '~> 6.0' or gem "nokogiri"
                 m = re.match(r'^gem\s+[\'"]([^\'"]+)[\'"]', line)
                 if m:
                     dependencies.add(m.group(1).strip())
     except Exception as e:
         print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Gemfile: {e}{COLOR_RESET}")
-        
+
     return dependencies
+
 
 def parse_gemfile_lock(filepath):
     """Parses Gemfile.lock to extract all resolved package names, versions, and build parent tree."""
@@ -6181,80 +7156,89 @@ def parse_gemfile_lock(filepath):
     parents = {}
     if not filepath or not os.path.exists(filepath):
         return resolved, parents
-        
+
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             lines = f.readlines()
-            
+
         in_specs = False
         current_parent = None
         spec_indent = None
-        
+
         for line in lines:
             if not line.strip():
                 continue
-                
+
             # Check for root sections (no indentation)
             if line and not line.startswith(" ") and not line.startswith("\t"):
                 in_specs = False
                 continue
-                
+
             line_stripped = line.strip()
             if line_stripped == "specs:":
                 in_specs = True
                 spec_indent = None
                 current_parent = None
                 continue
-                
+
             if in_specs:
                 # Count leading spaces
-                leading_spaces = len(line) - len(line.lstrip(' '))
-                
+                leading_spaces = len(line) - len(line.lstrip(" "))
+
                 # Try to match gem version pattern: "    name (version)"
-                m_spec = re.match(r'^\s*([a-zA-Z0-9_-]+)\s*\(([^)]+)\)', line)
+                m_spec = re.match(r"^\s*([a-zA-Z0-9_-]+)\s*\(([^)]+)\)", line)
                 if m_spec:
                     name = m_spec.group(1)
                     version = m_spec.group(2)
-                    
+
                     if spec_indent is None:
                         spec_indent = leading_spaces
-                        
+
                     if leading_spaces == spec_indent:
                         current_parent = name
                         resolved[current_parent] = version
                         continue
-                        
+
                 # If it has more indentation than spec_indent and matches child dep, it's a child dependency
-                if spec_indent is not None and leading_spaces > spec_indent and current_parent:
-                    m_dep = re.match(r'^\s*([a-zA-Z0-9_-]+)(?:\s*\(([^)]+)\))?', line)
+                if (
+                    spec_indent is not None
+                    and leading_spaces > spec_indent
+                    and current_parent
+                ):
+                    m_dep = re.match(r"^\s*([a-zA-Z0-9_-]+)(?:\s*\(([^)]+)\))?", line)
                     if m_dep:
                         child = m_dep.group(1)
                         if child not in parents:
                             parents[child] = set()
                         parents[child].add(current_parent)
-                        
+
     except Exception as e:
-        print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Gemfile.lock: {e}{COLOR_RESET}")
-        
+        print(
+            f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Gemfile.lock: {e}{COLOR_RESET}"
+        )
+
     parents_clean = {k: list(v) for k, v in parents.items()}
     return resolved, parents_clean
+
 
 def check_ruby_package(target):
     """Queries rubygems.org API for package metadata and checks target version."""
     name = target["name"]
     declared = target["declared"]
     installed_versions = target["installed"]
-    
+
     versions_to_check = installed_versions if installed_versions else [declared]
     results = []
-    
+
     try:
         try:
-            url_versions = f"https://rubygems.org/api/v1/versions/{urllib.parse.quote(name)}.json"
+            url_versions = (
+                f"https://rubygems.org/api/v1/versions/{urllib.parse.quote(name)}.json"
+            )
             req_v = urllib.request.Request(url_versions)
             with safe_urlopen(req_v, timeout=10) as response:
                 versions_data = json.loads(response.read().decode("utf-8"))
-            
+
             stable_versions = []
             all_versions = []
             for item in versions_data:
@@ -6287,166 +7271,197 @@ def check_ruby_package(target):
                 valid_versions = [latest_version] if latest_version else []
             except Exception:
                 valid_versions = []
-            
+
         for ver_str in versions_to_check:
-            clean_ver = RE_CLEAN_VER.sub('', ver_str) if ver_str else "0.0.0"
+            clean_ver = RE_CLEAN_VER.sub("", ver_str) if ver_str else "0.0.0"
             if not clean_ver:
                 clean_ver = "0.0.0"
-                
-            latest_same_major, latest_absolute = find_latest_same_major(clean_ver, valid_versions)
+
+            latest_same_major, latest_absolute = find_latest_same_major(
+                clean_ver, valid_versions
+            )
             if not latest_same_major:
                 latest_same_major = latest_absolute
-                
-            status = determine_update_type(clean_ver, latest_same_major, latest_absolute)
-            
+
+            status = determine_update_type(
+                clean_ver, latest_same_major, latest_absolute
+            )
+
             repo_url = None
             compare_url = None
             releases_url = None
-            if status in ("major", "minor-major", "patch-major"):
+            if status in {"major", "minor-major", "patch-major"}:
                 try:
                     url_gem = f"https://rubygems.org/api/v1/gems/{urllib.parse.quote(name)}.json"
                     req_g = urllib.request.Request(url_gem)
                     with safe_urlopen(req_g, timeout=5) as response:
                         data_g = json.loads(response.read().decode("utf-8"))
-                    raw_url = data_g.get("source_code_uri") or data_g.get("homepage_uri")
+                    raw_url = data_g.get("source_code_uri") or data_g.get(
+                        "homepage_uri"
+                    )
                     repo_url = clean_repo_url(raw_url)
                     if repo_url:
-                        compare_url = get_compare_url(repo_url, clean_ver, latest_absolute)
-                        releases_url = f"{repo_url}/releases" if is_github_url(repo_url) else repo_url
+                        compare_url = get_compare_url(
+                            repo_url, clean_ver, latest_absolute
+                        )
+                        releases_url = (
+                            f"{repo_url}/releases"
+                            if is_github_url(repo_url)
+                            else repo_url
+                        )
                 except Exception:
                     pass
-                    
+
             display_latest = format_latest_versions(latest_same_major, latest_absolute)
-            results.append({
-                "name": name,
-                "declared": ver_str,
-                "installed": clean_ver,
-                "latest": display_latest or "unknown",
-                "latest_same_major": latest_same_major,
-                "latest_absolute": latest_absolute,
-                "status": status,
-                "deprecated": False,
-                "error": None,
-                "repo_url": repo_url,
-                "compare_url": compare_url,
-                "releases_url": releases_url
-            })
+            results.append(
+                {
+                    "name": name,
+                    "declared": ver_str,
+                    "installed": clean_ver,
+                    "latest": display_latest or "unknown",
+                    "latest_same_major": latest_same_major,
+                    "latest_absolute": latest_absolute,
+                    "status": status,
+                    "deprecated": False,
+                    "error": None,
+                    "repo_url": repo_url,
+                    "compare_url": compare_url,
+                    "releases_url": releases_url,
+                }
+            )
     except urllib.error.HTTPError as e:
         if e.code == 404:
             for ver_str in versions_to_check:
-                clean_ver = RE_CLEAN_VER.sub('', ver_str) if ver_str else "0.0.0"
+                clean_ver = RE_CLEAN_VER.sub("", ver_str) if ver_str else "0.0.0"
                 if not clean_ver:
                     clean_ver = "0.0.0"
-                results.append({
-                    "name": name,
-                    "declared": declared,
-                    "installed": clean_ver,
-                    "latest": "Local",
-                    "latest_same_major": None,
-                    "latest_absolute": None,
-                    "status": "local",
-                    "deprecated": False,
-                    "error": None,
-                    "repo_url": None,
-                    "compare_url": None,
-                    "releases_url": None
-                })
+                results.append(
+                    {
+                        "name": name,
+                        "declared": declared,
+                        "installed": clean_ver,
+                        "latest": "Local",
+                        "latest_same_major": None,
+                        "latest_absolute": None,
+                        "status": "local",
+                        "deprecated": False,
+                        "error": None,
+                        "repo_url": None,
+                        "compare_url": None,
+                        "releases_url": None,
+                    }
+                )
         else:
             error_msg = f"HTTP {e.code}"
             for ver_str in versions_to_check:
-                results.append({
-                    "name": name,
-                    "declared": declared,
-                    "installed": ver_str,
-                    "latest": None,
-                    "status": "error",
-                    "deprecated": False,
-                    "error": error_msg
-                })
+                results.append(
+                    {
+                        "name": name,
+                        "declared": declared,
+                        "installed": ver_str,
+                        "latest": None,
+                        "status": "error",
+                        "deprecated": False,
+                        "error": error_msg,
+                    }
+                )
     except Exception as e:
         for ver_str in versions_to_check:
-            results.append({
-                "name": name,
-                "declared": ver_str,
-                "installed": ver_str,
-                "latest": "unknown",
-                "status": "error",
-                "deprecated": False,
-                "error": str(e)
-            })
-            
+            results.append(
+                {
+                    "name": name,
+                    "declared": ver_str,
+                    "installed": ver_str,
+                    "latest": "unknown",
+                    "status": "error",
+                    "deprecated": False,
+                    "error": str(e),
+                }
+            )
+
     return results
+
 
 def check_all_ruby_targets(targets, max_workers):
     """Checks all Ruby target gems in parallel."""
-    return _check_all_targets_unified(targets, check_ruby_package, "[Ruby] Checking registry", max_workers)
+    return _check_all_targets_unified(
+        targets, check_ruby_package, "[Ruby] Checking registry", max_workers
+    )
+
 
 def run_ruby_checker(args):
     """Main orchestrator for Ruby Bundler checker."""
     gemfile_path, lock_path = find_ruby_files(args.path)
     if not gemfile_path and not lock_path:
-        print(f"{COLOR_RED}{ICON_ERROR} No Gemfile or Gemfile.lock found in: {args.path}{COLOR_RESET}")
+        print(
+            f"{COLOR_RED}{ICON_ERROR} No Gemfile or Gemfile.lock found in: {args.path}{COLOR_RESET}"
+        )
         return None, None, 0
-        
+
     print(f"{COLOR_GRAY}{ICON_INFO} Reading Gemfile files...{COLOR_RESET}")
     direct = parse_gemfile(gemfile_path)
     resolved, parents = parse_gemfile_lock(lock_path)
-    
+
     if not resolved and direct:
         resolved = {name: "0.0.0" for name in direct}
-        
-    pkg_data = {
-        "all_direct": {name: name for name in direct},
-        "dependencies": resolved
-    }
-    
+
+    pkg_data = {"all_direct": {name: name for name in direct}, "dependencies": resolved}
+
     targets = []
     for name, version in resolved.items():
         if not args.all and name not in direct:
             continue
-        targets.append({
-            "name": name,
-            "declared": version,
-            "installed": [version] if version != "0.0.0" else []
-        })
-        
+        targets.append(
+            {
+                "name": name,
+                "declared": version,
+                "installed": [version] if version != "0.0.0" else [],
+            }
+        )
+
     if not targets:
-        print(f"{COLOR_YELLOW}{ICON_WARN} No Ruby packages identified to check.{COLOR_RESET}")
+        print(
+            f"{COLOR_YELLOW}{ICON_WARN} No Ruby packages identified to check.{COLOR_RESET}"
+        )
         return None, None, 0
-        
+
     start_time = time.time()
     results = check_all_ruby_targets(targets, args.concurrent)
-    
+
     # Check vulnerabilities via OSV if requested
     if getattr(args, "vuls", False):
         tech_info = TECHNOLOGIES["ruby"]
-        osv_vulns = check_osv_vulnerabilities(targets, tech_info["osv_ecosystem"], args.concurrent)
-        
+        osv_vulns = check_osv_vulnerabilities(
+            targets, tech_info["osv_ecosystem"], args.concurrent
+        )
+
         for r in results:
             key = (r["name"], r["installed"])
             r["vulnerabilities"] = osv_vulns.get(key, [])
     else:
         for r in results:
             r["vulnerabilities"] = []
-            
+
     # Resolve transitive dependency parents
     for r in results:
         direct_parents = find_direct_parents(r["name"], parents, direct)
         r["required_by"] = sorted(list(direct_parents - {r["name"]}))
-            
+
     elapsed = time.time() - start_time
-    
+
     return results, pkg_data, elapsed
+
 
 # ==============================================================================
 # Gradle Scanning Logic
 # ==============================================================================
 
+
 def find_gradle_files(path):
     """Finds build.gradle, build.gradle.kts and lockfiles."""
     gradle_files = []
     lock_files = []
-    
+
     if os.path.exists(path):
         if os.path.isdir(path):
             for name in ("build.gradle", "build.gradle.kts"):
@@ -6469,8 +7484,9 @@ def find_gradle_files(path):
                 gradle_files.append(path)
             elif path.endswith(".lockfile"):
                 lock_files.append(path)
-                
+
     return gradle_files, lock_files
+
 
 def parse_libs_versions_toml(filepath):
     """Parses libs.versions.toml to extract version catalog declarations.
@@ -6480,11 +7496,11 @@ def parse_libs_versions_toml(filepath):
     dependencies = {}
     if not filepath or not os.path.exists(filepath):
         return dependencies
-        
+
     try:
         with open(filepath, "rb") as f:
             data = tomllib.load(f)
-            
+
         versions = {}
         raw_versions = data.get("versions", {})
         if isinstance(raw_versions, dict):
@@ -6498,14 +7514,14 @@ def parse_libs_versions_toml(filepath):
                             break
                     else:
                         versions[k] = "*"
-                        
+
         libraries = data.get("libraries", {})
         if isinstance(libraries, dict):
             for alias, val in libraries.items():
                 group = ""
                 name = ""
                 ver = "*"
-                
+
                 if isinstance(val, str):
                     parts = val.split(":")
                     if len(parts) >= 2:
@@ -6527,7 +7543,7 @@ def parse_libs_versions_toml(filepath):
                             group = g_val.strip()
                         if isinstance(n_val, str):
                             name = n_val.strip()
-                            
+
                     # Extract version
                     ver_val = val.get("version")
                     if isinstance(ver_val, str):
@@ -6542,83 +7558,92 @@ def parse_libs_versions_toml(filepath):
                                 if key in ver_val:
                                     ver = ver_val[key]
                                     break
-                                    
+
                     if ver == "*":
                         v_ref = val.get("versionRef")
                         if isinstance(v_ref, str):
                             ver = versions.get(v_ref, "*")
-                            
+
                 if group and name:
                     dependencies[f"{group}:{name}"] = ver if ver else "*"
-                    
+
     except Exception as e:
-        print(f"{COLOR_YELLOW}{ICON_WARN} Warning reading libs.versions.toml: {e}{COLOR_RESET}")
-        
+        print(
+            f"{COLOR_YELLOW}{ICON_WARN} Warning reading libs.versions.toml: {e}{COLOR_RESET}"
+        )
+
     return dependencies
+
 
 def parse_gradle_build(filepath):
     """Parses build.gradle / build.gradle.kts to extract direct dependencies."""
     dependencies = {}
     if not filepath or not os.path.exists(filepath):
         return dependencies
-        
+
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             content = f.read()
-            
+
         # Pattern 1: group:artifact:version in configuration calls
         for m in RE_GRADLE_CONFIG.finditer(content):
             group = m.group(1).strip()
             artifact = m.group(2).strip()
             version = m.group(3).strip()
             dependencies[f"{group}:{artifact}"] = version
-            
+
         # Pattern 2: group: "...", name: "...", version: "..."
         for m in RE_GRADLE_MAP1.finditer(content):
             group = m.group(1).strip()
             artifact = m.group(2).strip()
             version = m.group(3).strip()
             dependencies[f"{group}:{artifact}"] = version
-            
+
         # Pattern 3: group = "...", name = "...", version = "..."
         for m in RE_GRADLE_MAP2.finditer(content):
             group = m.group(1).strip()
             artifact = m.group(2).strip()
             version = m.group(3).strip()
             dependencies[f"{group}:{artifact}"] = version
-            
+
     except Exception as e:
-        print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Gradle build file: {e}{COLOR_RESET}")
-        
+        print(
+            f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Gradle build file: {e}{COLOR_RESET}"
+        )
+
     return dependencies
+
 
 def parse_gradle_lockfile(filepath):
     """Parses gradle .lockfile to extract resolved dependencies."""
     resolved = {}
     if not filepath or not os.path.exists(filepath):
         return resolved
-        
+
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line or line.startswith("#"):
                     continue
-                m = re.match(r'^([^:]+):([^:]+):([^=]+)=', line)
+                m = re.match(r"^([^:]+):([^:]+):([^=]+)=", line)
                 if m:
                     group = m.group(1).strip()
                     artifact = m.group(2).strip()
                     version = m.group(3).strip()
                     resolved[f"{group}:{artifact}"] = version
     except Exception as e:
-        print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Gradle lockfile: {e}{COLOR_RESET}")
-        
+        print(
+            f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Gradle lockfile: {e}{COLOR_RESET}"
+        )
+
     return resolved
+
 
 def run_gradle_checker(args):
     """Main orchestrator for Gradle dependency checker."""
     build_files, lock_files = find_gradle_files(args.path)
-    
+
     catalog_file = None
     if os.path.exists(args.path):
         if os.path.isdir(args.path):
@@ -6627,73 +7652,81 @@ def run_gradle_checker(args):
                 catalog_file = cand
         elif os.path.isfile(args.path) and args.path.endswith("libs.versions.toml"):
             catalog_file = args.path
-            
+
     if not build_files and not lock_files and not catalog_file:
-        print(f"{COLOR_RED}{ICON_ERROR} No build.gradle, build.gradle.kts, lockfiles or gradle/libs.versions.toml found in: {args.path}{COLOR_RESET}")
+        print(
+            f"{COLOR_RED}{ICON_ERROR} No build.gradle, build.gradle.kts, lockfiles or gradle/libs.versions.toml found in: {args.path}{COLOR_RESET}"
+        )
         return None, None, 0
-        
+
     print(f"{COLOR_GRAY}{ICON_INFO} Reading Gradle files...{COLOR_RESET}")
-    
+
     direct = {}
     if catalog_file:
-        print(f"{COLOR_GRAY}{ICON_INFO} Reading Gradle Version Catalog (libs.versions.toml)...{COLOR_RESET}")
+        print(
+            f"{COLOR_GRAY}{ICON_INFO} Reading Gradle Version Catalog (libs.versions.toml)...{COLOR_RESET}"
+        )
         direct.update(parse_libs_versions_toml(catalog_file))
-        
+
     for f in build_files:
         direct.update(parse_gradle_build(f))
-        
+
     resolved = {}
     for lf in lock_files:
         resolved.update(parse_gradle_lockfile(lf))
-        
+
     if not resolved:
         resolved = direct
-        
-    pkg_data = {
-        "all_direct": {name: name for name in direct},
-        "dependencies": resolved
-    }
-    
+
+    pkg_data = {"all_direct": {name: name for name in direct}, "dependencies": resolved}
+
     targets = []
     for name, version in resolved.items():
         if not args.all and name not in direct:
             continue
-        targets.append({
-            "name": name,
-            "declared": version,
-            "installed": [version] if version != "0.0.0" else []
-        })
-        
+        targets.append(
+            {
+                "name": name,
+                "declared": version,
+                "installed": [version] if version != "0.0.0" else [],
+            }
+        )
+
     if not targets:
-        print(f"{COLOR_YELLOW}{ICON_WARN} No Gradle packages identified to check.{COLOR_RESET}")
+        print(
+            f"{COLOR_YELLOW}{ICON_WARN} No Gradle packages identified to check.{COLOR_RESET}"
+        )
         return None, None, 0
-        
+
     start_time = time.time()
     # Reuses Maven Central checking logic
     results = check_all_maven_targets(targets, args.concurrent)
-    
+
     # Check vulnerabilities via OSV if requested
     if getattr(args, "vuls", False):
         tech_info = TECHNOLOGIES["gradle"]
-        osv_vulns = check_osv_vulnerabilities(targets, tech_info["osv_ecosystem"], args.concurrent)
-        
+        osv_vulns = check_osv_vulnerabilities(
+            targets, tech_info["osv_ecosystem"], args.concurrent
+        )
+
         for r in results:
             key = (r["name"], r["installed"])
             r["vulnerabilities"] = osv_vulns.get(key, [])
     else:
         for r in results:
             r["vulnerabilities"] = []
-            
+
     # Resolve transitive dependency parents
     for r in results:
         if r["name"] not in direct:
             r["required_by"] = ["transitive"]
         else:
             r["required_by"] = []
-            
+
     elapsed = time.time() - start_time
-    
+
     return results, pkg_data, elapsed
+
 
 def validate_configuration_drift(results):
     """
@@ -6702,29 +7735,48 @@ def validate_configuration_drift(results):
     """
     if not results:
         return
-        
+
     for r in results:
         declared = r.get("declared")
         installed = r.get("installed")
-        
+
         if not declared or not installed:
             continue
-        if str(declared).strip().lower() in ("n/a", "unknown", "", "transitive"):
+        if str(declared).strip().lower() in {"n/a", "unknown", "", "transitive"}:
             continue
-        if r.get("dep_type") == "Transitive" or (r.get("required_by") and not r.get("is_direct", False)):
+        if r.get("dep_type") == "Transitive" or (
+            r.get("required_by") and not r.get("is_direct", False)
+        ):
             continue
-        if str(installed).strip().lower() in ("n/a", "unknown", ""):
+        if str(installed).strip().lower() in {"n/a", "unknown", ""}:
             continue
-            
+
         decl_str = str(declared).strip()
         inst_str = str(installed).strip()
-        
+
         # Skip checking if declared constraint is a git URL, local path, workspace, patch, catalog reference, etc.
-        if (decl_str.startswith(("@", "git+", "git:", "http:", "https:", "ssh:", "file:", "workspace:", "patch:", "portal:", "link:", "catalog:")) 
-            or "github:" in decl_str.lower() 
-            or decl_str.startswith((".", "/"))):
+        if (
+            decl_str.startswith(
+                (
+                    "@",
+                    "git+",
+                    "git:",
+                    "http:",
+                    "https:",
+                    "ssh:",
+                    "file:",
+                    "workspace:",
+                    "patch:",
+                    "portal:",
+                    "link:",
+                    "catalog:",
+                )
+            )
+            or "github:" in decl_str.lower()
+            or decl_str.startswith((".", "/"))
+        ):
             continue
-            
+
         # Strip Yarn Berry npm: prefix from the declared constraint
         # e.g., npm:esbuild-wasm@^0.23.0 -> ^0.23.0
         if decl_str.startswith("npm:"):
@@ -6739,17 +7791,20 @@ def validate_configuration_drift(results):
                     decl_str = parts[1]
 
         # Ensure we can extract a valid semantic version from installed version
-        if parse_semver(inst_str) == (0, 0, 0, 0, 0, ''):
+        if parse_semver(inst_str) == (0, 0, 0, 0, 0, ""):
             continue
-            
+
         try:
             satisfied = check_semver_satisfies(inst_str, decl_str)
         except Exception:
             satisfied = True
-            
+
         if not satisfied:
             r["status"] = "error"
-            r["error"] = f"Configuration Drift: Installed version '{inst_str}' violates declared constraint '{decl_str}'"
+            r["error"] = (
+                f"Configuration Drift: Installed version '{inst_str}' violates declared constraint '{decl_str}'"
+            )
+
 
 # ==============================================================================
 # Output Formatting and Reporting
@@ -6762,19 +7817,19 @@ class TerminalTextFormatter:
     @staticmethod
     def get_char_width(char):
         """Returns visual terminal width of a character."""
-        if char in ("🚫", "🛡️", "🛡"):
+        if char in {"🚫", "🛡️", "🛡"}:
             return 2
         w = unicodedata.east_asian_width(char)
-        if w in ('W', 'F'):
+        if w in {"W", "F"}:
             return 2
-        if ord(char) > 0xffff:
+        if ord(char) > 0xFFFF:
             return 2
         return 1
 
     @staticmethod
     def visual_len(s):
         """Calculates visual terminal length of a string, ignoring ANSI codes."""
-        clean_s = re.sub(r'\033\[[0-9;]*[a-zA-Z]', '', s)
+        clean_s = re.sub(r"\033\[[0-9;]*[a-zA-Z]", "", s)
         return sum(TerminalTextFormatter.get_char_width(c) for c in clean_s)
 
     @staticmethod
@@ -6788,21 +7843,24 @@ class TerminalTextFormatter:
             return text + (" " * diff)
         elif align == "right":
             return (" " * diff) + text
-        else: # center
+        else:  # center
             left = diff // 2
             right = diff - left
             return (" " * left) + text + (" " * right)
 
-def print_results_table(results, pkg_data, show_all, vuls_enabled=False, no_show_console=False):
+
+def print_results_table(
+    results, pkg_data, show_all, vuls_enabled=False, no_show_console=False
+):
     """Draws a beautiful styled console report table with precise alignment."""
     if no_show_console:
         return
-        
+
     filtered_results = []
     for r in results:
         is_issue = (
-            r["status"] in ("major", "minor", "patch") 
-            or r["deprecated"] 
+            r["status"] in {"major", "minor", "patch"}
+            or r["deprecated"]
             or r["status"] == "error"
             or (vuls_enabled and r.get("vulnerabilities"))
             or r.get("missing_checksum")
@@ -6811,11 +7869,13 @@ def print_results_table(results, pkg_data, show_all, vuls_enabled=False, no_show
         )
         if show_all or is_issue:
             filtered_results.append(r)
-            
+
     if not filtered_results:
-        print(f"\n{COLOR_GREEN}{ICON_OK} All dependencies are up-to-date and secure!{COLOR_RESET}\n")
+        print(
+            f"\n{COLOR_GREEN}{ICON_OK} All dependencies are up-to-date and secure!{COLOR_RESET}\n"
+        )
         return
-        
+
     col_name = "Package"
     col_type = "Type"
     col_dec = "Declared"
@@ -6823,17 +7883,26 @@ def print_results_table(results, pkg_data, show_all, vuls_enabled=False, no_show
     col_latest = "Latest"
     col_status = "Status"
     col_vuls = "Vuls"
-    
+
     w_name = max(len(col_name), max(len(r["name"]) for r in filtered_results)) + 2
     w_type = 12
-    w_dec = max(len(col_dec), max(len(r["declared"] or "N/A") for r in filtered_results)) + 2
-    w_inst = max(len(col_inst), max(len(r["installed"] or "N/A") for r in filtered_results)) + 2
-    w_latest = max(len(col_latest), max(len(r["latest"] or "N/A") for r in filtered_results)) + 2
+    w_dec = (
+        max(len(col_dec), max(len(r["declared"] or "N/A") for r in filtered_results))
+        + 2
+    )
+    w_inst = (
+        max(len(col_inst), max(len(r["installed"] or "N/A") for r in filtered_results))
+        + 2
+    )
+    w_latest = (
+        max(len(col_latest), max(len(r["latest"] or "N/A") for r in filtered_results))
+        + 2
+    )
     w_status = 15
     w_vuls = 8
-    
+
     t = BORDER_CHARS
-    
+
     if vuls_enabled:
         border_top = f"{t['top_left']}{t['horizontal'] * w_name}{t['top_join']}{t['horizontal'] * w_type}{t['top_join']}{t['horizontal'] * w_dec}{t['top_join']}{t['horizontal'] * w_inst}{t['top_join']}{t['horizontal'] * w_latest}{t['top_join']}{t['horizontal'] * w_status}{t['top_join']}{t['horizontal'] * w_vuls}{t['top_right']}"
         border_mid = f"{t['mid_left']}{t['horizontal'] * w_name}{t['mid_join']}{t['horizontal'] * w_type}{t['mid_join']}{t['horizontal'] * w_dec}{t['mid_join']}{t['horizontal'] * w_inst}{t['mid_join']}{t['horizontal'] * w_latest}{t['mid_join']}{t['horizontal'] * w_status}{t['mid_join']}{t['horizontal'] * w_vuls}{t['mid_right']}"
@@ -6842,9 +7911,9 @@ def print_results_table(results, pkg_data, show_all, vuls_enabled=False, no_show
         border_top = f"{t['top_left']}{t['horizontal'] * w_name}{t['top_join']}{t['horizontal'] * w_type}{t['top_join']}{t['horizontal'] * w_dec}{t['top_join']}{t['horizontal'] * w_inst}{t['top_join']}{t['horizontal'] * w_latest}{t['top_join']}{t['horizontal'] * w_status}{t['top_right']}"
         border_mid = f"{t['mid_left']}{t['horizontal'] * w_name}{t['mid_join']}{t['horizontal'] * w_type}{t['mid_join']}{t['horizontal'] * w_dec}{t['mid_join']}{t['horizontal'] * w_inst}{t['mid_join']}{t['horizontal'] * w_latest}{t['mid_join']}{t['horizontal'] * w_status}{t['mid_right']}"
         border_bot = f"{t['bot_left']}{t['horizontal'] * w_name}{t['bot_join']}{t['horizontal'] * w_type}{t['bot_join']}{t['horizontal'] * w_dec}{t['bot_join']}{t['horizontal'] * w_inst}{t['bot_join']}{t['horizontal'] * w_latest}{t['bot_join']}{t['horizontal'] * w_status}{t['bot_right']}"
-        
+
     print(border_top)
-    
+
     hdr_name = TerminalTextFormatter.pad_string(f" {col_name}", w_name, align="left")
     hdr_type = TerminalTextFormatter.pad_string(col_type, w_type, align="center")
     hdr_dec = TerminalTextFormatter.pad_string(col_dec, w_dec, align="center")
@@ -6852,14 +7921,18 @@ def print_results_table(results, pkg_data, show_all, vuls_enabled=False, no_show
     hdr_latest = TerminalTextFormatter.pad_string(col_latest, w_latest, align="center")
     hdr_status = TerminalTextFormatter.pad_string(col_status, w_status, align="center")
     hdr_vuls = TerminalTextFormatter.pad_string(col_vuls, w_vuls, align="center")
-    
+
     if vuls_enabled:
-        print(f"{t['vertical']}{hdr_name}{t['vertical']}{hdr_type}{t['vertical']}{hdr_dec}{t['vertical']}{hdr_inst}{t['vertical']}{hdr_latest}{t['vertical']}{hdr_status}{t['vertical']}{hdr_vuls}{t['vertical']}")
+        print(
+            f"{t['vertical']}{hdr_name}{t['vertical']}{hdr_type}{t['vertical']}{hdr_dec}{t['vertical']}{hdr_inst}{t['vertical']}{hdr_latest}{t['vertical']}{hdr_status}{t['vertical']}{hdr_vuls}{t['vertical']}"
+        )
     else:
-        print(f"{t['vertical']}{hdr_name}{t['vertical']}{hdr_type}{t['vertical']}{hdr_dec}{t['vertical']}{hdr_inst}{t['vertical']}{hdr_latest}{t['vertical']}{hdr_status}{t['vertical']}")
-        
+        print(
+            f"{t['vertical']}{hdr_name}{t['vertical']}{hdr_type}{t['vertical']}{hdr_dec}{t['vertical']}{hdr_inst}{t['vertical']}{hdr_latest}{t['vertical']}{hdr_status}{t['vertical']}"
+        )
+
     print(border_mid)
-    
+
     for r in filtered_results:
         dep_type = r.get("dep_type")
         if not dep_type:
@@ -6873,11 +7946,11 @@ def print_results_table(results, pkg_data, show_all, vuls_enabled=False, no_show
                     dep_type = "Dev"
                 elif r["name"] in pkg_data.get("dependencies", {}):
                     dep_type = "Direct"
-                
+
         status_str = r["status"]
         color = COLOR_RESET
         icon = ""
-        
+
         if status_str == "up-to-date":
             color = COLOR_GREEN
             status_display = "Up-to-date"
@@ -6910,69 +7983,105 @@ def print_results_table(results, pkg_data, show_all, vuls_enabled=False, no_show
             color = COLOR_RED
             status_display = "Patch/Major"
             icon = ICON_ERROR
-            
+
         if r["deprecated"]:
             status_display = "Deprecated"
             color = COLOR_MAGENTA
             icon = ICON_DEPRECATED
-            
+
         styled_status = f"{color}{icon} {status_display}{COLOR_RESET}"
-        
-        name_cell = TerminalTextFormatter.pad_string(f" {r['name']}", w_name, align="left")
+
+        name_cell = TerminalTextFormatter.pad_string(
+            f" {r['name']}", w_name, align="left"
+        )
         type_cell = TerminalTextFormatter.pad_string(dep_type, w_type, align="center")
-        dec_cell = TerminalTextFormatter.pad_string(r['declared'] or 'N/A', w_dec, align="center")
-        inst_cell = TerminalTextFormatter.pad_string(r['installed'] or 'N/A', w_inst, align="center")
-        latest_cell = TerminalTextFormatter.pad_string(r['latest'] or 'N/A', w_latest, align="center")
-        status_cell = TerminalTextFormatter.pad_string(styled_status, w_status, align="center")
-        
+        dec_cell = TerminalTextFormatter.pad_string(
+            r["declared"] or "N/A", w_dec, align="center"
+        )
+        inst_cell = TerminalTextFormatter.pad_string(
+            r["installed"] or "N/A", w_inst, align="center"
+        )
+        latest_cell = TerminalTextFormatter.pad_string(
+            r["latest"] or "N/A", w_latest, align="center"
+        )
+        status_cell = TerminalTextFormatter.pad_string(
+            styled_status, w_status, align="center"
+        )
+
         if vuls_enabled:
             vuls_list = r.get("vulnerabilities", [])
             vuls_count = len(vuls_list)
             if vuls_count > 0:
                 styled_vuls = f"{COLOR_RED}{COLOR_BOLD}{vuls_count}{COLOR_RESET}"
             else:
-                styled_vuls = f"{COLOR_GREEN}{ICON_OK}{COLOR_RESET}" if ICON_OK == "✔" else f"{COLOR_GREEN}0{COLOR_RESET}"
-            vuls_cell = TerminalTextFormatter.pad_string(styled_vuls, w_vuls, align="center")
-            
-            print(f"{t['vertical']}{name_cell}{t['vertical']}{type_cell}{t['vertical']}{dec_cell}{t['vertical']}{inst_cell}{t['vertical']}{latest_cell}{t['vertical']}{status_cell}{t['vertical']}{vuls_cell}{t['vertical']}")
+                styled_vuls = (
+                    f"{COLOR_GREEN}{ICON_OK}{COLOR_RESET}"
+                    if ICON_OK == "✔"
+                    else f"{COLOR_GREEN}0{COLOR_RESET}"
+                )
+            vuls_cell = TerminalTextFormatter.pad_string(
+                styled_vuls, w_vuls, align="center"
+            )
+
+            print(
+                f"{t['vertical']}{name_cell}{t['vertical']}{type_cell}{t['vertical']}{dec_cell}{t['vertical']}{inst_cell}{t['vertical']}{latest_cell}{t['vertical']}{status_cell}{t['vertical']}{vuls_cell}{t['vertical']}"
+            )
         else:
-            print(f"{t['vertical']}{name_cell}{t['vertical']}{type_cell}{t['vertical']}{dec_cell}{t['vertical']}{inst_cell}{t['vertical']}{latest_cell}{t['vertical']}{status_cell}{t['vertical']}")
-        
+            print(
+                f"{t['vertical']}{name_cell}{t['vertical']}{type_cell}{t['vertical']}{dec_cell}{t['vertical']}{inst_cell}{t['vertical']}{latest_cell}{t['vertical']}{status_cell}{t['vertical']}"
+            )
+
     print(border_bot)
-    
+
     # Print warnings & errors section
     notes_to_print = []
     for r in filtered_results:
-        parent_suffix = f" (via {', '.join(r['required_by'])})" if r.get("required_by") else ""
+        parent_suffix = (
+            f" (via {', '.join(r['required_by'])})" if r.get("required_by") else ""
+        )
         if r["deprecated"]:
-            notes_to_print.append(f"  {COLOR_MAGENTA}{ICON_DEPRECATED} {r['name']}@{r['installed']}{parent_suffix}: {r['deprecated']}{COLOR_RESET}")
+            notes_to_print.append(
+                f"  {COLOR_MAGENTA}{ICON_DEPRECATED} {r['name']}@{r['installed']}{parent_suffix}: {r['deprecated']}{COLOR_RESET}"
+            )
         elif r["status"] == "error" and r["error"]:
-            notes_to_print.append(f"  {COLOR_RED}{ICON_ERROR} {r['name']}{parent_suffix}: {r['error']}{COLOR_RESET}")
-            
+            notes_to_print.append(
+                f"  {COLOR_RED}{ICON_ERROR} {r['name']}{parent_suffix}: {r['error']}{COLOR_RESET}"
+            )
+
         if r.get("missing_checksum"):
-            notes_to_print.append(f"  {COLOR_YELLOW}{ICON_WARN} {r['name']}@{r['installed']}{parent_suffix}: Missing integrity checksum in lockfile{COLOR_RESET}")
+            notes_to_print.append(
+                f"  {COLOR_YELLOW}{ICON_WARN} {r['name']}@{r['installed']}{parent_suffix}: Missing integrity checksum in lockfile{COLOR_RESET}"
+            )
         elif r.get("weak_checksum"):
-            notes_to_print.append(f"  {COLOR_YELLOW}{ICON_WARN} {r['name']}@{r['installed']}{parent_suffix}: Weak checksum (SHA-1) in lockfile{COLOR_RESET}")
-            
+            notes_to_print.append(
+                f"  {COLOR_YELLOW}{ICON_WARN} {r['name']}@{r['installed']}{parent_suffix}: Weak checksum (SHA-1) in lockfile{COLOR_RESET}"
+            )
+
         if r.get("mismatch_checksum"):
-            notes_to_print.append(f"  {COLOR_RED}{ICON_ERROR} {r['name']}@{r['installed']}{parent_suffix}: INTEGRITY MISMATCH! Lockfile checksum does not match official registry checksum.{COLOR_RESET}")
-            
+            notes_to_print.append(
+                f"  {COLOR_RED}{ICON_ERROR} {r['name']}@{r['installed']}{parent_suffix}: INTEGRITY MISMATCH! Lockfile checksum does not match official registry checksum.{COLOR_RESET}"
+            )
+
     if notes_to_print:
         print(f"\n{COLOR_BOLD}Notes & Warnings:{COLOR_RESET}")
         for note in notes_to_print:
             print(note)
-            
+
     # Print Major Update Diffs section
     major_diffs_to_print = []
     for r in filtered_results:
-        if r["status"] in ("major", "minor-major", "patch-major") and r.get("compare_url"):
-            major_diffs_to_print.append(f"  {COLOR_BOLD}{r['name']}{COLOR_RESET}: {COLOR_CYAN}{r['compare_url']}{COLOR_RESET}")
-            
+        if r["status"] in {"major", "minor-major", "patch-major"} and r.get(
+            "compare_url"
+        ):
+            major_diffs_to_print.append(
+                f"  {COLOR_BOLD}{r['name']}{COLOR_RESET}: {COLOR_CYAN}{r['compare_url']}{COLOR_RESET}"
+            )
+
     if major_diffs_to_print:
         print(f"\n{COLOR_BOLD}Major Update Diffs:{COLOR_RESET}")
         for diff_note in major_diffs_to_print:
             print(diff_note)
-            
+
     # Print security vulnerabilities details section
     if vuls_enabled:
         vuls_to_print = []
@@ -6983,34 +8092,62 @@ def print_results_table(results, pkg_data, show_all, vuls_enabled=False, no_show
             "high": 3,
             "medium": 2,
             "low": 1,
-            "unknown": 0
+            "unknown": 0,
         }
         for r in filtered_results:
             vuls_list = r.get("vulnerabilities", [])
             if vuls_list:
-                sorted_v = sorted(vuls_list, key=lambda v: severity_order.get(get_severity_level(v), 0), reverse=True)
-                vuls_to_print.append((r["name"], r["installed"] if r["installed"] else r["declared"], sorted_v, r.get("required_by", [])))
+                sorted_v = sorted(
+                    vuls_list,
+                    key=lambda v: severity_order.get(get_severity_level(v), 0),
+                    reverse=True,
+                )
+                vuls_to_print.append(
+                    (
+                        r["name"],
+                        r["installed"] if r["installed"] else r["declared"],
+                        sorted_v,
+                        r.get("required_by", []),
+                    )
+                )
             suppressed_list = r.get("suppressed_vulnerabilities", [])
             if suppressed_list:
-                suppressed_to_print.append((r["name"], r["installed"] if r["installed"] else r["declared"], suppressed_list, r.get("required_by", [])))
-                
+                suppressed_to_print.append(
+                    (
+                        r["name"],
+                        r["installed"] if r["installed"] else r["declared"],
+                        suppressed_list,
+                        r.get("required_by", []),
+                    )
+                )
+
         if vuls_to_print:
             # Sort package groups by their maximum vulnerability severity descending, and alphabetically by package name ascending
             vuls_to_print.sort(
                 key=lambda x: (
-                    -max(severity_order.get(get_severity_level(v), 0) for v in x[2]) if x[2] else 1,
-                    x[0].lower()
+                    (
+                        -max(severity_order.get(get_severity_level(v), 0) for v in x[2])
+                        if x[2]
+                        else 1
+                    ),
+                    x[0].lower(),
                 )
             )
-            print(f"\n{COLOR_BOLD}{COLOR_RED}{ICON_SHIELD} Security Vulnerabilities Details:{COLOR_RESET}")
+            print(
+                f"\n{COLOR_BOLD}{COLOR_RED}{ICON_SHIELD} Security Vulnerabilities Details:{COLOR_RESET}"
+            )
             for name, ver, v_list, required_by in vuls_to_print:
-                parent_suffix = f" (via {', '.join(required_by)})" if required_by else ""
-                print(f"  {COLOR_BOLD}{name}@{ver}{parent_suffix}{COLOR_RESET} ({len(v_list)} vulnerabilities found):")
+                parent_suffix = (
+                    f" (via {', '.join(required_by)})" if required_by else ""
+                )
+                print(
+                    f"  {COLOR_BOLD}{name}@{ver}{parent_suffix}{COLOR_RESET} ({len(v_list)} vulnerabilities found):"
+                )
                 for vuln in v_list:
                     vid = vuln["id"]
                     severity = vuln["severity"]
                     summary = vuln["summary"]
-                    
+
                     # Highlight severity
                     sev_color = COLOR_GRAY
                     level = get_severity_level(vuln)
@@ -7022,20 +8159,33 @@ def print_results_table(results, pkg_data, show_all, vuls_enabled=False, no_show
                         sev_color = COLOR_YELLOW
                     elif level == "low":
                         sev_color = COLOR_CYAN
-                        
-                    display_severity = "MALICIOUS CODE" if level == "malicious" else severity
-                    print(f"    - {COLOR_BOLD}{vid}{COLOR_RESET} [{sev_color}{display_severity}{COLOR_RESET}]: {summary}")
-                    
+
+                    display_severity = (
+                        "MALICIOUS CODE" if level == "malicious" else severity
+                    )
+                    print(
+                        f"    - {COLOR_BOLD}{vid}{COLOR_RESET} [{sev_color}{display_severity}{COLOR_RESET}]: {summary}"
+                    )
+
         if suppressed_to_print:
-            print(f"\n{COLOR_BOLD}{COLOR_GRAY}{ICON_INFO} Suppressed Vulnerabilities (Ignored):{COLOR_RESET}")
+            print(
+                f"\n{COLOR_BOLD}{COLOR_GRAY}{ICON_INFO} Suppressed Vulnerabilities (Ignored):{COLOR_RESET}"
+            )
             for name, ver, s_list, required_by in suppressed_to_print:
-                parent_suffix = f" (via {', '.join(required_by)})" if required_by else ""
-                print(f"  {COLOR_BOLD}{COLOR_GRAY}{name}@{ver}{parent_suffix}{COLOR_RESET} ({len(s_list)} suppressed):")
+                parent_suffix = (
+                    f" (via {', '.join(required_by)})" if required_by else ""
+                )
+                print(
+                    f"  {COLOR_BOLD}{COLOR_GRAY}{name}@{ver}{parent_suffix}{COLOR_RESET} ({len(s_list)} suppressed):"
+                )
                 for vuln in s_list:
                     vid = vuln["id"]
                     reason = vuln.get("suppressed_reason", "No reason provided")
                     summary = vuln["summary"]
-                    print(f"    - {COLOR_BOLD}{COLOR_GRAY}{vid}{COLOR_RESET}: {summary} {COLOR_GRAY}(Reason: {reason}){COLOR_RESET}")
+                    print(
+                        f"    - {COLOR_BOLD}{COLOR_GRAY}{vid}{COLOR_RESET}: {summary} {COLOR_GRAY}(Reason: {reason}){COLOR_RESET}"
+                    )
+
 
 def print_summary(results, elapsed_time, vuls_enabled=False, projects_count=None):
     """Prints checks run count and categorization breakdown."""
@@ -7043,46 +8193,69 @@ def print_summary(results, elapsed_time, vuls_enabled=False, projects_count=None
     up_to_date = sum(1 for r in results if r["status"] in ("up-to-date", "local"))
     patch = sum(1 for r in results if r["status"] in ("patch", "patch-major"))
     minor = sum(1 for r in results if r["status"] in ("minor", "minor-major"))
-    major = sum(1 for r in results if r["status"] in ("major", "minor-major", "patch-major"))
+    major = sum(
+        1 for r in results if r["status"] in ("major", "minor-major", "patch-major")
+    )
     deprecated = sum(1 for r in results if r["deprecated"])
     errors = sum(1 for r in results if r["status"] == "error")
-    
-    outdated_total = sum(1 for r in results if r["status"] in ("patch", "minor", "major", "minor-major", "patch-major"))
-    
+
+    outdated_total = sum(
+        1
+        for r in results
+        if r["status"] in ("patch", "minor", "major", "minor-major", "patch-major")
+    )
+
     print(f"\n{COLOR_BOLD}{COLOR_CYAN}Summary Report:{COLOR_RESET}")
     if projects_count is not None:
         print(f"  Projects:    {COLOR_BOLD}{projects_count}{COLOR_RESET} scanned")
     print(f"  Checked:     {total} packages in {elapsed_time:.2f}s")
     print(f"  Up-to-date:  {COLOR_GREEN}{up_to_date}{COLOR_RESET}")
-    print(f"  Outdated:    {COLOR_YELLOW}{outdated_total}{COLOR_RESET} (Patch: {COLOR_CYAN}{patch}{COLOR_RESET}, Minor: {COLOR_YELLOW}{minor}{COLOR_RESET}, Major: {COLOR_RED}{major}{COLOR_RESET})")
+    print(
+        f"  Outdated:    {COLOR_YELLOW}{outdated_total}{COLOR_RESET} (Patch: {COLOR_CYAN}{patch}{COLOR_RESET}, Minor: {COLOR_YELLOW}{minor}{COLOR_RESET}, Major: {COLOR_RED}{major}{COLOR_RESET})"
+    )
     if deprecated > 0:
         print(f"  Deprecated:  {COLOR_MAGENTA}{deprecated}{COLOR_RESET}")
     if errors > 0:
         print(f"  Errors:      {COLOR_RED}{errors}{COLOR_RESET}")
-        
+
     if vuls_enabled:
         total_vulns = sum(len(r.get("vulnerabilities", [])) for r in results)
         vuln_pkg_count = sum(1 for r in results if r.get("vulnerabilities"))
-        suppressed_vulns = sum(len(r.get("suppressed_vulnerabilities", [])) for r in results)
-        malicious_count = sum(1 for r in results for v in r.get("vulnerabilities", []) if get_severity_level(v) == "malicious")
+        suppressed_vulns = sum(
+            len(r.get("suppressed_vulnerabilities", [])) for r in results
+        )
+        malicious_count = sum(
+            1
+            for r in results
+            for v in r.get("vulnerabilities", [])
+            if get_severity_level(v) == "malicious"
+        )
         if total_vulns > 0:
-            print(f"  Sec Vulnerabilities: {COLOR_RED}{COLOR_BOLD}{total_vulns}{COLOR_RESET} (in {vuln_pkg_count} packages)")
+            print(
+                f"  Sec Vulnerabilities: {COLOR_RED}{COLOR_BOLD}{total_vulns}{COLOR_RESET} (in {vuln_pkg_count} packages)"
+            )
         else:
             print(f"  Sec Vulnerabilities: {COLOR_GREEN}0{COLOR_RESET}")
         if malicious_count > 0:
-            print(f"  Malicious Code:      {COLOR_RED}{COLOR_BOLD}{malicious_count}{COLOR_RESET}")
+            print(
+                f"  Malicious Code:      {COLOR_RED}{COLOR_BOLD}{malicious_count}{COLOR_RESET}"
+            )
         if suppressed_vulns > 0:
             print(f"  Suppressed Alerts:   {COLOR_GRAY}{suppressed_vulns}{COLOR_RESET}")
     print()
+
 
 def export_json_report(results, filepath):
     """Exports results as raw JSON data."""
     try:
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(results, f, indent=2)
-        print(f"{COLOR_GREEN}{ICON_OK} JSON report successfully exported to {filepath}{COLOR_RESET}")
+        print(
+            f"{COLOR_GREEN}{ICON_OK} JSON report successfully exported to {filepath}{COLOR_RESET}"
+        )
     except Exception as e:
         print(f"{COLOR_RED}{ICON_ERROR} Failed to export JSON report: {e}{COLOR_RESET}")
+
 
 def generate_sarif_run(results):
     """Generates a SARIF run object from results."""
@@ -7095,15 +8268,15 @@ def generate_sarif_run(results):
                 "name": "Kevlar CheckDeps",
                 "version": VERSION,
                 "informationUri": "https://kevlar-checkdeps.dev",
-                "rules": []
+                "rules": [],
             }
         },
-        "results": []
+        "results": [],
     }
-    
+
     sarif_results = run["results"]
     rules_map = {}
-    
+
     for r in results:
         name = r.get("name")
         installed = r.get("installed")
@@ -7112,16 +8285,16 @@ def generate_sarif_run(results):
         deprecated = r.get("deprecated")
         tech = r.get("technology")
         error_msg = r.get("error")
-        
+
         # Determine manifest file path and line number
         manifest_path = None
         line_number = 1
-        
+
         rem = r.get("remediation")
         if rem and isinstance(rem, dict):
             manifest_path = rem.get("manifest_path")
             line_number = rem.get("line_number") or 1
-            
+
         if not manifest_path:
             project_path = r.get("project_path") or "."
             if tech:
@@ -7132,20 +8305,22 @@ def generate_sarif_run(results):
                         if path not in manifest_lines_cache:
                             if os.path.exists(path):
                                 try:
-                                    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                                    with open(
+                                        path, "r", encoding="utf-8", errors="ignore"
+                                    ) as f:
                                         manifest_lines_cache[path] = f.readlines()
                                 except Exception:
                                     manifest_lines_cache[path] = []
                             else:
                                 manifest_lines_cache[path] = []
-                        
+
                         lines = manifest_lines_cache[path]
                         best_score = -1
                         for idx, line in enumerate(lines):
                             if match_line_for_dependency(line, name, tech):
                                 score = 1
                                 if declared:
-                                    ver_digits = re.search(r'\d+\.\d+', str(declared))
+                                    ver_digits = re.search(r"\d+\.\d+", str(declared))
                                     if ver_digits and ver_digits.group(0) in line:
                                         score = 2
                                     elif str(declared).strip() in line:
@@ -7161,7 +8336,7 @@ def generate_sarif_run(results):
                             break
                     if not manifest_path:
                         manifest_path = manifest_files[0]
-        
+
         # Standardize relative path for URI field (using forward slashes)
         rel_uri = "unknown_manifest"
         if manifest_path:
@@ -7169,23 +8344,18 @@ def generate_sarif_run(results):
                 rel_uri = os.path.relpath(manifest_path).replace("\\", "/")
             except Exception:
                 rel_uri = str(manifest_path).replace("\\", "/")
-            
+
         # Helper to create locations array
         def make_locations(uri, line):
             return [
                 {
                     "physicalLocation": {
-                        "artifactLocation": {
-                            "uri": uri
-                        },
-                        "region": {
-                            "startLine": line,
-                            "startColumn": 1
-                        }
+                        "artifactLocation": {"uri": uri},
+                        "region": {"startLine": line, "startColumn": 1},
                     }
                 }
             ]
-            
+
         # 1. Map Vulnerabilities
         vulns = r.get("vulnerabilities", [])
         for vuln in vulns:
@@ -7193,139 +8363,138 @@ def generate_sarif_run(results):
             summary = vuln.get("summary") or "Security vulnerability detected"
             details = vuln.get("details") or ""
             severity = get_severity_level(vuln)
-            
+
             # Severity level mapping for SARIF:
             # critical/high -> error, medium -> warning, low/unknown -> note
-            if severity in ("malicious", "critical", "high"):
+            if severity in {"malicious", "critical", "high"}:
                 sarif_level = "error"
             elif severity == "medium":
                 sarif_level = "warning"
             else:
                 sarif_level = "note"
-                
+
             msg_text = f"Security Vulnerability: package '{name}' (version {installed}) has vulnerability {vuln_id}. Summary: {summary}"
             if details:
                 msg_text += f"\nDetails: {details}"
-                
-            sarif_results.append({
-                "ruleId": vuln_id,
-                "message": {
-                    "text": msg_text
-                },
-                "level": sarif_level,
-                "locations": make_locations(rel_uri, line_number),
-                "properties": {
-                    "packageName": name,
-                    "installedVersion": installed,
-                    "declaredConstraint": declared,
-                    "technology": tech,
-                    "vulnerabilityDetails": vuln
+
+            sarif_results.append(
+                {
+                    "ruleId": vuln_id,
+                    "message": {"text": msg_text},
+                    "level": sarif_level,
+                    "locations": make_locations(rel_uri, line_number),
+                    "properties": {
+                        "packageName": name,
+                        "installedVersion": installed,
+                        "declaredConstraint": declared,
+                        "technology": tech,
+                        "vulnerabilityDetails": vuln,
+                    },
                 }
-            })
-            
+            )
+
             # Track in tool rules
             if vuln_id not in rules_map:
                 rules_map[vuln_id] = {
                     "id": vuln_id,
-                    "shortDescription": {
-                        "text": f"Vulnerability {vuln_id} in {name}"
-                    }
+                    "shortDescription": {"text": f"Vulnerability {vuln_id} in {name}"},
                 }
-                
+
         # 2. Map Configuration Drift (status == "error" and error starts with "Configuration Drift")
         is_config_drift = False
-        if status == "error" and error_msg and error_msg.startswith("Configuration Drift"):
+        if (
+            status == "error"
+            and error_msg
+            and error_msg.startswith("Configuration Drift")
+        ):
             is_config_drift = True
             rule_id = "KEVLAR-CONFIG-DRIFT"
-            sarif_results.append({
-                "ruleId": rule_id,
-                "message": {
-                    "text": error_msg
-                },
-                "level": "error",
-                "locations": make_locations(rel_uri, line_number),
-                "properties": {
-                    "packageName": name,
-                    "installedVersion": installed,
-                    "declaredConstraint": declared,
-                    "technology": tech
+            sarif_results.append(
+                {
+                    "ruleId": rule_id,
+                    "message": {"text": error_msg},
+                    "level": "error",
+                    "locations": make_locations(rel_uri, line_number),
+                    "properties": {
+                        "packageName": name,
+                        "installedVersion": installed,
+                        "declaredConstraint": declared,
+                        "technology": tech,
+                    },
                 }
-            })
+            )
             if rule_id not in rules_map:
                 rules_map[rule_id] = {
                     "id": rule_id,
                     "shortDescription": {
                         "text": "Installed version of dependency violates declared constraint (Configuration Drift)"
-                    }
+                    },
                 }
-                
-        # 3. Map Outdated Dependency (status in ("major", "minor", "patch") and not is_config_drift)
-        if status in ("major", "minor", "patch") and not is_config_drift:
+
+        # 3. Map Outdated Dependency (status in {"major", "minor", "patch"} and not is_config_drift)
+        if status in {"major", "minor", "patch"} and not is_config_drift:
             rule_id = "KEVLAR-OUTDATED-DEPENDENCY"
             latest = r.get("latest") or "unknown"
-            
+
             if status == "major":
                 sarif_level = "error"
             elif status == "minor":
                 sarif_level = "warning"
             else:
                 sarif_level = "note"
-                
+
             msg_text = f"Outdated dependency: package '{name}' (version {installed}) is behind latest version '{latest}' ({status} update available)."
-            
-            sarif_results.append({
-                "ruleId": rule_id,
-                "message": {
-                    "text": msg_text
-                },
-                "level": sarif_level,
-                "locations": make_locations(rel_uri, line_number),
-                "properties": {
-                    "packageName": name,
-                    "installedVersion": installed,
-                    "latestVersion": latest,
-                    "declaredConstraint": declared,
-                    "technology": tech,
-                    "updateType": status
+
+            sarif_results.append(
+                {
+                    "ruleId": rule_id,
+                    "message": {"text": msg_text},
+                    "level": sarif_level,
+                    "locations": make_locations(rel_uri, line_number),
+                    "properties": {
+                        "packageName": name,
+                        "installedVersion": installed,
+                        "latestVersion": latest,
+                        "declaredConstraint": declared,
+                        "technology": tech,
+                        "updateType": status,
+                    },
                 }
-            })
+            )
             if rule_id not in rules_map:
                 rules_map[rule_id] = {
                     "id": rule_id,
-                    "shortDescription": {
-                        "text": "Package version is outdated"
-                    }
+                    "shortDescription": {"text": "Package version is outdated"},
                 }
-                
+
         # 4. Map Deprecation
         if deprecated:
             rule_id = "KEVLAR-DEPRECATED-PACKAGE"
             dep_msg = str(deprecated)
-            
-            sarif_results.append({
-                "ruleId": rule_id,
-                "message": {
-                    "text": f"Deprecated package '{name}': {dep_msg}"
-                },
-                "level": "warning",
-                "locations": make_locations(rel_uri, line_number),
-                "properties": {
-                    "packageName": name,
-                    "installedVersion": installed,
-                    "technology": tech
+
+            sarif_results.append(
+                {
+                    "ruleId": rule_id,
+                    "message": {"text": f"Deprecated package '{name}': {dep_msg}"},
+                    "level": "warning",
+                    "locations": make_locations(rel_uri, line_number),
+                    "properties": {
+                        "packageName": name,
+                        "installedVersion": installed,
+                        "technology": tech,
+                    },
                 }
-            })
+            )
             if rule_id not in rules_map:
                 rules_map[rule_id] = {
                     "id": rule_id,
-                    "shortDescription": {
-                        "text": "Package is deprecated"
-                    }
+                    "shortDescription": {"text": "Package is deprecated"},
                 }
 
     # Set rules
     run["tool"]["driver"]["rules"] = list(rules_map.values())
     return run
+
 
 def export_sarif_report(results, filepath):
     """Exports results as a SARIF v2.1.0 JSON document."""
@@ -7334,59 +8503,87 @@ def export_sarif_report(results, filepath):
         sarif_log = {
             "$schema": "https://schemastore.org/json/schema/sarif-2.1.0-rtm.5.json",
             "version": "2.1.0",
-            "runs": [run]
+            "runs": [run],
         }
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(sarif_log, f, indent=2)
-        print(f"{COLOR_GREEN}{ICON_OK} SARIF report successfully exported to {filepath}{COLOR_RESET}")
+        print(
+            f"{COLOR_GREEN}{ICON_OK} SARIF report successfully exported to {filepath}{COLOR_RESET}"
+        )
     except Exception as e:
-        print(f"{COLOR_RED}{ICON_ERROR} Failed to export SARIF report: {e}{COLOR_RESET}")
+        print(
+            f"{COLOR_RED}{ICON_ERROR} Failed to export SARIF report: {e}{COLOR_RESET}"
+        )
+
 
 def export_markdown_report(results, pkg_data, filepath, vuls_enabled=False):
     """Exports results as a clean Markdown document."""
     try:
         with open(filepath, "w", encoding="utf-8") as f:
             f.write("# Dependency Status Report\n")
-            f.write("[GitHub Repository](https://github.com/brunoevn/kevlar-checkdeps)\n\n")
+            f.write(
+                "[GitHub Repository](https://github.com/brunoevn/kevlar-checkdeps)\n\n"
+            )
             f.write(f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            
+
             # Write summary
             total = len(results)
-            up_to_date = sum(1 for r in results if r["status"] in ("up-to-date", "local"))
+            up_to_date = sum(
+                1 for r in results if r["status"] in ("up-to-date", "local")
+            )
             patch = sum(1 for r in results if r["status"] in ("patch", "patch-major"))
             minor = sum(1 for r in results if r["status"] in ("minor", "minor-major"))
-            major = sum(1 for r in results if r["status"] in ("major", "minor-major", "patch-major"))
+            major = sum(
+                1
+                for r in results
+                if r["status"] in ("major", "minor-major", "patch-major")
+            )
             deprecated = sum(1 for r in results if r["deprecated"])
             errors = sum(1 for r in results if r["status"] == "error")
-            outdated_total = sum(1 for r in results if r["status"] in ("patch", "minor", "major", "minor-major", "patch-major"))
-            
+            outdated_total = sum(
+                1
+                for r in results
+                if r["status"]
+                in ("patch", "minor", "major", "minor-major", "patch-major")
+            )
+
             f.write("## Summary\n\n")
             f.write(f"- **Total Checked**: {total}\n")
             f.write(f"- **Up-to-date**: {up_to_date}\n")
-            f.write(f"- **Outdated**: {outdated_total} (Patch: {patch}, Minor: {minor}, Major: {major})\n")
+            f.write(
+                f"- **Outdated**: {outdated_total} (Patch: {patch}, Minor: {minor}, Major: {major})\n"
+            )
             if deprecated:
                 f.write(f"- **Deprecated**: {deprecated}\n")
             if errors:
                 f.write(f"- **Errors**: {errors}\n")
-                
+
             if vuls_enabled:
                 total_vulns = sum(len(r.get("vulnerabilities", [])) for r in results)
                 vuln_pkg_count = sum(1 for r in results if r.get("vulnerabilities"))
-                suppressed_vulns = sum(len(r.get("suppressed_vulnerabilities", [])) for r in results)
-                f.write(f"- **Security Vulnerabilities**: {total_vulns} found in {vuln_pkg_count} packages\n")
+                suppressed_vulns = sum(
+                    len(r.get("suppressed_vulnerabilities", [])) for r in results
+                )
+                f.write(
+                    f"- **Security Vulnerabilities**: {total_vulns} found in {vuln_pkg_count} packages\n"
+                )
                 if suppressed_vulns > 0:
                     f.write(f"- **Suppressed Alerts**: {suppressed_vulns}\n")
             f.write("\n")
-            
+
             # Write table
             f.write("## Dependency Details\n\n")
             if vuls_enabled:
-                f.write("| Package | Type | Declared | Installed | Latest | Status | Vuls | Note |\n")
+                f.write(
+                    "| Package | Type | Declared | Installed | Latest | Status | Vuls | Note |\n"
+                )
                 f.write("| --- | --- | --- | --- | --- | --- | --- | --- |\n")
             else:
-                f.write("| Package | Type | Declared | Installed | Latest | Status | Note |\n")
+                f.write(
+                    "| Package | Type | Declared | Installed | Latest | Status | Note |\n"
+                )
                 f.write("| --- | --- | --- | --- | --- | --- | --- |\n")
-            
+
             for r in results:
                 dep_type = "Transitive"
                 if r.get("is_engine", False):
@@ -7396,10 +8593,14 @@ def export_markdown_report(results, pkg_data, filepath, vuls_enabled=False):
                         dep_type = "Direct"
                     elif r["name"] in pkg_data.get("devDependencies", {}):
                         dep_type = "Dev"
-                        
-                if dep_type == "Transitive" and r.get("required_by") and not r.get("is_engine", False):
+
+                if (
+                    dep_type == "Transitive"
+                    and r.get("required_by")
+                    and not r.get("is_engine", False)
+                ):
                     dep_type = f"Transitive (via {', '.join(r['required_by'])})"
-                        
+
                 status_str = r["status"]
                 if status_str == "up-to-date":
                     status_display = "✅ Up-to-date"
@@ -7417,7 +8618,7 @@ def export_markdown_report(results, pkg_data, filepath, vuls_enabled=False):
                     status_display = "⚠️ Minor / ❌ Major Update"
                 elif status_str == "patch-major":
                     status_display = "ℹ️ Patch / ❌ Major Update"
-                    
+
                 notes_list = []
                 if r["deprecated"]:
                     status_display = "🚫 Deprecated"
@@ -7426,12 +8627,14 @@ def export_markdown_report(results, pkg_data, filepath, vuls_enabled=False):
                     notes_list.append("⚠️ Missing integrity checksum in lockfile")
                 elif r.get("weak_checksum"):
                     notes_list.append("⚠️ Weak checksum (SHA-1) in lockfile")
-                
+
                 if r.get("mismatch_checksum"):
-                    notes_list.append("❌ **INTEGRITY MISMATCH!** Lockfile checksum does not match official registry checksum")
-                
+                    notes_list.append(
+                        "❌ **INTEGRITY MISMATCH!** Lockfile checksum does not match official registry checksum"
+                    )
+
                 note = " | ".join(notes_list)
-                    
+
                 changelog_links = []
                 if r.get("compare_url"):
                     changelog_links.append(f"[Compare Diff]({r['compare_url']})")
@@ -7443,14 +8646,18 @@ def export_markdown_report(results, pkg_data, filepath, vuls_enabled=False):
                         note += f" ({links_str})"
                     else:
                         note = links_str
-                    
+
                 if vuls_enabled:
                     vuls_count = len(r.get("vulnerabilities", []))
                     vuls_str = f"⚠️ **{vuls_count}**" if vuls_count > 0 else "✅"
-                    f.write(f"| `{r['name']}` | {dep_type} | `{r['declared'] or 'N/A'}` | `{r['installed'] or 'N/A'}` | `{r['latest'] or 'N/A'}` | {status_display} | {vuls_str} | {note} |\n")
+                    f.write(
+                        f"| `{r['name']}` | {dep_type} | `{r['declared'] or 'N/A'}` | `{r['installed'] or 'N/A'}` | `{r['latest'] or 'N/A'}` | {status_display} | {vuls_str} | {note} |\n"
+                    )
                 else:
-                    f.write(f"| `{r['name']}` | {dep_type} | `{r['declared'] or 'N/A'}` | `{r['installed'] or 'N/A'}` | `{r['latest'] or 'N/A'}` | {status_display} | {note} |\n")
-            
+                    f.write(
+                        f"| `{r['name']}` | {dep_type} | `{r['declared'] or 'N/A'}` | `{r['installed'] or 'N/A'}` | `{r['latest'] or 'N/A'}` | {status_display} | {note} |\n"
+                    )
+
             # Write detailed security section
             if vuls_enabled:
                 vuls_list_total = []
@@ -7460,133 +8667,209 @@ def export_markdown_report(results, pkg_data, filepath, vuls_enabled=False):
                     "high": 3,
                     "medium": 2,
                     "low": 1,
-                    "unknown": 0
+                    "unknown": 0,
                 }
                 for r in results:
                     v_list = r.get("vulnerabilities", [])
                     if v_list:
-                        sorted_v = sorted(v_list, key=lambda v: severity_order.get(get_severity_level(v), 0), reverse=True)
-                        vuls_list_total.append((r["name"], r["installed"], sorted_v, r.get("required_by", [])))
-                        
+                        sorted_v = sorted(
+                            v_list,
+                            key=lambda v: severity_order.get(get_severity_level(v), 0),
+                            reverse=True,
+                        )
+                        vuls_list_total.append(
+                            (
+                                r["name"],
+                                r["installed"],
+                                sorted_v,
+                                r.get("required_by", []),
+                            )
+                        )
+
                 if vuls_list_total:
                     # Sort package groups by their maximum vulnerability severity descending, and alphabetically by package name ascending
                     vuls_list_total.sort(
                         key=lambda x: (
-                            -max(severity_order.get(get_severity_level(v), 0) for v in x[2]) if x[2] else 1,
-                            x[0].lower()
+                            (
+                                -max(
+                                    severity_order.get(get_severity_level(v), 0)
+                                    for v in x[2]
+                                )
+                                if x[2]
+                                else 1
+                            ),
+                            x[0].lower(),
                         )
                     )
                     f.write("\n## Security Vulnerabilities Details\n\n")
                     for name, ver, v_list, required_by in vuls_list_total:
-                        parent_suffix = f" (via {', '.join(required_by)})" if required_by else ""
-                        f.write(f"### `{name}@{ver}`{parent_suffix} ({len(v_list)} vulnerabilities)\n\n")
+                        parent_suffix = (
+                            f" (via {', '.join(required_by)})" if required_by else ""
+                        )
+                        f.write(
+                            f"### `{name}@{ver}`{parent_suffix} ({len(v_list)} vulnerabilities)\n\n"
+                        )
                         for vuln in v_list:
                             level = get_severity_level(vuln)
-                            display_severity = "MALICIOUS CODE" if level == "malicious" else f"{level.upper()} - {vuln['severity']}"
-                            f.write(f"- **{vuln['id']}** [{display_severity}]: {vuln['summary']}\n")
+                            display_severity = (
+                                "MALICIOUS CODE"
+                                if level == "malicious"
+                                else f"{level.upper()} - {vuln['severity']}"
+                            )
+                            f.write(
+                                f"- **{vuln['id']}** [{display_severity}]: {vuln['summary']}\n"
+                            )
                             if vuln.get("details"):
-                                details_escaped = vuln['details'].replace('\n', '\n> ')
+                                details_escaped = vuln["details"].replace("\n", "\n> ")
                                 f.write(f"  > {details_escaped}\n\n")
                             else:
                                 f.write("\n")
-                                
+
                 # Write suppressed vulnerabilities if any exist
                 suppressed_list_total = []
                 for r in results:
                     s_list = r.get("suppressed_vulnerabilities", [])
                     if s_list:
-                        suppressed_list_total.append((r["name"], r["installed"] if r["installed"] else r["declared"], s_list, r.get("required_by", [])))
-                        
+                        suppressed_list_total.append(
+                            (
+                                r["name"],
+                                r["installed"] if r["installed"] else r["declared"],
+                                s_list,
+                                r.get("required_by", []),
+                            )
+                        )
+
                 if suppressed_list_total:
                     f.write("\n## Suppressed Vulnerabilities (Ignored)\n\n")
                     for name, ver, s_list, required_by in suppressed_list_total:
-                        parent_suffix = f" (via {', '.join(required_by)})" if required_by else ""
-                        f.write(f"### `{name}@{ver}`{parent_suffix} ({len(s_list)} suppressed)\n\n")
+                        parent_suffix = (
+                            f" (via {', '.join(required_by)})" if required_by else ""
+                        )
+                        f.write(
+                            f"### `{name}@{ver}`{parent_suffix} ({len(s_list)} suppressed)\n\n"
+                        )
                         for vuln in s_list:
                             f.write(f"- **{vuln['id']}**: {vuln['summary']}\n")
-                            f.write(f"  - **Reason**: {vuln.get('suppressed_reason', 'N/A')}\n")
-                            f.write(f"  - **Justification**: {vuln.get('justification', 'N/A')}\n")
-                            f.write(f"  - **Expires At**: {vuln.get('expires_at', 'N/A')}\n")
+                            f.write(
+                                f"  - **Reason**: {vuln.get('suppressed_reason', 'N/A')}\n"
+                            )
+                            f.write(
+                                f"  - **Justification**: {vuln.get('justification', 'N/A')}\n"
+                            )
+                            f.write(
+                                f"  - **Expires At**: {vuln.get('expires_at', 'N/A')}\n"
+                            )
                             if vuln.get("approved_by"):
                                 f.write(f"  - **Approved By**: {vuln['approved_by']}\n")
                             f.write("\n")
-                                
-        print(f"{COLOR_GREEN}{ICON_OK} Markdown report successfully exported to {filepath}{COLOR_RESET}")
+
+        print(
+            f"{COLOR_GREEN}{ICON_OK} Markdown report successfully exported to {filepath}{COLOR_RESET}"
+        )
     except Exception as e:
-        print(f"{COLOR_RED}{ICON_ERROR} Failed to export Markdown report: {e}{COLOR_RESET}")
+        print(
+            f"{COLOR_RED}{ICON_ERROR} Failed to export Markdown report: {e}{COLOR_RESET}"
+        )
+
 
 def escape_html(text):
     """Safely escape HTML characters."""
     if text is None:
         return ""
     text_str = str(text)
-    return (text_str.replace("&", "&amp;")
-                    .replace("<", "&lt;")
-                    .replace(">", "&gt;")
-                    .replace('"', "&quot;")
-                    .replace("'", "&#x27;"))
+    return (
+        text_str.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#x27;")
+    )
+
 
 def get_upgraded_constraint(declared_ver, latest_ver):
     """Synthesize upgraded constraint preserving prefixes like ^, ~, ==, >=."""
     if not declared_ver or not latest_ver:
         return latest_ver
-    
+
     # Extract prefix, e.g., ^, ~, >=, ==, ~>
-    match = re.match(r'^([~^>=<!\s]+)\s*(.*)$', declared_ver.strip())
+    match = re.match(r"^([~^>=<!\s]+)\s*(.*)$", declared_ver.strip())
     if match:
         prefix = match.group(1)
         return prefix + latest_ver
-    
+
     return latest_ver
+
 
 def _match_npm_php(line_lower, pkg_lower):
     pattern = r'"' + re.escape(pkg_lower) + r'"\s*:'
     return re.search(pattern, line_lower) is not None
 
+
 def _match_pip(line_lower, pkg_lower):
-    extras = r'(\[[^\]]+\])?'
-    pattern_req = r'^\s*' + re.escape(pkg_lower) + extras + r'\s*(==|>=|<=|~=|!=|>|<|@|;|[\'"]|$)'
-    pattern_toml = r'^\s*' + re.escape(pkg_lower) + r'\s*=\s*'
-    pattern_setup = r'[\'"]' + re.escape(pkg_lower) + extras + r'([>=<!~^@;]+|[\'"]\s*[,\]])'
-    return (re.search(pattern_req, line_lower) is not None or 
-            re.search(pattern_toml, line_lower) is not None or
-            re.search(pattern_setup, line_lower) is not None)
+    extras = r"(\[[^\]]+\])?"
+    pattern_req = (
+        r"^\s*" + re.escape(pkg_lower) + extras + r'\s*(==|>=|<=|~=|!=|>|<|@|;|[\'"]|$)'
+    )
+    pattern_toml = r"^\s*" + re.escape(pkg_lower) + r"\s*=\s*"
+    pattern_setup = (
+        r'[\'"]' + re.escape(pkg_lower) + extras + r'([>=<!~^@;]+|[\'"]\s*[,\]])'
+    )
+    return (
+        re.search(pattern_req, line_lower) is not None
+        or re.search(pattern_toml, line_lower) is not None
+        or re.search(pattern_setup, line_lower) is not None
+    )
+
 
 def _match_nuget(line_lower, pkg_lower):
     pattern = r'(include|update)\s*=\s*[\'"]' + re.escape(pkg_lower) + r'[\'"]'
     return re.search(pattern, line_lower) is not None
 
+
 def _match_maven(line_lower, pkg_lower):
     parts = pkg_lower.split(":")
     artifact = parts[-1]
-    pattern = r'<artifactid>\s*' + re.escape(artifact) + r'\s*</artifactid>'
+    pattern = r"<artifactid>\s*" + re.escape(artifact) + r"\s*</artifactid>"
     return re.search(pattern, line_lower) is not None
+
 
 def _match_go(line_lower, pkg_lower):
-    pattern = re.escape(pkg_lower) + r'\s+v\d+'
+    pattern = re.escape(pkg_lower) + r"\s+v\d+"
     return re.search(pattern, line_lower) is not None
 
+
 def _match_rust(line_lower, pkg_lower):
-    pattern_eq = r'^\s*' + re.escape(pkg_lower) + r'\s*=\s*'
-    pattern_sec = r'\[\s*(?:target\.[^\]]+\.)?(?:dependencies|dev-dependencies|build-dependencies)\.' + re.escape(pkg_lower) + r'\s*\]'
-    return (re.search(pattern_eq, line_lower) is not None or
-            re.search(pattern_sec, line_lower) is not None)
+    pattern_eq = r"^\s*" + re.escape(pkg_lower) + r"\s*=\s*"
+    pattern_sec = (
+        r"\[\s*(?:target\.[^\]]+\.)?(?:dependencies|dev-dependencies|build-dependencies)\."
+        + re.escape(pkg_lower)
+        + r"\s*\]"
+    )
+    return (
+        re.search(pattern_eq, line_lower) is not None
+        or re.search(pattern_sec, line_lower) is not None
+    )
+
 
 def _match_ruby(line_lower, pkg_lower):
     pattern = r'gem\s+[\'"]' + re.escape(pkg_lower) + r'[\'"]'
     return re.search(pattern, line_lower) is not None
 
+
 def _match_gradle(line_lower, pkg_lower):
     parts = pkg_lower.split(":")
     if len(parts) > 1:
         group, name_part = parts[0], parts[1]
-        pattern_build = re.escape(group) + r':' + re.escape(name_part)
+        pattern_build = re.escape(group) + r":" + re.escape(name_part)
         return re.search(pattern_build, line_lower) is not None
     else:
-        pattern_toml = r'^\s*' + re.escape(pkg_lower) + r'\s*=\s*'
+        pattern_toml = r"^\s*" + re.escape(pkg_lower) + r"\s*=\s*"
         pattern_name = r'name\s*=\s*[\'"]' + re.escape(pkg_lower) + r'[\'"]'
-        return (re.search(pattern_toml, line_lower) is not None or 
-                re.search(pattern_name, line_lower) is not None)
+        return (
+            re.search(pattern_toml, line_lower) is not None
+            or re.search(pattern_name, line_lower) is not None
+        )
+
 
 MATCH_STRATEGIES = {
     "npm": _match_npm_php,
@@ -7597,28 +8880,30 @@ MATCH_STRATEGIES = {
     "go": _match_go,
     "rust": _match_rust,
     "ruby": _match_ruby,
-    "gradle": _match_gradle
+    "gradle": _match_gradle,
 }
+
 
 def match_line_for_dependency(line, package_name, tech):
     """Checks if a manifest file line matches the given package dependency declaration."""
     line_lower = line.lower()
     pkg_lower = package_name.lower()
-    
+
     strategy = MATCH_STRATEGIES.get(tech)
     if strategy:
         return strategy(line_lower, pkg_lower)
     return False
+
 
 def find_manifest_files(project_path, technology):
     """Finds manifest files for the given technology in the project path."""
     manifest_files = []
     if os.path.isfile(project_path):
         return [project_path]
-        
+
     if not os.path.exists(project_path):
         return []
-        
+
     tech_patterns = {
         "npm": ["package.json"],
         "pip": ["requirements.txt", "pyproject.toml", "Pipfile", "setup.py"],
@@ -7630,22 +8915,27 @@ def find_manifest_files(project_path, technology):
         "ruby": ["Gemfile"],
         "gradle": ["build.gradle", "build.gradle.kts", "libs.versions.toml"],
     }
-    
+
     patterns = tech_patterns.get(technology, [])
     if not patterns:
         return []
-        
+
     for root, dirs, files in os.walk(project_path):
-        dirs[:] = [d for d in dirs if d not in (".git", "node_modules", "bin", "obj", ".gradle", "venv", ".venv")]
+        dirs[:] = [
+            d
+            for d in dirs
+            if d
+            not in (".git", "node_modules", "bin", "obj", ".gradle", "venv", ".venv")
+        ]
         for file in files:
             for pattern in patterns:
-                if pattern.startswith('.'):
+                if pattern.startswith("."):
                     if file.lower().endswith(pattern):
                         manifest_files.append(os.path.join(root, file))
                 else:
                     if file == pattern:
                         manifest_files.append(os.path.join(root, file))
-                        
+
     if technology == "nuget":
         curr = os.path.abspath(project_path)
         if os.path.isfile(curr):
@@ -7658,37 +8948,42 @@ def find_manifest_files(project_path, technology):
             if parent == curr:
                 break
             curr = parent
-            
+
     return manifest_files
 
-def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ver, tech, package_name=None):
+
+def generate_remediation_diff(
+    manifest_path, line_index, declared_ver, latest_ver, tech, package_name=None
+):
     """Generates remediation diff showing current vs suggested change."""
     try:
         with open(manifest_path, "r", encoding="utf-8", errors="ignore") as f:
             lines = f.readlines()
     except Exception:
         return None
-        
+
     idx = line_index - 1
     if idx < 0 or idx >= len(lines):
         return None
-        
+
     line_idx_to_change = None
     target_text = None
-    
+
     search_range = range(idx, min(idx + 4, len(lines)))
-    
+
     if declared_ver:
         for i in search_range:
             if declared_ver in lines[i]:
                 line_idx_to_change = i
                 target_text = declared_ver
                 break
-                
+
     if line_idx_to_change is None:
         if tech == "maven":
             for i in search_range:
-                m = re.search(r'<version>\s*(.*?)\s*</version>', lines[i], re.IGNORECASE)
+                m = re.search(
+                    r"<version>\s*(.*?)\s*</version>", lines[i], re.IGNORECASE
+                )
                 if m:
                     line_idx_to_change = i
                     target_text = m.group(1)
@@ -7719,14 +9014,16 @@ def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ve
                         break
         elif tech == "nuget":
             for i in search_range:
-                m = re.search(r'Version\s*=\s*["\']([^"\']+)["\']', lines[i], re.IGNORECASE)
+                m = re.search(
+                    r'Version\s*=\s*["\']([^"\']+)["\']', lines[i], re.IGNORECASE
+                )
                 if m:
                     line_idx_to_change = i
                     target_text = m.group(1)
                     break
-                    
+
     if line_idx_to_change is None and declared_ver:
-        ver_digits = re.search(r'\d+\.\d+(?:\.\d+)?(?:\.\d+)?', declared_ver)
+        ver_digits = re.search(r"\d+\.\d+(?:\.\d+)?(?:\.\d+)?", declared_ver)
         if ver_digits:
             ver_clean = ver_digits.group(0)
             for i in search_range:
@@ -7734,10 +9031,10 @@ def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ve
                     line_idx_to_change = i
                     target_text = ver_clean
                     break
-                    
+
     if line_idx_to_change is None:
         line_idx_to_change = idx
-        ver_pattern = re.search(r'\d+\.\d+(?:\.\d+)?(?:\.\d+)?', lines[idx])
+        ver_pattern = re.search(r"\d+\.\d+(?:\.\d+)?(?:\.\d+)?", lines[idx])
         if ver_pattern:
             target_text = ver_pattern.group(0)
         else:
@@ -7746,11 +9043,15 @@ def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ve
                 quoted_vals = re.findall(r'["\']([^"\']+)["\']', lines[idx])
                 if quoted_vals:
                     target_text = quoted_vals[-1]
-                    
+
     if line_idx_to_change is None:
         return None
 
-    if target_text and package_name and target_text.lower().strip() == package_name.lower().strip():
+    if (
+        target_text
+        and package_name
+        and target_text.lower().strip() == package_name.lower().strip()
+    ):
         target_text = None
 
     if not target_text:
@@ -7759,13 +9060,23 @@ def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ve
     # --- Property placeholder resolution nested helpers & logic ---
     def _search_lines_for_property(lines_list, prop_name_val, tech_type):
         if tech_type == "maven" or tech_type == "nuget":
-            pattern = r'<\s*' + re.escape(prop_name_val) + r'\s*>\s*(.*?)\s*<\s*/\s*' + re.escape(prop_name_val) + r'\s*>'
+            pattern = (
+                r"<\s*"
+                + re.escape(prop_name_val)
+                + r"\s*>\s*(.*?)\s*<\s*/\s*"
+                + re.escape(prop_name_val)
+                + r"\s*>"
+            )
             for idx_p, line_p in enumerate(lines_list):
                 m_p = re.search(pattern, line_p, re.IGNORECASE)
                 if m_p:
                     return idx_p + 1, m_p.group(1)
         elif tech_type == "gradle":
-            pattern = r'^\s*([a-zA-Z0-9_.-]+)?\s*' + re.escape(prop_name_val) + r'\s*=\s*["\']([^"\']+)["\']'
+            pattern = (
+                r"^\s*([a-zA-Z0-9_.-]+)?\s*"
+                + re.escape(prop_name_val)
+                + r'\s*=\s*["\']([^"\']+)["\']'
+            )
             for idx_p, line_p in enumerate(lines_list):
                 m_p = re.search(pattern, line_p)
                 if m_p:
@@ -7778,11 +9089,13 @@ def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ve
                 lines_list = f_p.readlines()
         except Exception:
             return None, None, None
-            
-        line_idx_p, val_p = _search_lines_for_property(lines_list, prop_name_val, tech_type)
+
+        line_idx_p, val_p = _search_lines_for_property(
+            lines_list, prop_name_val, tech_type
+        )
         if line_idx_p is not None:
             return current_path, line_idx_p, val_p
-            
+
         if tech_type == "maven":
             curr_dir_p = current_path
             for _ in range(5):
@@ -7793,9 +9106,13 @@ def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ve
                 parent_pom = os.path.join(parent_dir_p, "pom.xml")
                 if os.path.exists(parent_pom):
                     try:
-                        with open(parent_pom, "r", encoding="utf-8", errors="ignore") as f_p:
+                        with open(
+                            parent_pom, "r", encoding="utf-8", errors="ignore"
+                        ) as f_p:
                             parent_lines = f_p.readlines()
-                        line_idx_p, val_p = _search_lines_for_property(parent_lines, prop_name_val, tech_type)
+                        line_idx_p, val_p = _search_lines_for_property(
+                            parent_lines, prop_name_val, tech_type
+                        )
                         if line_idx_p is not None:
                             return parent_pom, line_idx_p, val_p
                     except Exception:
@@ -7803,19 +9120,19 @@ def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ve
                     curr_dir_p = parent_pom
                 else:
                     break
-                    
+
         return None, None, None
 
     is_placeholder = False
     prop_name = None
-    
+
     if tech == "maven":
-        m = re.match(r'^\s*\$\{\s*(.*?)\s*\}\s*$', target_text)
+        m = re.match(r"^\s*\$\{\s*(.*?)\s*\}\s*$", target_text)
         if m:
             is_placeholder = True
             prop_name = m.group(1)
     elif tech == "nuget":
-        m = re.match(r'^\s*\$\(\s*(.*?)\s*\)\s*$', target_text)
+        m = re.match(r"^\s*\$\(\s*(.*?)\s*\)\s*$", target_text)
         if m:
             is_placeholder = True
             prop_name = m.group(1)
@@ -7824,13 +9141,15 @@ def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ve
         if is_toml_ref:
             is_placeholder = True
             prop_name = target_text
-        elif target_text.startswith('$'):
+        elif target_text.startswith("$"):
             is_placeholder = True
             prop_name = target_text[1:]
-            
+
     resolved_version = None
     if is_placeholder and prop_name:
-        resolved_path, resolved_line_idx, current_val = find_property_definition(manifest_path, prop_name, tech)
+        resolved_path, resolved_line_idx, current_val = find_property_definition(
+            manifest_path, prop_name, tech
+        )
         if resolved_path and resolved_line_idx:
             manifest_path = resolved_path
             try:
@@ -7853,14 +9172,16 @@ def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ve
             is_val_placeholder = True
         elif tech == "gradle" and "$" in resolved_version:
             is_val_placeholder = True
-            
+
         if not is_val_placeholder:
+
             def clean_ver(v):
                 v = v.strip().lower()
-                if v.startswith('v'):
+                if v.startswith("v"):
                     v = v[1:]
-                v = re.sub(r'^[~^>=<!\s]+', '', v)
+                v = re.sub(r"^[~^>=<!\s]+", "", v)
                 return v
+
             def is_version_compatible(v1, v2):
                 c1 = clean_ver(v1)
                 c2 = clean_ver(v2)
@@ -7868,11 +9189,12 @@ def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ve
                     return True
                 if c1 == c2 or c1.startswith(c2) or c2.startswith(c1):
                     return True
-                m1 = re.match(r'^(\d+)', c1)
-                m2 = re.match(r'^(\d+)', c2)
+                m1 = re.match(r"^(\d+)", c1)
+                m2 = re.match(r"^(\d+)", c2)
                 if m1 and m2 and m1.group(1) == m2.group(1):
                     return True
                 return False
+
             if not is_version_compatible(declared_ver, resolved_version):
                 return None
     # --- End of property placeholder logic ---
@@ -7880,15 +9202,15 @@ def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ve
     match_prefix = ""
     match_version = target_text or ""
     if target_text:
-        match_opt = re.match(r'^([~^>=<!\s]+)\s*(.*)$', target_text.strip())
+        match_opt = re.match(r"^([~^>=<!\s]+)\s*(.*)$", target_text.strip())
         if match_opt:
             match_prefix = match_opt.group(1)
             match_version = match_opt.group(2)
-            
+
     effective_prefix = match_prefix
-    if re.match(r'^[~^>=<!]', latest_ver.strip()):
+    if re.match(r"^[~^>=<!]", latest_ver.strip()):
         effective_prefix = ""
-        
+
     upgraded_str = effective_prefix + latest_ver
 
     # Do not generate a diff if target version is identical to current version
@@ -7896,79 +9218,72 @@ def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ve
         if not v:
             return ""
         v = v.strip().lower()
-        if v.startswith('v'):
+        if v.startswith("v"):
             v = v[1:]
-        return re.sub(r'^[~^>=<!\s]+', '', v)
+        return re.sub(r"^[~^>=<!\s]+", "", v)
 
     if target_text and latest_ver and _clean_v(target_text) == _clean_v(latest_ver):
         return None
-            
+
     start_ctx = max(0, line_idx_to_change - 2)
     end_ctx = min(len(lines), line_idx_to_change + 3)
-    
+
     current_block = []
     suggested_block = []
-    
+
     for i in range(start_ctx, end_ctx):
-        orig_line = lines[i].rstrip('\r\n')
+        orig_line = lines[i].rstrip("\r\n")
         line_num = i + 1
-        
+
         if i == line_idx_to_change:
             escaped_orig = escape_html(orig_line)
             if target_text and target_text in orig_line:
                 escaped_target = escape_html(target_text)
                 escaped_prefix = escape_html(effective_prefix)
                 escaped_version = escape_html(match_version)
-                
+
                 html_orig = escaped_orig.replace(
-                    escaped_target, 
-                    f'<span class="diff-remove-chunk">{escaped_target}</span>'
+                    escaped_target,
+                    f'<span class="diff-remove-chunk">{escaped_target}</span>',
                 )
                 new_line = orig_line.replace(target_text, upgraded_str)
             else:
                 html_orig = escaped_orig
                 new_line = orig_line + f" -> {latest_ver}"
-                
+
             escaped_new = escape_html(new_line)
             escaped_upgraded = escape_html(upgraded_str)
-            
+
             if upgraded_str in new_line:
                 html_new = escaped_new.replace(
-                    escaped_upgraded, 
-                    f'<span class="diff-add-chunk">{escaped_upgraded}</span>'
+                    escaped_upgraded,
+                    f'<span class="diff-add-chunk">{escaped_upgraded}</span>',
                 )
             else:
                 html_new = escaped_new
-                
-            current_block.append({
-                "line_num": line_num,
-                "html": html_orig,
-                "is_changed": True
-            })
-            suggested_block.append({
-                "line_num": line_num,
-                "html": html_new,
-                "is_changed": True
-            })
+
+            current_block.append(
+                {"line_num": line_num, "html": html_orig, "is_changed": True}
+            )
+            suggested_block.append(
+                {"line_num": line_num, "html": html_new, "is_changed": True}
+            )
         else:
             escaped_orig = escape_html(orig_line)
-            current_block.append({
-                "line_num": line_num,
-                "html": escaped_orig,
-                "is_changed": False
-            })
-            suggested_block.append({
-                "line_num": line_num,
-                "html": escaped_orig,
-                "is_changed": False
-            })
-            
+            current_block.append(
+                {"line_num": line_num, "html": escaped_orig, "is_changed": False}
+            )
+            suggested_block.append(
+                {"line_num": line_num, "html": escaped_orig, "is_changed": False}
+            )
+
     return {
         "manifest_path": manifest_path,
         "line_number": line_idx_to_change + 1,
         "current_code": current_block,
-        "suggested_code": suggested_block
+        "suggested_code": suggested_block,
     }
+
 
 def generate_addition_remediation_diff(manifest_path, package_name, target_ver, tech):
     """Generates remediation diff showing an addition to the manifest file when missing."""
@@ -7977,7 +9292,7 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
             lines = f.readlines()
     except Exception:
         return None
-        
+
     if not lines:
         return None
 
@@ -7986,7 +9301,7 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
     line_to_add = ""
 
     clean_target = str(target_ver).strip()
-    if not re.match(r'^[~^>=<!]', clean_target):
+    if not re.match(r"^[~^>=<!]", clean_target):
         clean_target = f"^{clean_target}"
 
     if tech == "npm" or tech == "php":
@@ -8000,7 +9315,7 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
                 break
             elif re.search(r'"devDependencies"\s*:\s*\{', line):
                 dev_deps_match_idx = idx
-            elif root_open_idx is None and '{' in line:
+            elif root_open_idx is None and "{" in line:
                 root_open_idx = idx
 
         if deps_match_idx is not None:
@@ -8018,7 +9333,7 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
     elif tech == "rust":
         dep_sec_idx = None
         for idx, line in enumerate(lines):
-            if re.search(r'^\[dependencies\]', line.strip()):
+            if re.search(r"^\[dependencies\]", line.strip()):
                 dep_sec_idx = idx
                 break
         if dep_sec_idx is not None:
@@ -8026,7 +9341,9 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
             line_to_add = f'{package_name} = "{clean_target.lstrip("^~>=<!")}"'
         else:
             insert_line_idx = len(lines)
-            line_to_add = f'\n[dependencies]\n{package_name} = "{clean_target.lstrip("^~>=<!")}"'
+            line_to_add = (
+                f'\n[dependencies]\n{package_name} = "{clean_target.lstrip("^~>=<!")}"'
+            )
 
     if insert_line_idx is None:
         insert_line_idx = len(lines)
@@ -8040,43 +9357,44 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
 
     for i in range(start_ctx, end_ctx):
         line_num = i + 1
-        orig_line = lines[i].rstrip('\r\n')
+        orig_line = lines[i].rstrip("\r\n")
         escaped_orig = escape_html(orig_line)
 
         if i == insert_line_idx:
             escaped_add = escape_html(line_to_add)
-            suggested_block.append({
-                "line_num": "+",
-                "html": f'<span class="diff-add-chunk">{escaped_add}</span>',
-                "is_changed": True
-            })
+            suggested_block.append(
+                {
+                    "line_num": "+",
+                    "html": f'<span class="diff-add-chunk">{escaped_add}</span>',
+                    "is_changed": True,
+                }
+            )
 
-        current_block.append({
-            "line_num": line_num,
-            "html": escaped_orig,
-            "is_changed": False
-        })
-        suggested_block.append({
-            "line_num": line_num,
-            "html": escaped_orig,
-            "is_changed": False
-        })
+        current_block.append(
+            {"line_num": line_num, "html": escaped_orig, "is_changed": False}
+        )
+        suggested_block.append(
+            {"line_num": line_num, "html": escaped_orig, "is_changed": False}
+        )
 
     if insert_line_idx >= len(lines):
         escaped_add = escape_html(line_to_add)
-        suggested_block.append({
-            "line_num": "+",
-            "html": f'<span class="diff-add-chunk">{escaped_add}</span>',
-            "is_changed": True
-        })
+        suggested_block.append(
+            {
+                "line_num": "+",
+                "html": f'<span class="diff-add-chunk">{escaped_add}</span>',
+                "is_changed": True,
+            }
+        )
 
     return {
         "manifest_path": manifest_path,
         "line_number": insert_line_idx + 1,
         "current_code": current_block,
         "suggested_code": suggested_block,
-        "is_addition": True
+        "is_addition": True,
     }
+
 
 def generate_override_remediation_diff(manifest_path, package_name, target_ver, tech):
     """Generates remediation diff for forcing a transitive dependency override in manifest_path."""
@@ -8085,32 +9403,32 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
             lines = f.readlines()
     except Exception:
         return None
-        
+
     if not lines:
         return None
 
     clean_target = str(target_ver).strip()
-    if not re.match(r'^[~^>=<!]', clean_target):
+    if not re.match(r"^[~^>=<!]", clean_target):
         clean_target = f"^{clean_target}"
 
     indent = "    "
     insert_line_idx = None
     line_to_add = ""
-    
-    if tech in ("npm", "pnpm"):
+
+    if tech in {"npm", "pnpm"}:
         overrides_line_idx = None
         for idx, line in enumerate(lines):
             if re.search(r'"overrides"\s*:\s*\{', line):
                 overrides_line_idx = idx
                 break
-        
+
         if overrides_line_idx is not None:
             insert_line_idx = overrides_line_idx + 1
             line_to_add = f'{indent}  "{package_name}": "{clean_target}",'
         else:
             root_open_idx = None
             for idx, line in enumerate(lines):
-                if '{' in line:
+                if "{" in line:
                     root_open_idx = idx
                     break
             insert_line_idx = (root_open_idx + 1) if root_open_idx is not None else 1
@@ -8127,13 +9445,15 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
         else:
             root_open_idx = None
             for idx, line in enumerate(lines):
-                if '{' in line:
+                if "{" in line:
                     root_open_idx = idx
                     break
             insert_line_idx = (root_open_idx + 1) if root_open_idx is not None else 1
             line_to_add = f'{indent}"resolutions": {{\n{indent}  "{package_name}": "{clean_target}"\n{indent}}},'
     else:
-        return generate_addition_remediation_diff(manifest_path, package_name, target_ver, tech)
+        return generate_addition_remediation_diff(
+            manifest_path, package_name, target_ver, tech
+        )
 
     start_ctx = max(0, insert_line_idx - 2)
     end_ctx = min(len(lines), insert_line_idx + 3)
@@ -8143,36 +9463,33 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
 
     for i in range(start_ctx, end_ctx):
         line_num = i + 1
-        orig_line = lines[i].rstrip('\r\n')
+        orig_line = lines[i].rstrip("\r\n")
         escaped_orig = escape_html(orig_line)
 
         if i == insert_line_idx:
             escaped_add = escape_html(line_to_add)
-            suggested_block.append({
-                "line_num": "+",
-                "html": f'<span class="diff-add-chunk">{escaped_add}</span>',
-                "is_changed": True
-            })
+            suggested_block.append(
+                {
+                    "line_num": "+",
+                    "html": f'<span class="diff-add-chunk">{escaped_add}</span>',
+                    "is_changed": True,
+                }
+            )
 
-        current_block.append({
-            "line_num": line_num,
-            "html": escaped_orig,
-            "is_changed": False
-        })
-        suggested_block.append({
-            "line_num": line_num,
-            "html": escaped_orig,
-            "is_changed": False
-        })
+        current_block.append(
+            {"line_num": line_num, "html": escaped_orig, "is_changed": False}
+        )
+        suggested_block.append(
+            {"line_num": line_num, "html": escaped_orig, "is_changed": False}
+        )
 
     return {
         "manifest_path": manifest_path,
         "line_number": insert_line_idx + 1,
         "current_code": current_block,
         "suggested_code": suggested_block,
-        "is_addition": True
+        "is_addition": True,
     }
-
 
 
 def format_remediation_option_label(ver_str: str) -> str:
@@ -8184,15 +9501,15 @@ def format_remediation_option_label(ver_str: str) -> str:
     """
     if not ver_str:
         return ""
-        
+
     def _clean_single_ver(s: str) -> str:
         s = s.strip()
-        m = re.search(r'(?:>=|>|<=|<|~|\^|v)?\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?', s)
+        m = re.search(r"(?:>=|>|<=|<|~|\^|v)?\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?", s)
         if m:
             major = m.group(1)
             minor = m.group(2)
             patch = m.group(3)
-            if (not minor or minor == '0') and (not patch or patch == '0'):
+            if (not minor or minor == "0") and (not patch or patch == "0"):
                 return major
             elif minor and patch:
                 return f"{major}.{minor}.{patch}"
@@ -8209,18 +9526,20 @@ def format_remediation_option_label(ver_str: str) -> str:
         clean_v = _clean_single_ver(ver_str)
         return f"Version {clean_v}"
 
+
 def populate_remediation_recommendations(results, default_project_path):
     """Calculates and attaches remediation info with multi-level strategies (Patch, Minor, Major, Parent Upgrade, Override) to each result."""
-    
+
     def _clean_v(v):
         if not v:
             return ""
         v = str(v).strip().lower()
-        if v.startswith('v'):
+        if v.startswith("v"):
             v = v[1:]
-        return re.sub(r'^[~^>=<!\s]+', '', v)
+        return re.sub(r"^[~^>=<!\s]+", "", v)
 
     manifest_file_cache = {}
+
     def _get_manifest_lines(m_path):
         if m_path not in manifest_file_cache:
             try:
@@ -8231,11 +9550,12 @@ def populate_remediation_recommendations(results, default_project_path):
         return manifest_file_cache[m_path]
 
     line_search_cache = {}
+
     def _find_line_idx(m_path, lines, pkg_name, tech, declared, is_engine):
         cache_key = (m_path, tech, pkg_name, str(declared), is_engine)
         if cache_key in line_search_cache:
             return line_search_cache[cache_key]
-            
+
         found_line_idx = None
         best_score = -1
         for idx, line in enumerate(lines):
@@ -8246,7 +9566,7 @@ def populate_remediation_recommendations(results, default_project_path):
             if matched:
                 score = 1
                 if declared:
-                    ver_digits = re.search(r'\d+\.\d+', str(declared))
+                    ver_digits = re.search(r"\d+\.\d+", str(declared))
                     if ver_digits and ver_digits.group(0) in line:
                         score = 2
                     elif str(declared).strip() in line:
@@ -8260,12 +9580,15 @@ def populate_remediation_recommendations(results, default_project_path):
         return found_line_idx
 
     manifest_files_cache = {}
+
     def _get_manifest_files(p_path, tech, is_engine):
         cache_key = (p_path, tech, is_engine)
         if cache_key not in manifest_files_cache:
             if is_engine:
                 package_json_path = os.path.join(p_path, "package.json")
-                manifest_files_cache[cache_key] = [package_json_path] if os.path.exists(package_json_path) else []
+                manifest_files_cache[cache_key] = (
+                    [package_json_path] if os.path.exists(package_json_path) else []
+                )
             else:
                 manifest_files_cache[cache_key] = find_manifest_files(p_path, tech)
         return manifest_files_cache[cache_key]
@@ -8277,71 +9600,111 @@ def populate_remediation_recommendations(results, default_project_path):
         if total_items > 0:
             pct = int((idx / total_items) * 100)
             if pct != last_reported_pct or idx == total_items or idx % 25 == 0:
-                sys.stdout.write(f"\r{COLOR_GRAY}{ICON_INFO} Processing results: {pct}% ({idx}/{total_items} packages)...{COLOR_RESET}")
+                sys.stdout.write(
+                    f"\r{COLOR_GRAY}{ICON_INFO} Processing results: {pct}% ({idx}/{total_items} packages)...{COLOR_RESET}"
+                )
                 sys.stdout.flush()
                 last_reported_pct = pct
 
         r["remediation"] = None
-        
-        is_outdated = r.get("status") in ("major", "minor", "patch", "minor-major", "patch-major")
+
+        is_outdated = r.get("status") in {
+            "major",
+            "minor",
+            "patch",
+            "minor-major",
+            "patch-major",
+        }
         has_vulns = bool(r.get("vulnerabilities"))
         is_depr = bool(r.get("deprecated"))
-        
+
         if not (is_outdated or has_vulns or is_depr):
             continue
-            
+
         project_path = r.get("project_path") or default_project_path
         tech = r.get("technology")
         if not tech:
             continue
-            
+
         name = r.get("name")
         declared = r.get("declared")
         installed = r.get("installed")
         dep_type = r.get("dep_type")
-        
-        clean_installed = installed[0] if (isinstance(installed, list) and installed) else installed
-        
+
+        clean_installed = (
+            installed[0] if (isinstance(installed, list) and installed) else installed
+        )
+
         latest_patch = r.get("latest_patch")
         latest_sm = r.get("latest_same_major")
         latest_abs = r.get("latest_absolute") or r.get("latest")
-        
+
         clean_inst_v = _clean_v(clean_installed)
         clean_decl_v = _clean_v(declared)
-        
+
         if latest_patch and _clean_v(latest_patch) in (clean_inst_v, clean_decl_v):
             latest_patch = None
-        if latest_sm and (_clean_v(latest_sm) in (clean_inst_v, clean_decl_v) or _clean_v(latest_sm) == _clean_v(latest_patch)):
+        if latest_sm and (
+            _clean_v(latest_sm) in (clean_inst_v, clean_decl_v)
+            or _clean_v(latest_sm) == _clean_v(latest_patch)
+        ):
             latest_sm = None
         if latest_abs and " or " not in str(latest_abs):
-            if _clean_v(latest_abs) in (clean_inst_v, clean_decl_v) or _clean_v(latest_abs) == _clean_v(latest_sm) or _clean_v(latest_abs) == _clean_v(latest_patch):
+            if (
+                _clean_v(latest_abs) in (clean_inst_v, clean_decl_v)
+                or _clean_v(latest_abs) == _clean_v(latest_sm)
+                or _clean_v(latest_abs) == _clean_v(latest_patch)
+            ):
                 latest_abs = None
 
-        manifest_files = _get_manifest_files(project_path, tech, r.get("is_engine", False))
-            
+        manifest_files = _get_manifest_files(
+            project_path, tech, r.get("is_engine", False)
+        )
+
         if not manifest_files:
             continue
-            
+
         manifest_path = manifest_files[0]
         lines = _get_manifest_lines(manifest_path)
         if not lines:
             continue
-            
-        found_line_idx = _find_line_idx(manifest_path, lines, name, tech, declared, r.get("is_engine", False))
+
+        found_line_idx = _find_line_idx(
+            manifest_path, lines, name, tech, declared, r.get("is_engine", False)
+        )
 
         parent_r = None
         parent_line_idx = None
         if r.get("required_by"):
             for parent_name in r.get("required_by", []):
-                parent_candidate = next((item for item in results if item.get("name") == parent_name and item.get("project_path") == r.get("project_path")), None)
+                parent_candidate = next(
+                    (
+                        item
+                        for item in results
+                        if item.get("name") == parent_name
+                        and item.get("project_path") == r.get("project_path")
+                    ),
+                    None,
+                )
                 if parent_candidate:
-                    parent_line_idx = _find_line_idx(manifest_path, lines, parent_name, tech, parent_candidate.get("declared"), False)
+                    parent_line_idx = _find_line_idx(
+                        manifest_path,
+                        lines,
+                        parent_name,
+                        tech,
+                        parent_candidate.get("declared"),
+                        False,
+                    )
                     if parent_line_idx is not None:
                         parent_r = parent_candidate
                         break
 
         manifest_missing = False
-        if found_line_idx is None and dep_type != "Transitive" and not r.get("required_by"):
+        if (
+            found_line_idx is None
+            and dep_type != "Transitive"
+            and not r.get("required_by")
+        ):
             manifest_missing = True
 
         strategies = []
@@ -8349,165 +9712,279 @@ def populate_remediation_recommendations(results, default_project_path):
         if dep_type != "Transitive" or found_line_idx is not None:
             # Direct/Dev dependency or explicit package in manifest
             direct_options = []
-            target_string = latest_abs or (r.get("latest") if r.get("name") == name else "") or ""
+            target_string = (
+                latest_abs or (r.get("latest") if r.get("name") == name else "") or ""
+            )
             if " or " in target_string:
                 parts = [p.strip() for p in target_string.split(" or ") if p.strip()]
                 if len(parts) >= 2:
                     for p in parts:
-                        diff_p = generate_remediation_diff(manifest_path, found_line_idx, declared, p, tech, name) if found_line_idx else generate_addition_remediation_diff(manifest_path, name, p, tech)
+                        diff_p = (
+                            generate_remediation_diff(
+                                manifest_path, found_line_idx, declared, p, tech, name
+                            )
+                            if found_line_idx
+                            else generate_addition_remediation_diff(
+                                manifest_path, name, p, tech
+                            )
+                        )
                         if diff_p:
                             lbl = format_remediation_option_label(p)
-                            direct_options.append({
-                                "id": f"option_{p}",
-                                "label": lbl,
-                                "badge": "Option",
-                                "badge_class": "v-chip-safe",
-                                "diff": diff_p
-                            })
-                    diff_comb = generate_remediation_diff(manifest_path, found_line_idx, declared, target_string, tech, name) if found_line_idx else generate_addition_remediation_diff(manifest_path, name, target_string, tech)
+                            direct_options.append(
+                                {
+                                    "id": f"option_{p}",
+                                    "label": lbl,
+                                    "badge": "Option",
+                                    "badge_class": "v-chip-safe",
+                                    "diff": diff_p,
+                                }
+                            )
+                    diff_comb = (
+                        generate_remediation_diff(
+                            manifest_path,
+                            found_line_idx,
+                            declared,
+                            target_string,
+                            tech,
+                            name,
+                        )
+                        if found_line_idx
+                        else generate_addition_remediation_diff(
+                            manifest_path, name, target_string, tech
+                        )
+                    )
                     if diff_comb:
                         lbl_comb = format_remediation_option_label(target_string)
-                        direct_options.append({
-                            "id": f"option_{target_string}",
-                            "label": lbl_comb,
-                            "badge": "Option",
-                            "badge_class": "v-chip-major",
-                            "diff": diff_comb
-                        })
+                        direct_options.append(
+                            {
+                                "id": f"option_{target_string}",
+                                "label": lbl_comb,
+                                "badge": "Option",
+                                "badge_class": "v-chip-major",
+                                "diff": diff_comb,
+                            }
+                        )
 
             if latest_patch:
-                diff_patch = generate_remediation_diff(manifest_path, found_line_idx, declared, latest_patch, tech, name) if found_line_idx else generate_addition_remediation_diff(manifest_path, name, latest_patch, tech)
+                diff_patch = (
+                    generate_remediation_diff(
+                        manifest_path,
+                        found_line_idx,
+                        declared,
+                        latest_patch,
+                        tech,
+                        name,
+                    )
+                    if found_line_idx
+                    else generate_addition_remediation_diff(
+                        manifest_path, name, latest_patch, tech
+                    )
+                )
                 if diff_patch:
-                    direct_options.append({
-                        "id": "patch",
-                        "label": f"Patch: v{_clean_v(latest_patch)}",
-                        "badge": "Patch / Bugfix",
-                        "badge_class": "v-chip-ok",
-                        "diff": diff_patch
-                    })
+                    direct_options.append(
+                        {
+                            "id": "patch",
+                            "label": f"Patch: v{_clean_v(latest_patch)}",
+                            "badge": "Patch / Bugfix",
+                            "badge_class": "v-chip-ok",
+                            "diff": diff_patch,
+                        }
+                    )
 
             if latest_sm:
-                diff_sm = generate_remediation_diff(manifest_path, found_line_idx, declared, latest_sm, tech, name) if found_line_idx else generate_addition_remediation_diff(manifest_path, name, latest_sm, tech)
+                diff_sm = (
+                    generate_remediation_diff(
+                        manifest_path, found_line_idx, declared, latest_sm, tech, name
+                    )
+                    if found_line_idx
+                    else generate_addition_remediation_diff(
+                        manifest_path, name, latest_sm, tech
+                    )
+                )
                 if diff_sm:
-                    direct_options.append({
-                        "id": "minor",
-                        "label": f"Minor: v{_clean_v(latest_sm)}",
-                        "badge": "Minor / Feature",
-                        "badge_class": "v-chip-safe",
-                        "diff": diff_sm
-                    })
+                    direct_options.append(
+                        {
+                            "id": "minor",
+                            "label": f"Minor: v{_clean_v(latest_sm)}",
+                            "badge": "Minor / Feature",
+                            "badge_class": "v-chip-safe",
+                            "diff": diff_sm,
+                        }
+                    )
 
             if latest_abs and " or " not in str(latest_abs):
-                diff_abs = generate_remediation_diff(manifest_path, found_line_idx, declared, latest_abs, tech, name) if found_line_idx else generate_addition_remediation_diff(manifest_path, name, latest_abs, tech)
+                diff_abs = (
+                    generate_remediation_diff(
+                        manifest_path, found_line_idx, declared, latest_abs, tech, name
+                    )
+                    if found_line_idx
+                    else generate_addition_remediation_diff(
+                        manifest_path, name, latest_abs, tech
+                    )
+                )
                 if diff_abs:
-                    direct_options.append({
-                        "id": "major",
-                        "label": f"Major: v{_clean_v(latest_abs)}",
-                        "badge": "Major / Breaking",
-                        "badge_class": "v-chip-major",
-                        "diff": diff_abs
-                    })
+                    direct_options.append(
+                        {
+                            "id": "major",
+                            "label": f"Major: v{_clean_v(latest_abs)}",
+                            "badge": "Major / Breaking",
+                            "badge_class": "v-chip-major",
+                            "diff": diff_abs,
+                        }
+                    )
 
             if direct_options:
-                strategies.append({
-                    "id": "direct_upgrade",
-                    "title": f"Update Direct Dependency ({name})",
-                    "description": f"Updates '{name}' in manifest file.",
-                    "is_recommended": True,
-                    "options": direct_options
-                })
+                strategies.append(
+                    {
+                        "id": "direct_upgrade",
+                        "title": f"Update Direct Dependency ({name})",
+                        "description": f"Updates '{name}' in manifest file.",
+                        "is_recommended": True,
+                        "options": direct_options,
+                    }
+                )
 
         if dep_type == "Transitive":
             # Strategy 1: Upgrade Parent Package
             if parent_r and parent_line_idx is not None:
                 p_name = parent_r.get("name")
                 p_inst = parent_r.get("installed")
-                p_clean_inst = p_inst[0] if (isinstance(p_inst, list) and p_inst) else p_inst
+                p_clean_inst = (
+                    p_inst[0] if (isinstance(p_inst, list) and p_inst) else p_inst
+                )
                 p_decl = parent_r.get("declared")
                 p_patch = parent_r.get("latest_patch")
                 p_sm = parent_r.get("latest_same_major")
                 p_abs = parent_r.get("latest_absolute") or parent_r.get("latest")
-                
+
                 p_clean_inst_v = _clean_v(p_clean_inst)
                 p_clean_decl_v = _clean_v(p_decl)
 
                 if p_patch and _clean_v(p_patch) in (p_clean_inst_v, p_clean_decl_v):
                     p_patch = None
-                if p_sm and (_clean_v(p_sm) in (p_clean_inst_v, p_clean_decl_v) or _clean_v(p_sm) == _clean_v(p_patch)):
+                if p_sm and (
+                    _clean_v(p_sm) in (p_clean_inst_v, p_clean_decl_v)
+                    or _clean_v(p_sm) == _clean_v(p_patch)
+                ):
                     p_sm = None
-                if p_abs and (_clean_v(p_abs) in (p_clean_inst_v, p_clean_decl_v) or _clean_v(p_abs) == _clean_v(p_sm) or _clean_v(p_abs) == _clean_v(p_patch)):
+                if p_abs and (
+                    _clean_v(p_abs) in (p_clean_inst_v, p_clean_decl_v)
+                    or _clean_v(p_abs) == _clean_v(p_sm)
+                    or _clean_v(p_abs) == _clean_v(p_patch)
+                ):
                     p_abs = None
 
                 parent_options = []
                 if p_patch:
-                    p_diff = generate_remediation_diff(manifest_path, parent_line_idx, p_decl, p_patch, tech, p_name)
+                    p_diff = generate_remediation_diff(
+                        manifest_path, parent_line_idx, p_decl, p_patch, tech, p_name
+                    )
                     if p_diff:
-                        parent_options.append({
-                            "id": "patch",
-                            "label": f"Patch {p_name}: v{_clean_v(p_patch)}",
-                            "badge": "Patch / Bugfix",
-                            "badge_class": "v-chip-ok",
-                            "diff": p_diff
-                        })
+                        parent_options.append(
+                            {
+                                "id": "patch",
+                                "label": f"Patch {p_name}: v{_clean_v(p_patch)}",
+                                "badge": "Patch / Bugfix",
+                                "badge_class": "v-chip-ok",
+                                "diff": p_diff,
+                            }
+                        )
                 if p_sm:
-                    p_diff = generate_remediation_diff(manifest_path, parent_line_idx, p_decl, p_sm, tech, p_name)
+                    p_diff = generate_remediation_diff(
+                        manifest_path, parent_line_idx, p_decl, p_sm, tech, p_name
+                    )
                     if p_diff:
-                        parent_options.append({
-                            "id": "minor",
-                            "label": f"Minor {p_name}: v{_clean_v(p_sm)}",
-                            "badge": "Minor / Feature",
-                            "badge_class": "v-chip-safe",
-                            "diff": p_diff
-                        })
+                        parent_options.append(
+                            {
+                                "id": "minor",
+                                "label": f"Minor {p_name}: v{_clean_v(p_sm)}",
+                                "badge": "Minor / Feature",
+                                "badge_class": "v-chip-safe",
+                                "diff": p_diff,
+                            }
+                        )
                 if p_abs:
-                    p_diff = generate_remediation_diff(manifest_path, parent_line_idx, p_decl, p_abs, tech, p_name)
+                    p_diff = generate_remediation_diff(
+                        manifest_path, parent_line_idx, p_decl, p_abs, tech, p_name
+                    )
                     if p_diff:
-                        parent_options.append({
-                            "id": "major",
-                            "label": f"Major {p_name}: v{_clean_v(p_abs)}",
-                            "badge": "Major / Breaking",
-                            "badge_class": "v-chip-major",
-                            "diff": p_diff
-                        })
+                        parent_options.append(
+                            {
+                                "id": "major",
+                                "label": f"Major {p_name}: v{_clean_v(p_abs)}",
+                                "badge": "Major / Breaking",
+                                "badge_class": "v-chip-major",
+                                "diff": p_diff,
+                            }
+                        )
 
                 if parent_options:
-                    strategies.append({
-                        "id": "parent_upgrade",
-                        "title": f"Upgrade Parent Package ({p_name})",
-                        "description": f"Recommended. Upgrades parent package '{p_name}' which requires '{name}'.",
-                        "is_recommended": True,
-                        "options": parent_options
-                    })
+                    strategies.append(
+                        {
+                            "id": "parent_upgrade",
+                            "title": f"Upgrade Parent Package ({p_name})",
+                            "description": f"Recommended. Upgrades parent package '{p_name}' which requires '{name}'.",
+                            "is_recommended": True,
+                            "options": parent_options,
+                        }
+                    )
 
             # Strategy 2: Force Transitive Override / Resolution
             target_ver_str = latest_patch or latest_sm or latest_abs or clean_installed
             if target_ver_str:
-                ov_diff = generate_override_remediation_diff(manifest_path, name, target_ver_str, tech)
+                ov_diff = generate_override_remediation_diff(
+                    manifest_path, name, target_ver_str, tech
+                )
                 if ov_diff:
-                    ov_badge = "Patch" if target_ver_str == latest_patch else "Minor" if target_ver_str == latest_sm else "Major"
-                    ov_badge_class = "v-chip-ok" if ov_badge == "Patch" else "v-chip-safe" if ov_badge == "Minor" else "v-chip-major"
-                    override_options = [{
-                        "id": "override",
-                        "label": f"Override {name}: v{_clean_v(target_ver_str)}",
-                        "badge": ov_badge,
-                        "badge_class": ov_badge_class,
-                        "diff": ov_diff
-                    }]
-                    strategies.append({
-                        "id": "override",
-                        "title": f"Force Transitive Override ({name})",
-                        "description": f"Adds explicit override / resolution for '{name}' in manifest.",
-                        "is_recommended": len(strategies) == 0,
-                        "options": override_options
-                    })
+                    ov_badge = (
+                        "Patch"
+                        if target_ver_str == latest_patch
+                        else "Minor" if target_ver_str == latest_sm else "Major"
+                    )
+                    ov_badge_class = (
+                        "v-chip-ok"
+                        if ov_badge == "Patch"
+                        else "v-chip-safe" if ov_badge == "Minor" else "v-chip-major"
+                    )
+                    override_options = [
+                        {
+                            "id": "override",
+                            "label": f"Override {name}: v{_clean_v(target_ver_str)}",
+                            "badge": ov_badge,
+                            "badge_class": ov_badge_class,
+                            "diff": ov_diff,
+                        }
+                    ]
+                    strategies.append(
+                        {
+                            "id": "override",
+                            "title": f"Force Transitive Override ({name})",
+                            "description": f"Adds explicit override / resolution for '{name}' in manifest.",
+                            "is_recommended": len(strategies) == 0,
+                            "options": override_options,
+                        }
+                    )
 
         all_flat_options = []
         for st in strategies:
             all_flat_options.extend(st.get("options", []))
 
-        remediation_safe = next((opt["diff"] for opt in all_flat_options if opt["id"] in ("patch", "minor")), None)
-        remediation_major = next((opt["diff"] for opt in all_flat_options if opt["id"] == "major"), None)
-        remediation_options = [{"label": opt["label"], "diff": opt["diff"]} for opt in all_flat_options] if all_flat_options else None
+        remediation_safe = next(
+            (
+                opt["diff"]
+                for opt in all_flat_options
+                if opt["id"] in ("patch", "minor")
+            ),
+            None,
+        )
+        remediation_major = next(
+            (opt["diff"] for opt in all_flat_options if opt["id"] == "major"), None
+        )
+        remediation_options = (
+            [{"label": opt["label"], "diff": opt["diff"]} for opt in all_flat_options]
+            if all_flat_options
+            else None
+        )
 
         if strategies:
             first_diff = all_flat_options[0]["diff"] if all_flat_options else None
@@ -8517,13 +9994,15 @@ def populate_remediation_recommendations(results, default_project_path):
                 "major": remediation_major or last_diff,
                 "options": remediation_options,
                 "manifest_missing": manifest_missing,
-                "strategies": strategies
+                "strategies": strategies,
             }
             if manifest_missing:
                 r["manifest_missing"] = True
 
     if total_items > 0:
-        sys.stdout.write(f"\r{COLOR_GRAY}{ICON_INFO} Processing results: 100% ({total_items}/{total_items} packages)... Done.{COLOR_RESET}\n")
+        sys.stdout.write(
+            f"\r{COLOR_GRAY}{ICON_INFO} Processing results: 100% ({total_items}/{total_items} packages)... Done.{COLOR_RESET}\n"
+        )
         sys.stdout.flush()
 
 
@@ -11285,6 +12764,7 @@ ${taskList}`;
 
 def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
     """Exports results as a rich, interactive HTML dashboard report."""
+
     def escape_js_string(s):
         if not s:
             return ""
@@ -11305,17 +12785,23 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
         # Calculate summary statistics
         total = len(results)
         up_to_date = sum(1 for r in results if r["status"] in ("up-to-date", "local"))
-        outdated = sum(1 for r in results if r["status"] in ("major", "minor", "patch", "minor-major", "patch-major"))
+        outdated = sum(
+            1
+            for r in results
+            if r["status"] in ("major", "minor", "patch", "minor-major", "patch-major")
+        )
         deprecated = sum(1 for r in results if r["deprecated"])
         errors = sum(1 for r in results if r["status"] == "error")
-        
+
         total_vulns = 0
         suppressed_vulns = 0
-        
+
         if vuls_enabled:
             total_vulns = sum(len(r.get("vulnerabilities", [])) for r in results)
-            suppressed_vulns = sum(len(r.get("suppressed_vulnerabilities", [])) for r in results)
-            
+            suppressed_vulns = sum(
+                len(r.get("suppressed_vulnerabilities", [])) for r in results
+            )
+
         # Count severities for SVG Chart
         malicious = 0
         critical = 0
@@ -11323,7 +12809,7 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
         medium = 0
         low = 0
         unknown = 0
-        
+
         for r in results:
             for v in r.get("vulnerabilities", []):
                 level = get_severity_level(v)
@@ -11339,17 +12825,17 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                     low += 1
                 else:
                     unknown += 1
-                    
+
         max_count = max(malicious, critical, high, medium, low, unknown, 1)
         max_h = 130
-        
+
         mal_h = int((malicious / max_count) * max_h)
         crit_h = int((critical / max_count) * max_h)
         high_h = int((high / max_count) * max_h)
         med_h = int((medium / max_count) * max_h)
         low_h = int((low / max_count) * max_h)
         unkn_h = int((unknown / max_count) * max_h)
-        
+
         base_y = 180
         mal_y = base_y - mal_h
         crit_y = base_y - crit_h
@@ -11357,14 +12843,14 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
         med_y = base_y - med_h
         low_y = base_y - low_h
         unkn_y = base_y - unkn_h
-        
+
         mal_val_y = mal_y - 8 if malicious > 0 else base_y - 8
         crit_val_y = crit_y - 8 if critical > 0 else base_y - 8
         high_val_y = high_y - 8 if high > 0 else base_y - 8
         med_val_y = med_y - 8 if medium > 0 else base_y - 8
         low_val_y = low_y - 8 if low > 0 else base_y - 8
         unkn_val_y = unkn_y - 8 if unknown > 0 else base_y - 8
-        
+
         # Build SVG Chart
         svg_chart = f"""
         <svg viewBox="0 0 500 220" width="100%" height="220" style="background: #111827; border-radius: 12px; border: 1px solid #374151; padding: 15px; box-sizing: border-box;">
@@ -11450,24 +12936,28 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             </defs>
         </svg>
         """
-        
+
         pkg_counts = {}
         for r in results:
             pkg_counts[r["name"]] = pkg_counts.get(r["name"], 0) + 1
 
         # Check if we should show the project path in the global header or per-card
-        unique_project_paths = sorted(list(set(r.get("project_path") for r in results if r.get("project_path"))))
+        unique_project_paths = sorted(
+            list(set(r.get("project_path") for r in results if r.get("project_path")))
+        )
         show_project_globally = len(unique_project_paths) <= 1
-        
-        unique_technologies = sorted(list(set(r.get("technology") for r in results if r.get("technology"))))
-        
+
+        unique_technologies = sorted(
+            list(set(r.get("technology") for r in results if r.get("technology")))
+        )
+
         technology_dropdown_html = ""
         if len(unique_technologies) > 1:
             tech_rows = []
             for tech in unique_technologies:
                 tech_esc = escape_html(tech)
                 tech_val_esc = escape_html(tech.lower())
-                tech_rows.append(f'''
+                tech_rows.append(f"""
                         <div class="dropdown-row">
                             <label><input type="checkbox" value="{tech_val_esc}" checked onchange="filterPackages()"> {tech_esc}</label>
                             <span class="row-actions">
@@ -11475,8 +12965,8 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                                 <span class="action-separator">/</span>
                                 <span class="action-btn" onclick="selectAll(event)">all</span>
                             </span>
-                        </div>''')
-            technology_dropdown_html = f'''
+                        </div>""")
+            technology_dropdown_html = f"""
                 <div class="filter-group">
                     <button class="filter-btn btn-facet" data-cat="technology" onclick="setCategory('technology', event)">
                         Technology <span class="chevron-inline">▼</span>
@@ -11484,16 +12974,27 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                     <div class="filter-dropdown" id="dropdown-technology">
                         {''.join(tech_rows)}
                     </div>
-                </div>'''
+                </div>"""
 
         project_path_header_html = ""
         if show_project_globally and unique_project_paths:
             single_path = unique_project_paths[0]
-            techs = list(sorted(list(set(r.get("technology") for r in results if r.get("project_path") == single_path and r.get("technology")))))
+            techs = list(
+                sorted(
+                    list(
+                        set(
+                            r.get("technology")
+                            for r in results
+                            if r.get("project_path") == single_path
+                            and r.get("technology")
+                        )
+                    )
+                )
+            )
             tech_suffix = f" [{', '.join(techs)}]" if techs else ""
-            project_path_header_html = f'<div>Path: <strong>{escape_html(single_path)}{escape_html(tech_suffix)}</strong></div>'
+            project_path_header_html = f"<div>Path: <strong>{escape_html(single_path)}{escape_html(tech_suffix)}</strong></div>"
         elif not show_project_globally:
-            project_path_header_html = f'<div>Projects: <strong>Multiple ({len(unique_project_paths)})</strong></div>'
+            project_path_header_html = f"<div>Projects: <strong>Multiple ({len(unique_project_paths)})</strong></div>"
 
         # Extract unique vulnerabilities to global store and build compact JSON packages
         vulnerability_store = {}
@@ -11504,7 +13005,7 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                     vulnerability_store[vid] = {
                         "severity": get_severity_level(v),
                         "summary": v.get("summary", ""),
-                        "details": v.get("details", "")
+                        "details": v.get("details", ""),
                     }
             for sv in r.get("suppressed_vulnerabilities", []):
                 vid = sv["id"]
@@ -11512,7 +13013,7 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                     vulnerability_store[vid] = {
                         "severity": get_severity_level(sv),
                         "summary": sv.get("summary", ""),
-                        "details": sv.get("details", "")
+                        "details": sv.get("details", ""),
                     }
 
         json_packages = []
@@ -11520,14 +13021,14 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             name = r["name"]
             declared = r["declared"]
             installed = r["installed"]
-            
+
             is_direct_install = False
             if declared:
                 if pkg_counts.get(name, 0) == 1:
                     is_direct_install = True
                 else:
                     is_direct_install = check_semver_satisfies(installed, declared)
-            
+
             dep_type = r.get("dep_type")
             if not dep_type:
                 dep_type = "Transitive"
@@ -11538,10 +13039,14 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                         dep_type = "Direct"
                     elif name in pkg_data.get("devDependencies", {}):
                         dep_type = "Dev"
-                    
-            if r.get("required_by") and not r.get("is_engine", False) and ("indirect" in r.get("required_by", []) or dep_type == "Transitive"):
+
+            if (
+                r.get("required_by")
+                and not r.get("is_engine", False)
+                and ("indirect" in r.get("required_by", []) or dep_type == "Transitive")
+            ):
                 dep_type = "Transitive"
-                
+
             pkg_record = {
                 "name": name,
                 "declared": declared,
@@ -11559,10 +13064,12 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                 "suppressed_vulnerabilities": [
                     {
                         "id": sv["id"],
-                        "suppressed_reason": sv.get("suppressed_reason", "No reason provided"),
+                        "suppressed_reason": sv.get(
+                            "suppressed_reason", "No reason provided"
+                        ),
                         "justification": sv.get("justification", "N/A"),
                         "expires_at": sv.get("expires_at", "N/A"),
-                        "approved_by": sv.get("approved_by", "")
+                        "approved_by": sv.get("approved_by", ""),
                     }
                     for sv in r.get("suppressed_vulnerabilities", [])
                 ],
@@ -11574,10 +13081,14 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                 "remediation": r.get("remediation"),
                 "excluded_warning": r.get("excluded_warning"),
                 "compare_url": r.get("compare_url"),
-                "releases_url": r.get("releases_url")
+                "releases_url": r.get("releases_url"),
             }
             # Remove keys with None, False, empty list, or empty string to optimize JSON payload size
-            pkg_record = {k: v for k, v in pkg_record.items() if v is not None and v is not False and v != "" and v != []}
+            pkg_record = {
+                k: v
+                for k, v in pkg_record.items()
+                if v is not None and v is not False and v != "" and v != []
+            }
             json_packages.append(pkg_record)
 
         # Sort results for JSON display: packages with higher severity vulnerabilities first
@@ -11587,29 +13098,55 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                 "high": 3,
                 "medium": 2,
                 "low": 1,
-                "unknown": 0
+                "unknown": 0,
             }
+
             def get_pkg_max_severity(pkg):
                 vuln_ids = pkg.get("vulnerabilities", [])
-                sevs = [vulnerability_store[vid]["severity"] for vid in vuln_ids if vid in vulnerability_store]
+                sevs = [
+                    vulnerability_store[vid]["severity"]
+                    for vid in vuln_ids
+                    if vid in vulnerability_store
+                ]
                 if not sevs:
                     return 1
                 return -max(severity_order.get(s.lower(), 0) for s in sevs)
-            json_packages.sort(key=lambda p: (get_pkg_max_severity(p), p["name"].lower()))
+
+            json_packages.sort(
+                key=lambda p: (get_pkg_max_severity(p), p["name"].lower())
+            )
         else:
             json_packages.sort(key=lambda p: p["name"].lower())
 
         # FIXED: XSS Mitigation via JSON serialization
-        escaped_packages_json = json.dumps(json_packages).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
-        escaped_vulns_json = json.dumps(vulnerability_store).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+        escaped_packages_json = (
+            json.dumps(json_packages)
+            .replace("<", "\\u003c")
+            .replace(">", "\\u003e")
+            .replace("&", "\\u0026")
+        )
+        escaped_vulns_json = (
+            json.dumps(vulnerability_store)
+            .replace("<", "\\u003c")
+            .replace(">", "\\u003e")
+            .replace("&", "\\u0026")
+        )
 
         # HTML Master Template rendering
         template_str = HTMLReportTemplateProvider.get_template()
         template = string.Template(template_str)
-        
-        project_title = escape_html(results[0]["name"].split(":")[0] if (results and ":" in results[0]["name"]) else "Project")
-        svg_chart_html = svg_chart if vuls_enabled else '<div style="background:#111827; border-radius:12px; border:1px solid #374151; height:220px; display:flex; align-items:center; justify-content:center; color:#9ca3af; font-size:14px;">Vulnerabilities scan disabled. Run with --vuls to enable charts.</div>'
-        
+
+        project_title = escape_html(
+            results[0]["name"].split(":")[0]
+            if (results and ":" in results[0]["name"])
+            else "Project"
+        )
+        svg_chart_html = (
+            svg_chart
+            if vuls_enabled
+            else '<div style="background:#111827; border-radius:12px; border:1px solid #374151; height:220px; display:flex; align-items:center; justify-content:center; color:#9ca3af; font-size:14px;">Vulnerabilities scan disabled. Run with --vuls to enable charts.</div>'
+        )
+
         mapping = {
             "VERSION": VERSION,
             "deprecated": str(deprecated),
@@ -11621,26 +13158,34 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             "total": str(total),
             "total_vulns": str(total_vulns),
             "up_to_date": str(up_to_date),
-            "scan_date": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            "scan_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "project_title": project_title,
             "svg_chart": svg_chart_html,
             "packages_json_data": escaped_packages_json,
             "vulns_json_data": escaped_vulns_json,
             "show_project_globally": json.dumps(show_project_globally),
-            "unique_project_paths": json.dumps(unique_project_paths).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026"),
-            "unique_technologies": json.dumps(unique_technologies).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026"),
+            "unique_project_paths": json.dumps(unique_project_paths)
+            .replace("<", "\\u003c")
+            .replace(">", "\\u003e")
+            .replace("&", "\\u0026"),
+            "unique_technologies": json.dumps(unique_technologies)
+            .replace("<", "\\u003c")
+            .replace(">", "\\u003e")
+            .replace("&", "\\u0026"),
             "technology_dropdown_html": technology_dropdown_html,
-            "vuls_enabled": json.dumps(vuls_enabled)
+            "vuls_enabled": json.dumps(vuls_enabled),
         }
-        
+
         html_content = template.safe_substitute(mapping)
-        
-        
+
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(html_content)
-        print(f"{COLOR_GREEN}{ICON_OK} HTML interactive dashboard successfully exported to {filepath}{COLOR_RESET}")
+        print(
+            f"{COLOR_GREEN}{ICON_OK} HTML interactive dashboard successfully exported to {filepath}{COLOR_RESET}"
+        )
     except Exception as e:
         print(f"{COLOR_RED}{ICON_ERROR} Failed to export HTML report: {e}{COLOR_RESET}")
+
 
 # ==============================================================================
 # CLI Entrypoint
@@ -11670,7 +13215,7 @@ def detect_technologies(dir_path):
         return detected
 
     lower_files = [f.lower() for f in files]
-    
+
     for tech, info in TECHNOLOGIES.items():
         matched = False
         for pattern in info["files"]:
@@ -11684,25 +13229,42 @@ def detect_technologies(dir_path):
                     break
         if matched:
             detected.append(tech)
-            
+
     if "gradle" in detected and "android" in detected:
         detected.remove("android")
-        
+
     return detected
+
 
 def find_projects_recursively(base_path):
     """Walks the directory recursively to find all projects and their detected technologies."""
     projects = []
     ignored_dirs = {
-        ".git", ".github", ".svn", ".hg", "node_modules", "bower_components",
-        "venv", ".venv", "env", ".env", "bin", "obj", "target", "vendor",
-        ".gradle", "__pycache__", ".idea", ".vscode", ".agents"
+        ".git",
+        ".github",
+        ".svn",
+        ".hg",
+        "node_modules",
+        "bower_components",
+        "venv",
+        ".venv",
+        "env",
+        ".env",
+        "bin",
+        "obj",
+        "target",
+        "vendor",
+        ".gradle",
+        "__pycache__",
+        ".idea",
+        ".vscode",
+        ".agents",
     }
-    
+
     detected_base = detect_technologies(base_path)
     if detected_base:
         projects.append((base_path, detected_base))
-        
+
     for root, dirs, files in os.walk(base_path):
         dirs[:] = [d for d in dirs if d.lower() not in ignored_dirs]
         for d in dirs:
@@ -11710,10 +13272,12 @@ def find_projects_recursively(base_path):
             detected = detect_technologies(dir_path)
             if detected:
                 projects.append((dir_path, detected))
-                
+
     return projects
 
+
 # Old get_severity_level and CVSS calculation functions were removed to unify the severity logic
+
 
 def check_pipeline_failure(results, fail_config):
     """Checks if the vulnerability thresholds are breached to fail the build.
@@ -11721,10 +13285,10 @@ def check_pipeline_failure(results, fail_config):
     """
     if not fail_config:
         return False
-        
+
     total_vulns = 0
     severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "unknown": 0}
-    
+
     for r in results:
         for vuln in r.get("vulnerabilities", []):
             total_vulns += 1
@@ -11733,10 +13297,10 @@ def check_pipeline_failure(results, fail_config):
                 severity_counts[severity] += 1
             else:
                 severity_counts["unknown"] += 1
-                
+
     if fail_config == "any":
         return total_vulns > 0
-        
+
     try:
         thresholds = {}
         for part in fail_config.split(","):
@@ -11746,19 +13310,26 @@ def check_pipeline_failure(results, fail_config):
                 if sev_clean == "moderate":
                     sev_clean = "medium"
                 thresholds[sev_clean] = int(val.strip())
-                
+
         for sev, limit in thresholds.items():
             if sev in severity_counts and severity_counts[sev] >= limit:
-                print(f"\n{COLOR_RED}{ICON_ERROR} CI/CD Threshold Breached: Found {severity_counts[sev]} {sev.upper()} vulnerabilities (Limit: {limit}){COLOR_RESET}")
+                print(
+                    f"\n{COLOR_RED}{ICON_ERROR} CI/CD Threshold Breached: Found {severity_counts[sev]} {sev.upper()} vulnerabilities (Limit: {limit}){COLOR_RESET}"
+                )
                 return True
             elif sev == "unknown" and severity_counts["unknown"] >= limit:
-                print(f"\n{COLOR_RED}{ICON_ERROR} CI/CD Threshold Breached: Found {severity_counts['unknown']} UNKNOWN vulnerabilities (Limit: {limit}){COLOR_RESET}")
+                print(
+                    f"\n{COLOR_RED}{ICON_ERROR} CI/CD Threshold Breached: Found {severity_counts['unknown']} UNKNOWN vulnerabilities (Limit: {limit}){COLOR_RESET}"
+                )
                 return True
     except Exception as e:
-        print(f"\n{COLOR_YELLOW}{ICON_WARN} Warning: Failed to parse --fail-on-vulns config '{fail_config}': {e}. Falling back to fail on any vulnerability.{COLOR_RESET}")
+        print(
+            f"\n{COLOR_YELLOW}{ICON_WARN} Warning: Failed to parse --fail-on-vulns config '{fail_config}': {e}. Falling back to fail on any vulnerability.{COLOR_RESET}"
+        )
         return total_vulns > 0
-        
+
     return False
+
 
 def check_pipeline_failure_deprecated(results, fail_config):
     """Checks if the deprecated threshold is breached to fail the build.
@@ -11766,21 +13337,26 @@ def check_pipeline_failure_deprecated(results, fail_config):
     """
     if not fail_config:
         return False
-        
+
     deprecated_count = sum(1 for r in results if r.get("deprecated"))
-    
+
     limit = 1
     if fail_config != "any":
         try:
             limit = int(fail_config.strip())
         except ValueError:
-            print(f"\n{COLOR_YELLOW}{ICON_WARN} Warning: Failed to parse --fail-on-deprecated config '{fail_config}'. Falling back to fail on any deprecated package.{COLOR_RESET}")
+            print(
+                f"\n{COLOR_YELLOW}{ICON_WARN} Warning: Failed to parse --fail-on-deprecated config '{fail_config}'. Falling back to fail on any deprecated package.{COLOR_RESET}"
+            )
             limit = 1
-            
+
     if deprecated_count >= limit:
-        print(f"\n{COLOR_RED}{ICON_ERROR} CI/CD Threshold Breached: Found {deprecated_count} deprecated dependency/dependencies (Limit: {limit}){COLOR_RESET}")
+        print(
+            f"\n{COLOR_RED}{ICON_ERROR} CI/CD Threshold Breached: Found {deprecated_count} deprecated dependency/dependencies (Limit: {limit}){COLOR_RESET}"
+        )
         return True
     return False
+
 
 def check_pipeline_failure_outdated(results, fail_config):
     """Checks if the outdated threshold is breached to fail the build.
@@ -11788,27 +13364,37 @@ def check_pipeline_failure_outdated(results, fail_config):
     """
     if not fail_config:
         return False
-        
-    major_count = sum(1 for r in results if r.get("status") in ("major", "minor-major", "patch-major"))
+
+    major_count = sum(
+        1 for r in results if r.get("status") in ("major", "minor-major", "patch-major")
+    )
     minor_count = sum(1 for r in results if r.get("status") in ("minor", "minor-major"))
     patch_count = sum(1 for r in results if r.get("status") in ("patch", "patch-major"))
-    total_outdated = sum(1 for r in results if r.get("status") in ("patch", "minor", "major", "minor-major", "patch-major"))
-    
+    total_outdated = sum(
+        1
+        for r in results
+        if r.get("status") in ("patch", "minor", "major", "minor-major", "patch-major")
+    )
+
     if fail_config == "any":
         if total_outdated > 0:
-            print(f"\n{COLOR_RED}{ICON_ERROR} CI/CD Threshold Breached: Found {total_outdated} outdated dependency/dependencies (Limit: 1){COLOR_RESET}")
+            print(
+                f"\n{COLOR_RED}{ICON_ERROR} CI/CD Threshold Breached: Found {total_outdated} outdated dependency/dependencies (Limit: 1){COLOR_RESET}"
+            )
             return True
         return False
-        
+
     try:
         limit = int(fail_config.strip())
         if total_outdated >= limit:
-            print(f"\n{COLOR_RED}{ICON_ERROR} CI/CD Threshold Breached: Found {total_outdated} outdated dependency/dependencies (Limit: {limit}){COLOR_RESET}")
+            print(
+                f"\n{COLOR_RED}{ICON_ERROR} CI/CD Threshold Breached: Found {total_outdated} outdated dependency/dependencies (Limit: {limit}){COLOR_RESET}"
+            )
             return True
         return False
     except ValueError:
         pass
-        
+
     try:
         thresholds = {}
         for part in fail_config.split(","):
@@ -11816,48 +13402,54 @@ def check_pipeline_failure_outdated(results, fail_config):
                 status_type, val = part.split(":", 1)
                 status_clean = status_type.strip().lower()
                 thresholds[status_clean] = int(val.strip())
-                
+
         status_counts = {
             "major": major_count,
             "minor": minor_count,
-            "patch": patch_count
+            "patch": patch_count,
         }
-        
+
         for status_type, limit in thresholds.items():
             if status_type in status_counts and status_counts[status_type] >= limit:
-                print(f"\n{COLOR_RED}{ICON_ERROR} CI/CD Threshold Breached: Found {status_counts[status_type]} {status_type.upper()} outdated packages (Limit: {limit}){COLOR_RESET}")
+                print(
+                    f"\n{COLOR_RED}{ICON_ERROR} CI/CD Threshold Breached: Found {status_counts[status_type]} {status_type.upper()} outdated packages (Limit: {limit}){COLOR_RESET}"
+                )
                 return True
     except Exception as e:
-        print(f"\n{COLOR_YELLOW}{ICON_WARN} Warning: Failed to parse --fail-on-outdated config '{fail_config}': {e}. Falling back to fail on any outdated package.{COLOR_RESET}")
+        print(
+            f"\n{COLOR_YELLOW}{ICON_WARN} Warning: Failed to parse --fail-on-outdated config '{fail_config}': {e}. Falling back to fail on any outdated package.{COLOR_RESET}"
+        )
         if total_outdated > 0:
-            print(f"\n{COLOR_RED}{ICON_ERROR} CI/CD Threshold Breached: Found {total_outdated} outdated dependency/dependencies (Limit: 1){COLOR_RESET}")
+            print(
+                f"\n{COLOR_RED}{ICON_ERROR} CI/CD Threshold Breached: Found {total_outdated} outdated dependency/dependencies (Limit: 1){COLOR_RESET}"
+            )
             return True
-            
+
     return False
+
 
 def check_for_updates():
     """Checks for updates from remote version.md and writes local version.md."""
     url = "https://raw.githubusercontent.com/brunoevn/kevlar-checkdeps/main/version.md"
     print(f"{COLOR_GRAY}{ICON_INFO} Checking for updates from GitHub...{COLOR_RESET}")
-    
+
     latest_version = "Unknown"
     try:
         req = urllib.request.Request(
-            url,
-            headers={"User-Agent": "Kevlar-CheckDeps-Updater"}
+            url, headers={"User-Agent": "Kevlar-CheckDeps-Updater"}
         )
         with safe_urlopen(req, timeout=5) as response:
             content = response.read(1024).decode("utf-8")
-            
+
         match = re.search(r'VERSION\s*=\s*["\']([^"\']+)["\']', content)
         if match:
             latest_version = match.group(1)
     except Exception as e:
         print(f"{COLOR_RED}{ICON_ERROR} Error checking for updates: {e}{COLOR_RESET}")
         latest_version = "Error"
-        
+
     status = "Up-to-date"
-    if latest_version not in ("Unknown", "Error"):
+    if latest_version not in {"Unknown", "Error"}:
         try:
             curr_parts = [int(x) for x in VERSION.split(".")]
             late_parts = [int(x) for x in latest_version.split(".")]
@@ -11866,11 +13458,14 @@ def check_for_updates():
         except Exception:
             if latest_version != VERSION:
                 status = "Update Available"
-                
+
     if status == "Update Available":
-        print(f"{COLOR_YELLOW}{ICON_WARN} A new version v{latest_version} is available! (Current: v{VERSION}).{COLOR_RESET}")
-    elif latest_version not in ("Unknown", "Error"):
+        print(
+            f"{COLOR_YELLOW}{ICON_WARN} A new version v{latest_version} is available! (Current: v{VERSION}).{COLOR_RESET}"
+        )
+    elif latest_version not in {"Unknown", "Error"}:
         print(f"{COLOR_GREEN}{ICON_OK} Kevlar is up-to-date (v{VERSION}).{COLOR_RESET}")
+
 
 def print_banner():
     banner = f"""{COLOR_BOLD}{COLOR_CYAN}
@@ -11889,123 +13484,148 @@ def setup_argparse():
         description="Kevlar CheckDeps: Generic Dependency Checker & SCA Tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         add_help=False,
-        epilog='''
+        epilog="""
 Examples:
   python kevlar.py --tech npm --path ./Backend
   python kevlar.py --tech npm --path ./Frontend --all --show-all
   python kevlar.py --tech npm --output report.json
-        '''
+        """,
     )
-    
+
     parser.add_argument(
-        "--help", "-h",
+        "--help",
+        "-h",
         action="help",
         default=argparse.SUPPRESS,
-        help="Show this help message and exit."
+        help="Show this help message and exit.",
     )
     parser.add_argument(
-        "--version", "-V",
+        "--version",
+        "-V",
         action="version",
         version=f"kevlar CheckDeps v{VERSION}",
-        help="Show program's version number and exit."
+        help="Show program's version number and exit.",
     )
     parser.add_argument(
-        "--update",
-        action="store_true",
-        help="Check for updates from GitHub."
+        "--update", action="store_true", help="Check for updates from GitHub."
     )
     parser.add_argument(
-        "--tech", "-t",
+        "--tech",
+        "-t",
         required=False,
-        choices=["npm", "pip", "nuget", "php", "maven", "go", "rust", "ruby", "gradle", "android", "auto"],
-        help="The package manager / technology to check (or 'auto' to detect automatically)."
+        choices=[
+            "npm",
+            "pip",
+            "nuget",
+            "php",
+            "maven",
+            "go",
+            "rust",
+            "ruby",
+            "gradle",
+            "android",
+            "auto",
+        ],
+        help="The package manager / technology to check (or 'auto' to detect automatically).",
     )
     parser.add_argument(
-        "--path", "-p",
+        "--path",
+        "-p",
         default=".",
-        help="The directory path containing the package files (default: current directory)."
+        help="The directory path containing the package files (default: current directory).",
     )
     parser.add_argument(
-        "--all", "-a",
+        "--all",
+        "-a",
         action="store_true",
-        help="Scan all dependencies (including transitive ones), rather than just direct ones."
+        help="Scan all dependencies (including transitive ones), rather than just direct ones.",
     )
     parser.add_argument(
-        "--concurrent", "-c",
+        "--concurrent",
+        "-c",
         type=int,
         default=10,
-        help="Number of concurrent network requests (default: 10)."
+        help="Number of concurrent network requests (default: 10).",
     )
     parser.add_argument(
-        "--output", "-o",
-        help="Path to export the report file (supports .json, .md, and .html formats)."
+        "--output",
+        "-o",
+        help="Path to export the report file (supports .json, .md, and .html formats).",
     )
     parser.add_argument(
         "--show-all",
         action="store_true",
-        help="Show all dependencies in the output, even if they are up-to-date."
+        help="Show all dependencies in the output, even if they are up-to-date.",
     )
     parser.add_argument(
-        "--vuls", "-v",
+        "--vuls",
+        "-v",
         action="store_true",
-        help="Check security vulnerabilities using the Google OSV database."
+        help="Check security vulnerabilities using the Google OSV database.",
     )
     parser.add_argument(
         "--fail-on-vulns",
         nargs="?",
         const="any",
         default=None,
-        help="Exit with code 1 if security vulnerabilities are found. Optionally specify thresholds, e.g., 'critical:2,high:4'."
+        help="Exit with code 1 if security vulnerabilities are found. Optionally specify thresholds, e.g., 'critical:2,high:4'.",
     )
     parser.add_argument(
         "--fail-on-deprecated",
         nargs="?",
         const="any",
         default=None,
-        help="Exit with code 1 if deprecated dependencies are found. Optionally specify count threshold (e.g. '3')."
+        help="Exit with code 1 if deprecated dependencies are found. Optionally specify count threshold (e.g. '3').",
     )
     parser.add_argument(
         "--fail-on-outdated",
         nargs="?",
         const="any",
         default=None,
-        help="Exit with code 1 if outdated dependencies are found. Optionally specify count threshold (e.g., '3') or specific types (e.g., 'major:2,minor:4')."
+        help="Exit with code 1 if outdated dependencies are found. Optionally specify count threshold (e.g., '3') or specific types (e.g., 'major:2,minor:4').",
     )
     parser.add_argument(
-        "--suppress", "-s",
+        "--suppress",
+        "-s",
         default=None,
-        help="Path to a JSON file containing vulnerability suppressions (default: look for 'kevlar-suppressions.json')."
+        help="Path to a JSON file containing vulnerability suppressions (default: look for 'kevlar-suppressions.json').",
     )
     parser.add_argument(
         "--scan-all",
         action="store_true",
-        help="Recursively scan the path for multiple projects, automatically detecting their technologies."
+        help="Recursively scan the path for multiple projects, automatically detecting their technologies.",
     )
     parser.add_argument(
         "--format",
         choices=["html", "json", "sarif", "both"],
-        help="Output report format when using --scan-all. 'both' generates HTML and JSON."
+        help="Output report format when using --scan-all. 'both' generates HTML and JSON.",
     )
     parser.add_argument(
-        "--no-show-console", "-n",
+        "--no-show-console",
+        "-n",
         action="store_true",
-        help="Suppress printing detailed dependency tables and vulnerability lists in the console, displaying only progress logs, project headers, and summary reports."
+        help="Suppress printing detailed dependency tables and vulnerability lists in the console, displaying only progress logs, project headers, and summary reports.",
     )
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="Print detailed stack trace and internal error messages to stdout during execution."
+        help="Print detailed stack trace and internal error messages to stdout during execution.",
     )
-    
+
     return parser
 
+
 def run_scan_all(args, parser):
-    print(f"{COLOR_GRAY}{ICON_INFO} Scanning recursively for projects in: {args.path}{COLOR_RESET}")
+    print(
+        f"{COLOR_GRAY}{ICON_INFO} Scanning recursively for projects in: {args.path}{COLOR_RESET}"
+    )
     projects = find_projects_recursively(args.path)
     if not projects:
-        print(f"{COLOR_YELLOW}{ICON_WARN} No projects detected in path: {args.path}{COLOR_RESET}")
+        print(
+            f"{COLOR_YELLOW}{ICON_WARN} No projects detected in path: {args.path}{COLOR_RESET}"
+        )
         sys.exit(0)
-        
+
     if args.tech:
         filtered_projects = []
         for project_path, techs in projects:
@@ -12013,10 +13633,14 @@ def run_scan_all(args, parser):
                 filtered_projects.append((project_path, [args.tech]))
         projects = filtered_projects
         if not projects:
-            print(f"{COLOR_YELLOW}{ICON_WARN} No projects matching technology '{args.tech}' found in path: {args.path}{COLOR_RESET}")
+            print(
+                f"{COLOR_YELLOW}{ICON_WARN} No projects matching technology '{args.tech}' found in path: {args.path}{COLOR_RESET}"
+            )
             sys.exit(0)
-            
-    print(f"{COLOR_GRAY}{ICON_INFO} Found {len(projects)} project(s) to scan.{COLOR_RESET}")
+
+    print(
+        f"{COLOR_GRAY}{ICON_INFO} Found {len(projects)} project(s) to scan.{COLOR_RESET}"
+    )
 
     combined_results = []
     combined_dependencies = {}
@@ -12045,20 +13669,28 @@ def run_scan_all(args, parser):
                 args.path = project_path
                 args.tech = tech
                 results, pkg_data, elapsed = tech_info["runner"](args)
-                
+
                 if not results:
                     continue
-                    
+
                 for r in results:
                     r["project_path"] = project_path
                     r["technology"] = tech
-                    
+
                 populate_remediation_recommendations(results, project_path)
                 validate_configuration_drift(results)
-                apply_vulnerability_suppressions(results, args.suppress, project_path=project_path)
+                apply_vulnerability_suppressions(
+                    results, args.suppress, project_path=project_path
+                )
                 results = sorted(results, key=lambda x: x["name"].lower())
 
-                print_results_table(results, pkg_data, args.show_all, args.vuls, getattr(args, "no_show_console", False))
+                print_results_table(
+                    results,
+                    pkg_data,
+                    args.show_all,
+                    args.vuls,
+                    getattr(args, "no_show_console", False),
+                )
                 print_summary(results, elapsed, args.vuls)
 
                 rel_path = os.path.relpath(project_path, original_path)
@@ -12068,10 +13700,10 @@ def run_scan_all(args, parser):
                         proj_dirname = "project"
                 else:
                     proj_dirname = rel_path
-                    
+
                 proj_dirname = proj_dirname.replace("/", "_").replace("\\", "_")
-                safe_proj_dirname = re.sub(r'[^\w\-]', '_', proj_dirname)
-                safe_proj_dirname = re.sub(r'_{2,}', '_', safe_proj_dirname).strip("_")
+                safe_proj_dirname = re.sub(r"[^\w\-]", "_", proj_dirname)
+                safe_proj_dirname = re.sub(r"_{2,}", "_", safe_proj_dirname).strip("_")
 
                 base_safe_name = safe_proj_dirname
                 if base_safe_name in generated_report_basenames:
@@ -12083,17 +13715,17 @@ def run_scan_all(args, parser):
                         safe_proj_dirname = f"{candidate}-{counter}"
                     else:
                         safe_proj_dirname = candidate
-                        
+
                 generated_report_basenames.add(safe_proj_dirname)
 
-                if args.format in ("html", "both"):
+                if args.format in {"html", "both"}:
                     proj_html_filepath = f"report-{safe_proj_dirname}.html"
                     export_html_report(results, pkg_data, proj_html_filepath, args.vuls)
-                    
-                if args.format in ("json", "both"):
+
+                if args.format in {"json", "both"}:
                     proj_json_filepath = f"report-{safe_proj_dirname}.json"
                     export_json_report(results, proj_json_filepath)
-                    
+
                 if args.format == "sarif":
                     run_obj = generate_sarif_run(results)
                     sarif_runs.append(run_obj)
@@ -12106,19 +13738,23 @@ def run_scan_all(args, parser):
                     combined_devDependencies.update(pkg_data.get("devDependencies", {}))
                     combined_all_direct.update(pkg_data.get("all_direct", {}))
             except Exception as e:
-                print(f"{COLOR_RED}{ICON_ERROR} Error scanning project {project_path} with {tech}: {e}{COLOR_RESET}")
+                print(
+                    f"{COLOR_RED}{ICON_ERROR} Error scanning project {project_path} with {tech}: {e}{COLOR_RESET}"
+                )
             finally:
                 args.path = original_path
                 args.tech = original_tech
 
     if not combined_results:
-        print(f"{COLOR_YELLOW}{ICON_WARN} No dependency check results collected from projects.{COLOR_RESET}")
+        print(
+            f"{COLOR_YELLOW}{ICON_WARN} No dependency check results collected from projects.{COLOR_RESET}"
+        )
         sys.exit(0)
-        
+
     combined_pkg_data = {
         "dependencies": combined_dependencies,
         "devDependencies": combined_devDependencies,
-        "all_direct": combined_all_direct
+        "all_direct": combined_all_direct,
     }
 
     combined_results = sorted(combined_results, key=lambda x: x["name"].lower())
@@ -12127,7 +13763,9 @@ def run_scan_all(args, parser):
     print("=" * 80)
     print("CONSOLIDATED SUMMARY")
     print("=" * 80)
-    print_summary(combined_results, total_elapsed, args.vuls, projects_count=len(projects))
+    print_summary(
+        combined_results, total_elapsed, args.vuls, projects_count=len(projects)
+    )
 
     if args.format == "sarif" and sarif_runs:
         consolidated_path = "report-consolidated.sarif"
@@ -12135,24 +13773,33 @@ def run_scan_all(args, parser):
             consolidated_log = {
                 "$schema": "https://schemastore.org/json/schema/sarif-2.1.0-rtm.5.json",
                 "version": "2.1.0",
-                "runs": sarif_runs
+                "runs": sarif_runs,
             }
             with open(consolidated_path, "w", encoding="utf-8") as f:
                 json.dump(consolidated_log, f, indent=2)
-            print(f"\n{COLOR_GREEN}{ICON_OK} Consolidated SARIF report successfully exported to {consolidated_path}{COLOR_RESET}")
+            print(
+                f"\n{COLOR_GREEN}{ICON_OK} Consolidated SARIF report successfully exported to {consolidated_path}{COLOR_RESET}"
+            )
         except Exception as e:
-            print(f"\n{COLOR_RED}{ICON_ERROR} Failed to export consolidated SARIF report: {e}{COLOR_RESET}")
+            print(
+                f"\n{COLOR_RED}{ICON_ERROR} Failed to export consolidated SARIF report: {e}{COLOR_RESET}"
+            )
 
     process_pipeline_failures(combined_results, args)
     sys.exit(0)
 
+
 def run_auto_tech(args):
     detected_techs = detect_technologies(args.path)
     if not detected_techs:
-        print(f"{COLOR_RED}{ICON_ERROR} No technology detected in path: {args.path}{COLOR_RESET}")
+        print(
+            f"{COLOR_RED}{ICON_ERROR} No technology detected in path: {args.path}{COLOR_RESET}"
+        )
         sys.exit(1)
 
-    print(f"{COLOR_GRAY}{ICON_INFO} Automatically detected technology: {', '.join(detected_techs)}{COLOR_RESET}")
+    print(
+        f"{COLOR_GRAY}{ICON_INFO} Automatically detected technology: {', '.join(detected_techs)}{COLOR_RESET}"
+    )
 
     combined_results = []
     combined_dependencies = {}
@@ -12172,53 +13819,62 @@ def run_auto_tech(args):
                 print("-" * 50)
                 print(f"Running check for: {tech}")
                 print("-" * 50)
-                
+
             args.tech = tech
             results_tech, pkg_data_tech, elapsed_tech = tech_info["runner"](args)
 
             if not results_tech:
                 continue
-                
+
             for r in results_tech:
                 r["project_path"] = args.path
                 r["technology"] = tech
-                
+
             combined_results.extend(results_tech)
             total_elapsed += elapsed_tech
-            
+
             if pkg_data_tech:
                 combined_dependencies.update(pkg_data_tech.get("dependencies", {}))
-                combined_devDependencies.update(pkg_data_tech.get("devDependencies", {}))
+                combined_devDependencies.update(
+                    pkg_data_tech.get("devDependencies", {})
+                )
                 combined_all_direct.update(pkg_data_tech.get("all_direct", {}))
     finally:
         args.tech = original_tech
-        
+
     combined_pkg_data = {
         "dependencies": combined_dependencies,
         "devDependencies": combined_devDependencies,
-        "all_direct": combined_all_direct
+        "all_direct": combined_all_direct,
     }
-    
+
     return combined_results, combined_pkg_data, total_elapsed
+
 
 def process_single_project_results(results, pkg_data, elapsed, args):
     if not results:
         sys.exit(0)
-        
+
     for r in results:
         if "project_path" not in r:
             r["project_path"] = args.path
         if "technology" not in r:
             r["technology"] = args.tech if args.tech != "auto" else r.get("technology")
-            
+
     populate_remediation_recommendations(results, args.path)
     validate_configuration_drift(results)
     apply_vulnerability_suppressions(results, args.suppress, project_path=args.path)
     results = sorted(results, key=lambda x: x["name"].lower())
-    
-    print_results_table(results, pkg_data, args.show_all, args.vuls, getattr(args, "no_show_console", False))
+
+    print_results_table(
+        results,
+        pkg_data,
+        args.show_all,
+        args.vuls,
+        getattr(args, "no_show_console", False),
+    )
     print_summary(results, elapsed, args.vuls)
-    
+
     if args.output:
         if args.output.lower().endswith(".json"):
             export_json_report(results, args.output)
@@ -12229,21 +13885,29 @@ def process_single_project_results(results, pkg_data, elapsed, args):
         elif args.output.lower().endswith(".sarif"):
             export_sarif_report(results, args.output)
         else:
-            print(f"{COLOR_YELLOW}{ICON_WARN} Unknown output format. Export supports .json, .md, .html, or .sarif extension.{COLOR_RESET}")
-            
+            print(
+                f"{COLOR_YELLOW}{ICON_WARN} Unknown output format. Export supports .json, .md, .html, or .sarif extension.{COLOR_RESET}"
+            )
+
     process_pipeline_failures(results, args)
+
 
 def process_pipeline_failures(results, args):
     failed = False
     if args.fail_on_vulns and check_pipeline_failure(results, args.fail_on_vulns):
         failed = True
-    if args.fail_on_deprecated and check_pipeline_failure_deprecated(results, args.fail_on_deprecated):
+    if args.fail_on_deprecated and check_pipeline_failure_deprecated(
+        results, args.fail_on_deprecated
+    ):
         failed = True
-    if args.fail_on_outdated and check_pipeline_failure_outdated(results, args.fail_on_outdated):
+    if args.fail_on_outdated and check_pipeline_failure_outdated(
+        results, args.fail_on_outdated
+    ):
         failed = True
-        
+
     if failed:
         sys.exit(1)
+
 
 def main():
     init_colors_and_encoding()
@@ -12268,12 +13932,18 @@ def main():
 
     if args.scan_all:
         if args.output:
-            parser.error("cannot specify --output with --scan-all. The report is automatically generated, format is controlled via --format")
+            parser.error(
+                "cannot specify --output with --scan-all. The report is automatically generated, format is controlled via --format"
+            )
         if not args.format:
-            parser.error("the following argument is required when using --scan-all: --format")
+            parser.error(
+                "the following argument is required when using --scan-all: --format"
+            )
     else:
         if args.format:
-            parser.error("cannot specify --format without --scan-all. For single-project scan, specify output filename via --output")
+            parser.error(
+                "cannot specify --format without --scan-all. For single-project scan, specify output filename via --output"
+            )
 
     if args.scan_all:
         run_scan_all(args, parser)
@@ -12284,12 +13954,15 @@ def main():
     else:
         tech_info = TECHNOLOGIES.get(args.tech)
         if not tech_info:
-            print(f"{COLOR_RED}{ICON_ERROR} Unsupported technology: {args.tech}{COLOR_RESET}")
+            print(
+                f"{COLOR_RED}{ICON_ERROR} Unsupported technology: {args.tech}{COLOR_RESET}"
+            )
             sys.exit(1)
 
         results, pkg_data, elapsed = tech_info["runner"](args)
 
     process_single_project_results(results, pkg_data, elapsed, args)
+
 
 if __name__ == "__main__":
     main()

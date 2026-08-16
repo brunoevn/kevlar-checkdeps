@@ -45,7 +45,26 @@ class TestKevlar(unittest.TestCase):
                     os.remove(malicious_path_absolute)
                 except:
                     pass
-    
+
+    def test_parse_slnx_xxe_protection(self):
+        import tempfile
+        import os
+        xxe_payload = """<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE Solution [
+  <!ENTITY xxe SYSTEM "file:///etc/passwd">
+]>
+<Solution>
+  <Project Path="src/&xxe;.csproj" />
+</Solution>"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            slnx_path = os.path.join(tmpdir, "test.slnx")
+            with open(slnx_path, "w", encoding="utf-8") as f:
+                f.write(xxe_payload)
+
+            # safe_et_parse must raise ValueError due to forbidden DOCTYPE declaration
+            project_paths = kevlar.parse_sln_file(slnx_path)
+            self.assertEqual(project_paths, [])
+
     def test_parse_semver(self):
         # 3 segments
         self.assertEqual(kevlar.parse_semver("1.2.3"), (0, 1, 2, 3, 0, ""))
@@ -1078,7 +1097,7 @@ class TestKevlar(unittest.TestCase):
             self.assertTrue(os.path.exists(filepath))
             with open(filepath, "r", encoding="utf-8") as f:
                 content = f.read()
-                
+
             # Verify dangerous script tags are escaped as unicode escape sequences in JS block
             self.assertNotIn("</script><script>alert('xss-path')</script>", content)
             self.assertIn("\\u003c/script\\u003e\\u003cscript\\u003ealert('xss-path')\\u003c/script\\u003e", content)
@@ -2934,7 +2953,7 @@ class TestKevlar(unittest.TestCase):
 
         def mock_fetch(group_id, artifact_id, version, *args, **kwargs):
             if group_id == "org.example" and artifact_id == "parent-lib":
-                return ET.fromstring(parent_pom_xml)
+                return kevlar.safe_et_fromstring(parent_pom_xml)
             return None
 
         with patch("kevlar.fetch_remote_maven_pom", side_effect=mock_fetch):
