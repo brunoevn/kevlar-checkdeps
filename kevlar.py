@@ -1194,7 +1194,7 @@ def satisfy_term(version_str, term):
             parts = [
                 p.strip()
                 for p in clean_ver.split(".")
-                if p.strip() and p.strip() not in ("x", "*")
+                if p.strip() and p.strip() not in {"x", "*"}
             ]
             parts_count = len(parts)
 
@@ -8190,11 +8190,12 @@ def print_results_table(
 def print_summary(results, elapsed_time, vuls_enabled=False, projects_count=None):
     """Prints checks run count and categorization breakdown."""
     total = len(results)
-    up_to_date = sum(1 for r in results if r["status"] in ("up-to-date", "local"))
-    patch = sum(1 for r in results if r["status"] in ("patch", "patch-major"))
-    minor = sum(1 for r in results if r["status"] in ("minor", "minor-major"))
+    # Optimization: Use sets for O(1) membership lookups
+    up_to_date = sum(1 for r in results if r["status"] in {"up-to-date", "local"})
+    patch = sum(1 for r in results if r["status"] in {"patch", "patch-major"})
+    minor = sum(1 for r in results if r["status"] in {"minor", "minor-major"})
     major = sum(
-        1 for r in results if r["status"] in ("major", "minor-major", "patch-major")
+        1 for r in results if r["status"] in {"major", "minor-major", "patch-major"}
     )
     deprecated = sum(1 for r in results if r["deprecated"])
     errors = sum(1 for r in results if r["status"] == "error")
@@ -8202,7 +8203,7 @@ def print_summary(results, elapsed_time, vuls_enabled=False, projects_count=None
     outdated_total = sum(
         1
         for r in results
-        if r["status"] in ("patch", "minor", "major", "minor-major", "patch-major")
+        if r["status"] in {"patch", "minor", "major", "minor-major", "patch-major"}
     )
 
     print(f"\n{COLOR_BOLD}{COLOR_CYAN}Summary Report:{COLOR_RESET}")
@@ -8529,14 +8530,14 @@ def export_markdown_report(results, pkg_data, filepath, vuls_enabled=False):
             # Write summary
             total = len(results)
             up_to_date = sum(
-                1 for r in results if r["status"] in ("up-to-date", "local")
+                1 for r in results if r["status"] in {"up-to-date", "local"}
             )
-            patch = sum(1 for r in results if r["status"] in ("patch", "patch-major"))
-            minor = sum(1 for r in results if r["status"] in ("minor", "minor-major"))
+            patch = sum(1 for r in results if r["status"] in {"patch", "patch-major"})
+            minor = sum(1 for r in results if r["status"] in {"minor", "minor-major"})
             major = sum(
                 1
                 for r in results
-                if r["status"] in ("major", "minor-major", "patch-major")
+                if r["status"] in {"major", "minor-major", "patch-major"}
             )
             deprecated = sum(1 for r in results if r["deprecated"])
             errors = sum(1 for r in results if r["status"] == "error")
@@ -8544,7 +8545,7 @@ def export_markdown_report(results, pkg_data, filepath, vuls_enabled=False):
                 1
                 for r in results
                 if r["status"]
-                in ("patch", "minor", "major", "minor-major", "patch-major")
+                in {"patch", "minor", "major", "minor-major", "patch-major"}
             )
 
             f.write("## Summary\n\n")
@@ -8925,7 +8926,7 @@ def find_manifest_files(project_path, technology):
             d
             for d in dirs
             if d
-            not in (".git", "node_modules", "bin", "obj", ".gradle", "venv", ".venv")
+            not in {".git", "node_modules", "bin", "obj", ".gradle", "venv", ".venv"}
         ]
         for file in files:
             for pattern in patterns:
@@ -9973,7 +9974,7 @@ def populate_remediation_recommendations(results, default_project_path):
             (
                 opt["diff"]
                 for opt in all_flat_options
-                if opt["id"] in ("patch", "minor")
+                if opt["id"] in {"patch", "minor"}
             ),
             None,
         )
@@ -12784,11 +12785,12 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
     try:
         # Calculate summary statistics
         total = len(results)
-        up_to_date = sum(1 for r in results if r["status"] in ("up-to-date", "local"))
+        # Optimization: Use O(1) set membership lookups
+        up_to_date = sum(1 for r in results if r["status"] in {"up-to-date", "local"})
         outdated = sum(
             1
             for r in results
-            if r["status"] in ("major", "minor", "patch", "minor-major", "patch-major")
+            if r["status"] in {"major", "minor", "patch", "minor-major", "patch-major"}
         )
         deprecated = sum(1 for r in results if r["deprecated"])
         errors = sum(1 for r in results if r["status"] == "error")
@@ -13365,15 +13367,16 @@ def check_pipeline_failure_outdated(results, fail_config):
     if not fail_config:
         return False
 
+    # Optimization: Use sets for O(1) status lookups
     major_count = sum(
-        1 for r in results if r.get("status") in ("major", "minor-major", "patch-major")
+        1 for r in results if r.get("status") in {"major", "minor-major", "patch-major"}
     )
-    minor_count = sum(1 for r in results if r.get("status") in ("minor", "minor-major"))
-    patch_count = sum(1 for r in results if r.get("status") in ("patch", "patch-major"))
+    minor_count = sum(1 for r in results if r.get("status") in {"minor", "minor-major"})
+    patch_count = sum(1 for r in results if r.get("status") in {"patch", "patch-major"})
     total_outdated = sum(
         1
         for r in results
-        if r.get("status") in ("patch", "minor", "major", "minor-major", "patch-major")
+        if r.get("status") in {"patch", "minor", "major", "minor-major", "patch-major"}
     )
 
     if fail_config == "any":
