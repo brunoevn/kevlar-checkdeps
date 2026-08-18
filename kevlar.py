@@ -8921,11 +8921,12 @@ def find_manifest_files(project_path, technology):
         return []
 
     for root, dirs, files in os.walk(project_path):
+        # Optimization: Use sets for O(1) membership lookups
         dirs[:] = [
             d
             for d in dirs
             if d
-            not in (".git", "node_modules", "bin", "obj", ".gradle", "venv", ".venv")
+            not in {".git", "node_modules", "bin", "obj", ".gradle", "venv", ".venv"}
         ]
         for file in files:
             for pattern in patterns:
