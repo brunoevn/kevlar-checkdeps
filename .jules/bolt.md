@@ -1,6 +1,3 @@
-## 2024-08-09 - Regex Recompilation Optimization
-**Learning:** Python's `re.compile()` caches recently used expressions, but moving them to the global module scope entirely bypasses the cache lookup and function call overhead, yielding a minor (~10-20%) but measurable speedup on hot paths, especially when looping over items or tokens.
-**Action:** When a static regex is used inside a frequently called function or loop (such as parsing or tokenization), always move it to global scope. Avoid caching `re.compile()` locally in a function if the pattern never changes.
-## 2026-08-15 - Optimize membership checks in tight loops
-**Learning:** Python tuple membership checks like `x in ("a", "b", "c")` have an O(N) lookup time. Using sets `x in {"a", "b", "c"}` optimizes this to O(1) hash map lookup, providing significant speedups especially for strings when run many times in parsing logic. However, care must be taken to not replace tuples in `for x in (...)` constructs, as sets are unordered and could break deterministic iteration.
-**Action:** Always prefer set membership checks `in {"...", "..."}` over tuple membership checks `in ("...", "...")` for static comparisons, but strictly avoid them in iteration constructs.
+## 2024-03-24 - [Python O(1) Lookups in kevlar.py]
+**Learning:** Python AST optimizer compiles static set literals (e.g. `{"a", "b"}`) into `frozenset` objects at compile-time, providing O(1) membership lookups compared to O(N) tuple lookups. Iterating over sets using a `for` loop is slower and non-deterministic, so this optimization is only applicable to direct `x in {...}` membership checks.
+**Action:** Replace `in ("constant1", "constant2")` with `in {"constant1", "constant2"}` for performance gains, but preserve `for var in ("constant1", ...):` to maintain deterministic ordering and performance when iterating.
