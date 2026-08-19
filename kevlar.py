@@ -8920,13 +8920,10 @@ def find_manifest_files(project_path, technology):
     if not patterns:
         return []
 
+    ignored_dirs = {".git", "node_modules", "bin", "obj", ".gradle", "venv", ".venv"}
+
     for root, dirs, files in os.walk(project_path):
-        dirs[:] = [
-            d
-            for d in dirs
-            if d
-            not in (".git", "node_modules", "bin", "obj", ".gradle", "venv", ".venv")
-        ]
+        dirs[:] = [d for d in dirs if d not in ignored_dirs]
         for file in files:
             for pattern in patterns:
                 if pattern.startswith("."):

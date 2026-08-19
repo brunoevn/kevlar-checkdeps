@@ -2723,6 +2723,15 @@ class TestKevlar(unittest.TestCase):
             manifests = kevlar.find_manifest_files(sub_dir, "nuget")
             self.assertIn(props_path, [os.path.abspath(m) for m in manifests])
             self.assertIn(sub_csproj, [os.path.abspath(m) for m in manifests])
+
+            # Ensure ignored directories (like node_modules, .git) are skipped
+            ignored_sub = os.path.join(temp_dir, "node_modules", "nested")
+            os.makedirs(ignored_sub, exist_ok=True)
+            ignored_file = os.path.join(ignored_sub, "ignored.csproj")
+            with open(ignored_file, "w", encoding="utf-8") as f:
+                f.write(csproj_content)
+            all_manifests = [os.path.abspath(m) for m in kevlar.find_manifest_files(temp_dir, "nuget")]
+            self.assertNotIn(os.path.abspath(ignored_file), all_manifests)
             
             # 4. Test placeholders / properties matching & resolution to definition lines
             maven_pom = (
