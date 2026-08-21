@@ -12,3 +12,8 @@
 **Vulnerability:** XML External Entity (XXE) vulnerability in `.slnx` file parsing.
 **Learning:** `xml.etree.ElementTree.parse` was used to parse solution files, which can allow an attacker to read local files or conduct SSRF attacks if malicious XML payloads are provided in `.slnx` files.
 **Prevention:** Always use the custom `safe_et_parse` function (or `safe_et_fromstring`) which utilizes a custom secure Expat parser configured to reject forbidden DOCTYPE and ENTITY declarations.
+
+## 2024-05-24 - Fix Path Traversal in _is_safe_path
+**Vulnerability:** Path traversal vulnerability due to case-sensitive string comparison of paths on case-insensitive file systems like Windows.
+**Learning:** os.path.realpath resolves symlinks but doesn't necessarily normalize casing on Windows for string-based prefix checking.
+**Prevention:** Always use os.path.normcase() in conjunction with os.path.realpath() when validating path boundaries securely.
