@@ -1189,7 +1189,7 @@ def satisfy_term(version_str, term):
             parts = [
                 p.strip()
                 for p in clean_ver.split(".")
-                if p.strip() and p.strip() not in ("x", "*")
+                if p.strip() and p.strip() not in {"x", "*"}
             ]
             parts_count = len(parts)
 
@@ -8540,7 +8540,7 @@ def export_markdown_report(results, pkg_data, filepath, vuls_enabled=False):
             major = sum(
                 1
                 for r in results
-                if r["status"] in ("major", "minor-major", "patch-major")
+                if r["status"] in {"major", "minor-major", "patch-major"}
             )
             deprecated = sum(1 for r in results if r["deprecated"])
             errors = sum(1 for r in results if r["status"] == "error")
@@ -8548,7 +8548,7 @@ def export_markdown_report(results, pkg_data, filepath, vuls_enabled=False):
                 1
                 for r in results
                 if r["status"]
-                in ("patch", "minor", "major", "minor-major", "patch-major")
+                in {"patch", "minor", "major", "minor-major", "patch-major"}
             )
 
             f.write("## Summary\n\n")
@@ -9976,7 +9976,7 @@ def populate_remediation_recommendations(results, default_project_path):
             (
                 opt["diff"]
                 for opt in all_flat_options
-                if opt["id"] in ("patch", "minor")
+                if opt["id"] in {"patch", "minor"}
             ),
             None,
         )
@@ -12792,7 +12792,7 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
         outdated = sum(
             1
             for r in results
-            if r["status"] in ("major", "minor", "patch", "minor-major", "patch-major")
+            if r["status"] in {"major", "minor", "patch", "minor-major", "patch-major"}
         )
         deprecated = sum(1 for r in results if r["deprecated"])
         errors = sum(1 for r in results if r["status"] == "error")
