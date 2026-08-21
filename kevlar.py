@@ -177,6 +177,20 @@ RE_SEMVER_ALPHA = re.compile(r"([a-zA-Z]+.*)$")
 RE_SEMVER_DIGITS = re.compile(r"\d+")
 RE_CLEAN_VER = re.compile(r"^[^\d]*")
 
+# Optimization: Use global compiled regexes to avoid cache lookup and call overhead in hot loops
+RE_PEP508_REQ = re.compile(
+    r"^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)(?:\s*\[\s*([A-Za-z0-9_,.-]+)\s*\])?\s*(.*)$"
+)
+RE_PEP508_OP = re.compile(r"([><=^~!]+)\s+")
+RE_PEP508_NAME = re.compile(r"^([a-zA-Z0-9\-_\.]+)(.*)$")
+RE_PEP508_EXTRA = re.compile(r"^\[[^\]]*\](.*)$")
+RE_OPERATOR_PREFIX = re.compile(r"^[~^>=<!\s]+")
+RE_OPERATOR_PREFIX_MATCH = re.compile(r"^([~^>=<!\s]+)\s*(.*)$")
+RE_OPERATOR_START = re.compile(r"^[~^>=<!]")
+RE_NUM_START = re.compile(r"^(\d+)")
+RE_DECIMAL_VER = re.compile(r"\d+\.\d+(?:\.\d+)?(?:\.\d+)?")
+RE_DECIMAL_VER_STRICT = re.compile(r"^\d+\.\d+(?:\.\d+)?(?:\.\d+)?$")
+
 SEMVER_REGEX = re.compile(
     r"^v?(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)"
     r"(?:-(?P<prerelease>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
@@ -3346,7 +3360,7 @@ def parse_version_to_tuple_marker(v_str):
     v_str = re.sub(r"^[^\d]+", "", v_str)
     parts = []
     for part in v_str.split("."):
-        m = re.match(r"^(\d+)", part)
+        m = RE_NUM_START.match(part)
         if m:
             parts.append(int(m.group(1)))
         else:
@@ -3692,10 +3706,7 @@ def parse_requirements_txt(filepath, seen_files=None, base_dir=None):
                 marker_part = None
 
             # Parse package name, optional extras, and specifier/URL (PEP 508 names must start with alphanumeric)
-            match = re.match(
-                r"^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)(?:\s*\[\s*([A-Za-z0-9_,.-]+)\s*\])?\s*(.*)$",
-                req_part,
-            )
+            match = RE_PEP508_REQ.match(req_part)
             if not match:
                 continue
 
@@ -3719,7 +3730,7 @@ def parse_requirements_txt(filepath, seen_files=None, base_dir=None):
                 url_part = rest[1:].strip()
                 version_spec = f"@ {url_part}"
             elif rest:
-                version_spec = re.sub(r"([><=^~!]+)\s+", r"\1", rest)
+                version_spec = RE_PEP508_OP.sub(r"\1", rest)
             else:
                 version_spec = "*"
 
@@ -4078,18 +4089,18 @@ def parse_pep508(dep_string):
     req_part = dep_string.split(";", 1)[0].strip()
     if not req_part:
         return None, None
-    match = re.match(r"^([a-zA-Z0-9\-_\.]+)(.*)$", req_part)
+    match = RE_PEP508_NAME.match(req_part)
     if not match:
         return None, None
     name = match.group(1)
     rest = match.group(2).strip()
     if rest.startswith("["):
-        extra_match = re.match(r"^\[[^\]]*\](.*)$", rest)
+        extra_match = RE_PEP508_EXTRA.match(rest)
         if extra_match:
             rest = extra_match.group(1).strip()
     if rest.startswith("(") and rest.endswith(")"):
         rest = rest[1:-1].strip()
-    rest = re.sub(r"([><=^~!]+)\s+", r"\1", rest)
+    rest = RE_PEP508_OP.sub(r"\1", rest)
     version_spec = rest if rest else "*"
     return name, version_spec
 
@@ -4898,7 +4909,7 @@ def check_composer_package(target):
             if not any(
                 x in v_lower for x in ("-", "dev", "alpha", "beta", "rc", "patch")
             ):
-                if re.match(r"^\d+\.\d+(?:\.\d+)?(?:\.\d+)?$", v):
+                if RE_DECIMAL_VER_STRICT.match(v):
                     stable_versions.append(v)
 
         valid_versions = stable_versions if stable_versions else versions_list
@@ -8796,7 +8807,7 @@ def get_upgraded_constraint(declared_ver, latest_ver):
         return latest_ver
 
     # Extract prefix, e.g., ^, ~, >=, ==, ~>
-    match = re.match(r"^([~^>=<!\s]+)\s*(.*)$", declared_ver.strip())
+    match = RE_OPERATOR_PREFIX_MATCH.match(declared_ver.strip())
     if match:
         prefix = match.group(1)
         return prefix + latest_ver
@@ -9024,7 +9035,7 @@ def generate_remediation_diff(
                     break
 
     if line_idx_to_change is None and declared_ver:
-        ver_digits = re.search(r"\d+\.\d+(?:\.\d+)?(?:\.\d+)?", declared_ver)
+        ver_digits = RE_DECIMAL_VER.search(declared_ver)
         if ver_digits:
             ver_clean = ver_digits.group(0)
             for i in search_range:
@@ -9035,7 +9046,7 @@ def generate_remediation_diff(
 
     if line_idx_to_change is None:
         line_idx_to_change = idx
-        ver_pattern = re.search(r"\d+\.\d+(?:\.\d+)?(?:\.\d+)?", lines[idx])
+        ver_pattern = RE_DECIMAL_VER.search(lines[idx])
         if ver_pattern:
             target_text = ver_pattern.group(0)
         else:
@@ -9182,7 +9193,7 @@ def generate_remediation_diff(
             def clean_ver(v):
                 v = v.strip().lower()
                 v = v.removeprefix("v")
-                v = re.sub(r"^[~^>=<!\s]+", "", v)
+                v = RE_OPERATOR_PREFIX.sub("", v)
                 return v
 
             def is_version_compatible(v1, v2):
@@ -9192,8 +9203,8 @@ def generate_remediation_diff(
                     return True
                 if c1 == c2 or c1.startswith(c2) or c2.startswith(c1):
                     return True
-                m1 = re.match(r"^(\d+)", c1)
-                m2 = re.match(r"^(\d+)", c2)
+                m1 = RE_NUM_START.match(c1)
+                m2 = RE_NUM_START.match(c2)
                 if m1 and m2 and m1.group(1) == m2.group(1):
                     return True
                 return False
@@ -9205,13 +9216,13 @@ def generate_remediation_diff(
     match_prefix = ""
     match_version = target_text or ""
     if target_text:
-        match_opt = re.match(r"^([~^>=<!\s]+)\s*(.*)$", target_text.strip())
+        match_opt = RE_OPERATOR_PREFIX_MATCH.match(target_text.strip())
         if match_opt:
             match_prefix = match_opt.group(1)
             match_version = match_opt.group(2)
 
     effective_prefix = match_prefix
-    if re.match(r"^[~^>=<!]", latest_ver.strip()):
+    if RE_OPERATOR_START.match(latest_ver.strip()):
         effective_prefix = ""
 
     upgraded_str = effective_prefix + latest_ver
@@ -9222,7 +9233,7 @@ def generate_remediation_diff(
             return ""
         v = v.strip().lower()
         v = v.removeprefix("v")
-        return re.sub(r"^[~^>=<!\s]+", "", v)
+        return RE_OPERATOR_PREFIX.sub("", v)
 
     if target_text and latest_ver and _clean_v(target_text) == _clean_v(latest_ver):
         return None
@@ -9303,7 +9314,7 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
     line_to_add = ""
 
     clean_target = str(target_ver).strip()
-    if not re.match(r"^[~^>=<!]", clean_target):
+    if not RE_OPERATOR_START.match(clean_target):
         clean_target = f"^{clean_target}"
 
     if tech == "npm" or tech == "php":
@@ -9410,7 +9421,7 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
         return None
 
     clean_target = str(target_ver).strip()
-    if not re.match(r"^[~^>=<!]", clean_target):
+    if not RE_OPERATOR_START.match(clean_target):
         clean_target = f"^{clean_target}"
 
     indent = "    "
@@ -9537,7 +9548,7 @@ def populate_remediation_recommendations(results, default_project_path):
             return ""
         v = str(v).strip().lower()
         v = v.removeprefix("v")
-        return re.sub(r"^[~^>=<!\s]+", "", v)
+        return RE_OPERATOR_PREFIX.sub("", v)
 
     manifest_file_cache = {}
 
