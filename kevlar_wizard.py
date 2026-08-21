@@ -539,7 +539,7 @@ def main():
                     "Do you want to overwrite it with the new definition? (y/n)",
                     default="y",
                 )
-                if confirm.lower() in ("y", "yes"):
+                if confirm.lower() in {"y", "yes"}:
                     final_suppressions[duplicate_idx] = new_rule
                     merged_count += 1
                     print(

@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
 """
 Dependency Checker Utility
 Checks project dependencies for outdated, deprecated, or obsolete versions.
@@ -7,29 +6,30 @@ Supports security vulnerability scanning via Google OSV API.
 Supports multiple technologies.
 """
 
-import os
-import sys
-import string
-import json
-import re
 import argparse
-import urllib.request
-import urllib.error
-import urllib.parse
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import base64
+import codecs
+import ctypes
+import functools
+import json
+import os
+import random
+import re
+import string
+import sys
 import threading
 import time
-import functools
-from datetime import datetime, date
-import xml.etree.ElementTree as ET
-import codecs
-import base64
-import xml.parsers.expat
 import traceback
 import unicodedata
-import ctypes
+import urllib.error
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+import xml.parsers.expat
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, datetime
+
 import tomllib
-import random
 
 
 # Safe terminal output wrapping to prevent UnicodeEncodeError on Windows
@@ -59,7 +59,7 @@ sys.stderr = SafeWriter(sys.stderr)
 # Global lock to protect concurrent console writes (sys.stdout, sys.stderr, print)
 console_lock = threading.Lock()
 
-VERSION = "1.10.8"
+VERSION = "1.10.9"
 
 # External APIs Configuration
 URL_NPM_REGISTRY = "https://registry.npmjs.org/"
@@ -759,9 +759,7 @@ def safe_urlopen(req, timeout=10, max_retries=5, backoff=0.5):
     # 1. Extraer la URL de forma segura
     if isinstance(req, str):
         url_str = req
-    elif isinstance(req, urllib.request.Request):
-        url_str = req.full_url
-    elif hasattr(req, "full_url"):
+    elif isinstance(req, urllib.request.Request) or hasattr(req, "full_url"):
         url_str = req.full_url
     elif hasattr(req, "get_full_url"):
         url_str = req.get_full_url()
@@ -993,8 +991,7 @@ def parse_semver(version_str):
                 start_idx = m.start()
                 prerelease = clean_str[start_idx:]
                 clean_str = clean_str[:start_idx]
-                if clean_str.endswith("."):
-                    clean_str = clean_str[:-1]
+                clean_str = clean_str.removesuffix(".")
 
     if prerelease:
         p_lower = prerelease.lower()
@@ -1073,7 +1070,7 @@ def fetch_node_schedule():
         with safe_urlopen(req, timeout=5) as response:
             data = json.loads(response.read().decode("utf-8"))
             for k, v in data.items():
-                major = k[1:] if k.startswith("v") else k
+                major = k.removeprefix("v")
                 schedule[major] = {
                     "maintenance": v.get("maintenance", "N/A"),
                     "end": v.get("end", "N/A"),
@@ -1151,8 +1148,7 @@ def satisfy_term(version_str, term):
 
             # Zero series caret evaluation
             clean_ver = ver_part.strip().lower()
-            if clean_ver.startswith("v"):
-                clean_ver = clean_ver[1:]
+            clean_ver = clean_ver.removeprefix("v")
             if "+" in clean_ver:
                 clean_ver = clean_ver.split("+", 1)[0]
             if "-" in clean_ver:
@@ -1184,8 +1180,7 @@ def satisfy_term(version_str, term):
                 return False
 
             clean_ver = ver_part.strip().lower()
-            if clean_ver.startswith("v"):
-                clean_ver = clean_ver[1:]
+            clean_ver = clean_ver.removeprefix("v")
             if "+" in clean_ver:
                 clean_ver = clean_ver.split("+", 1)[0]
             if "-" in clean_ver:
@@ -1194,7 +1189,7 @@ def satisfy_term(version_str, term):
             parts = [
                 p.strip()
                 for p in clean_ver.split(".")
-                if p.strip() and p.strip() not in ("x", "*")
+                if p.strip() and p.strip() not in {"x", "*"}
             ]
             parts_count = len(parts)
 
@@ -1618,16 +1613,14 @@ def clean_repo_url(url):
     if url.lower().startswith("javascript:"):
         return None
 
-    if url.startswith("git+"):
-        url = url[4:]
+    url = url.removeprefix("git+")
     if url.startswith("git://"):
         url = "https://" + url[6:]
     elif url.startswith("git@"):
         url = url[4:]
         url = url.replace(":", "/")
         url = "https://" + url
-    if url.endswith(".git"):
-        url = url[:-4]
+    url = url.removesuffix(".git")
     url = url.replace("ssh://git@", "https://")
     url = url.rstrip("/")
 
@@ -1884,8 +1877,7 @@ def parse_yarn_lock(filepath):
             else:
                 name = part
 
-        if name.startswith("npm:"):
-            name = name[4:]
+        name = name.removeprefix("npm:")
         return name
 
     try:
@@ -2137,8 +2129,7 @@ def parse_pnpm_lock(filepath):
                     if raw_line.endswith("{}"):
                         raw_line = raw_line[:-2].rstrip()
                     raw_pkg = raw_line.rstrip(":").strip("'\"")
-                    if raw_pkg.startswith("/"):
-                        raw_pkg = raw_pkg[1:]
+                    raw_pkg = raw_pkg.removeprefix("/")
                     if "node_modules/" in raw_pkg:
                         raw_pkg = raw_pkg.split("node_modules/")[-1]
                     if "/" in raw_pkg and not raw_pkg.startswith("@"):
@@ -2313,7 +2304,7 @@ def parse_package_lock(filepath):
                     peer_deps = pkg_info.get("peerDependencies", {})
                     opt_deps = pkg_info.get("optionalDependencies", {})
                     all_deps = {**deps, **dev_deps, **peer_deps, **opt_deps}
-                    for child_name in all_deps.keys():
+                    for child_name in all_deps:
                         parents.setdefault(child_name, set()).add(pkg_name)
 
             # Root & workspace package dependencies
@@ -2325,7 +2316,7 @@ def parse_package_lock(filepath):
                         **pkg_info.get("peerDependencies", {}),
                         **pkg_info.get("optionalDependencies", {}),
                     }
-                    for child_name in ws_deps.keys():
+                    for child_name in ws_deps:
                         parents.setdefault(child_name, set()).add("root")
 
         # 2. Parse dependencies key (v1 and v2 fallback)
@@ -3210,7 +3201,7 @@ def _check_npm_integrity(results, lock_file, integrity_data):
 
         if lock_file:
             key = (r["name"], r["installed"])
-            if key in integrity_data and integrity_data[key]:
+            if integrity_data.get(key):
                 integrity_str = integrity_data[key].lower()
                 if "sha512-" in integrity_str or "sha256-" in integrity_str:
                     pass
@@ -4065,8 +4056,7 @@ def parse_pipfile_lock(filepath):
             for name, info in deps.items():
                 if isinstance(info, dict) and "version" in info:
                     version = info["version"]
-                    if version.startswith("=="):
-                        version = version[2:]
+                    version = version.removeprefix("==")
                     resolved.setdefault(name, set()).add(version)
 
         resolved_clean = {k: list(v) for k, v in resolved.items()}
@@ -4278,7 +4268,7 @@ def run_pip_checker(args):
                 and declared
                 and not any(c in declared for c in [">", "<", "~", "*", "^"])
             ):
-                clean_ver = declared[2:] if declared.startswith("==") else declared
+                clean_ver = declared.removeprefix("==")
                 versions = [clean_ver]
             targets.append({"name": name, "declared": declared, "installed": versions})
 
@@ -8190,11 +8180,17 @@ def print_results_table(
 def print_summary(results, elapsed_time, vuls_enabled=False, projects_count=None):
     """Prints checks run count and categorization breakdown."""
     total = len(results)
-    up_to_date = sum(1 for r in results if r["status"] in ("up-to-date", "local"))
-    patch = sum(1 for r in results if r["status"] in ("patch", "patch-major"))
-    minor = sum(1 for r in results if r["status"] in ("minor", "minor-major"))
+    # Optimization: Use sets for O(1) membership lookups
+    up_to_date = sum(1 for r in results if r["status"] in {"up-to-date", "local"})
+    # Optimization: Use sets for O(1) membership lookups
+    patch = sum(1 for r in results if r["status"] in {"patch", "patch-major"})
+    # Optimization: Use sets for O(1) membership lookups
+    minor = sum(1 for r in results if r["status"] in {"minor", "minor-major"})
     major = sum(
-        1 for r in results if r["status"] in ("major", "minor-major", "patch-major")
+        # Optimization: Use sets for O(1) membership lookups
+        1
+        for r in results
+        if r["status"] in {"major", "minor-major", "patch-major"}
     )
     deprecated = sum(1 for r in results if r["deprecated"])
     errors = sum(1 for r in results if r["status"] == "error")
@@ -8202,7 +8198,8 @@ def print_summary(results, elapsed_time, vuls_enabled=False, projects_count=None
     outdated_total = sum(
         1
         for r in results
-        if r["status"] in ("patch", "minor", "major", "minor-major", "patch-major")
+        # Optimization: Use sets for O(1) membership lookups
+        if r["status"] in {"patch", "minor", "major", "minor-major", "patch-major"}
     )
 
     print(f"\n{COLOR_BOLD}{COLOR_CYAN}Summary Report:{COLOR_RESET}")
@@ -8321,9 +8318,11 @@ def generate_sarif_run(results):
                                 score = 1
                                 if declared:
                                     ver_digits = re.search(r"\d+\.\d+", str(declared))
-                                    if ver_digits and ver_digits.group(0) in line:
-                                        score = 2
-                                    elif str(declared).strip() in line:
+                                    if (
+                                        ver_digits
+                                        and ver_digits.group(0) in line
+                                        or str(declared).strip() in line
+                                    ):
                                         score = 2
                                 if score > best_score:
                                     best_score = score
@@ -8529,14 +8528,19 @@ def export_markdown_report(results, pkg_data, filepath, vuls_enabled=False):
             # Write summary
             total = len(results)
             up_to_date = sum(
-                1 for r in results if r["status"] in ("up-to-date", "local")
+                # Optimization: Use sets for O(1) membership lookups
+                1
+                for r in results
+                if r["status"] in {"up-to-date", "local"}
             )
-            patch = sum(1 for r in results if r["status"] in ("patch", "patch-major"))
-            minor = sum(1 for r in results if r["status"] in ("minor", "minor-major"))
+            # Optimization: Use sets for O(1) membership lookups
+            patch = sum(1 for r in results if r["status"] in {"patch", "patch-major"})
+            # Optimization: Use sets for O(1) membership lookups
+            minor = sum(1 for r in results if r["status"] in {"minor", "minor-major"})
             major = sum(
                 1
                 for r in results
-                if r["status"] in ("major", "minor-major", "patch-major")
+                if r["status"] in {"major", "minor-major", "patch-major"}
             )
             deprecated = sum(1 for r in results if r["deprecated"])
             errors = sum(1 for r in results if r["status"] == "error")
@@ -8544,7 +8548,7 @@ def export_markdown_report(results, pkg_data, filepath, vuls_enabled=False):
                 1
                 for r in results
                 if r["status"]
-                in ("patch", "minor", "major", "minor-major", "patch-major")
+                in {"patch", "minor", "major", "minor-major", "patch-major"}
             )
 
             f.write("## Summary\n\n")
@@ -8920,13 +8924,10 @@ def find_manifest_files(project_path, technology):
     if not patterns:
         return []
 
+    ignored_dirs = {".git", "node_modules", "bin", "obj", ".gradle", "venv", ".venv"}
+
     for root, dirs, files in os.walk(project_path):
-        dirs[:] = [
-            d
-            for d in dirs
-            if d
-            not in (".git", "node_modules", "bin", "obj", ".gradle", "venv", ".venv")
-        ]
+        dirs[:] = [d for d in dirs if d not in ignored_dirs]
         for file in files:
             for pattern in patterns:
                 if pattern.startswith("."):
@@ -9166,19 +9167,21 @@ def generate_remediation_diff(
     # Verify that the resolved version matches the row's declared version to avoid cross-module mismatches
     if declared_ver and resolved_version:
         is_val_placeholder = False
-        if tech == "maven" and "${" in resolved_version:
-            is_val_placeholder = True
-        elif tech == "nuget" and "$(" in resolved_version:
-            is_val_placeholder = True
-        elif tech == "gradle" and "$" in resolved_version:
+        if (
+            tech == "maven"
+            and "${" in resolved_version
+            or tech == "nuget"
+            and "$(" in resolved_version
+            or tech == "gradle"
+            and "$" in resolved_version
+        ):
             is_val_placeholder = True
 
         if not is_val_placeholder:
 
             def clean_ver(v):
                 v = v.strip().lower()
-                if v.startswith("v"):
-                    v = v[1:]
+                v = v.removeprefix("v")
                 v = re.sub(r"^[~^>=<!\s]+", "", v)
                 return v
 
@@ -9218,8 +9221,7 @@ def generate_remediation_diff(
         if not v:
             return ""
         v = v.strip().lower()
-        if v.startswith("v"):
-            v = v[1:]
+        v = v.removeprefix("v")
         return re.sub(r"^[~^>=<!\s]+", "", v)
 
     if target_text and latest_ver and _clean_v(target_text) == _clean_v(latest_ver):
@@ -9534,8 +9536,7 @@ def populate_remediation_recommendations(results, default_project_path):
         if not v:
             return ""
         v = str(v).strip().lower()
-        if v.startswith("v"):
-            v = v[1:]
+        v = v.removeprefix("v")
         return re.sub(r"^[~^>=<!\s]+", "", v)
 
     manifest_file_cache = {}
@@ -9567,9 +9568,11 @@ def populate_remediation_recommendations(results, default_project_path):
                 score = 1
                 if declared:
                     ver_digits = re.search(r"\d+\.\d+", str(declared))
-                    if ver_digits and ver_digits.group(0) in line:
-                        score = 2
-                    elif str(declared).strip() in line:
+                    if (
+                        ver_digits
+                        and ver_digits.group(0) in line
+                        or str(declared).strip() in line
+                    ):
                         score = 2
                 if score > best_score:
                     best_score = score
@@ -9973,7 +9976,7 @@ def populate_remediation_recommendations(results, default_project_path):
             (
                 opt["diff"]
                 for opt in all_flat_options
-                if opt["id"] in ("patch", "minor")
+                if opt["id"] in {"patch", "minor"}
             ),
             None,
         )
@@ -12784,11 +12787,12 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
     try:
         # Calculate summary statistics
         total = len(results)
-        up_to_date = sum(1 for r in results if r["status"] in ("up-to-date", "local"))
+        # Optimization: Use sets for O(1) membership lookups
+        up_to_date = sum(1 for r in results if r["status"] in {"up-to-date", "local"})
         outdated = sum(
             1
             for r in results
-            if r["status"] in ("major", "minor", "patch", "minor-major", "patch-major")
+            if r["status"] in {"major", "minor", "patch", "minor-major", "patch-major"}
         )
         deprecated = sum(1 for r in results if r["deprecated"])
         errors = sum(1 for r in results if r["status"] == "error")
@@ -12979,15 +12983,12 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
         project_path_header_html = ""
         if show_project_globally and unique_project_paths:
             single_path = unique_project_paths[0]
-            techs = list(
-                sorted(
-                    list(
-                        set(
-                            r.get("technology")
-                            for r in results
-                            if r.get("project_path") == single_path
-                            and r.get("technology")
-                        )
+            techs = sorted(
+                list(
+                    set(
+                        r.get("technology")
+                        for r in results
+                        if r.get("project_path") == single_path and r.get("technology")
                     )
                 )
             )
@@ -13366,14 +13367,20 @@ def check_pipeline_failure_outdated(results, fail_config):
         return False
 
     major_count = sum(
-        1 for r in results if r.get("status") in ("major", "minor-major", "patch-major")
+        # Optimization: Use sets for O(1) membership lookups
+        1
+        for r in results
+        if r.get("status") in {"major", "minor-major", "patch-major"}
     )
-    minor_count = sum(1 for r in results if r.get("status") in ("minor", "minor-major"))
-    patch_count = sum(1 for r in results if r.get("status") in ("patch", "patch-major"))
+    # Optimization: Use sets for O(1) membership lookups
+    minor_count = sum(1 for r in results if r.get("status") in {"minor", "minor-major"})
+    # Optimization: Use sets for O(1) membership lookups
+    patch_count = sum(1 for r in results if r.get("status") in {"patch", "patch-major"})
     total_outdated = sum(
         1
         for r in results
-        if r.get("status") in ("patch", "minor", "major", "minor-major", "patch-major")
+        # Optimization: Use sets for O(1) membership lookups
+        if r.get("status") in {"patch", "minor", "major", "minor-major", "patch-major"}
     )
 
     if fail_config == "any":
