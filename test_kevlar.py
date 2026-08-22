@@ -275,6 +275,12 @@ class TestKevlar(unittest.TestCase):
         # Partial match avoidance (e.g. /workspace/myproject-other should not be safe under /workspace/myproject)
         self.assertFalse(kevlar._is_safe_path(base_dir, "C:/workspace/myproject-other"))
 
+        # Case normalization testing (especially relevant on Windows)
+        if os.name == "nt":
+            self.assertTrue(kevlar._is_safe_path("C:/Workspace/MyProject", "c:/workspace/myproject/pom.xml"))
+            self.assertTrue(kevlar._is_safe_path("c:/workspace/myproject", "C:/WORKSPACE/MYPROJECT/src/main.py"))
+            self.assertFalse(kevlar._is_safe_path("C:/Workspace/MyProject", "c:/workspace/otherproject/pom.xml"))
+
         # Test symlink traversal dynamically if supported by the OS and permission settings
         import tempfile
         try:
