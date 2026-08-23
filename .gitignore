@@ -1,6 +1,11 @@
 mejoras.md
-__pycache__
+__pycache__/
 .venv/
+.coverage
+htmlcov/
+.ruff_cache/
+.pytest_cache/
+
 # Generated reports
 *report*.html
 *report*.json
@@ -9,3 +14,4 @@ __pycache__
 kevlar-suppressions.json
 scratch/
 LC*/
+

@@ -1,17 +1,18 @@
+import os
+import sys
 import unittest
 from unittest.mock import patch
-import sys
-import os
 
 # Add parent directory to sys.path
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 import kevlar
 
+
 class TestKevlar(unittest.TestCase):
 
     def test_parse_sln_path_traversal(self):
-        import tempfile
         import os
+        import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             sln_path = os.path.join(tmpdir, "test.sln")
 
@@ -43,12 +44,12 @@ class TestKevlar(unittest.TestCase):
                 self.assertFalse(any("MaliciousProj.csproj" in p for p in project_paths))
                 try:
                     os.remove(malicious_path_absolute)
-                except:
+                except OSError:
                     pass
 
     def test_parse_slnx_xxe_protection(self):
-        import tempfile
         import os
+        import tempfile
         xxe_payload = """<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE Solution [
   <!ENTITY xxe SYSTEM "file:///etc/passwd">
@@ -246,7 +247,7 @@ class TestKevlar(unittest.TestCase):
             f.write(content)
             
         try:
-            deps, parents = kevlar.parse_requirements_txt(temp_file)
+            deps, _parents = kevlar.parse_requirements_txt(temp_file)
             # URL dependency
             self.assertEqual(deps.get("requests"), "@ https://github.com/psf/requests/archive/refs/tags/v2.26.0.tar.gz")
             # Marker matching current environment should be present
@@ -537,8 +538,8 @@ class TestKevlar(unittest.TestCase):
         self.assertEqual(dep.attrib.get("{http://maven.apache.org/POM/4.0.0}scope"), "compile")
 
     def test_security_sanitize_error_message(self):
-        import urllib.error
         import json
+        import urllib.error
         import xml.etree.ElementTree as ET
         
         # HTTP Error 404
@@ -614,8 +615,8 @@ class TestKevlar(unittest.TestCase):
             kevlar.validate_suppressions_schema(invalid_reason)
 
     def test_apply_suppressions_logic(self):
-        import tempfile
         import json
+        import tempfile
         from datetime import date, timedelta
         
         # Build temp json suppressions file
@@ -728,8 +729,9 @@ class TestKevlar(unittest.TestCase):
                 os.remove(tmp_path)
 
     def test_wizard_utilities(self):
-        import kevlar_wizard
         from datetime import date, timedelta
+
+        import kevlar_wizard
         
         # 1. Test validate_date_str
         self.assertTrue(kevlar_wizard.validate_date_str("2026-12-31"))
@@ -1111,8 +1113,8 @@ class TestKevlar(unittest.TestCase):
 
             
     def test_parse_package_lock_all_dep_types(self):
-        import tempfile
         import json
+        import tempfile
         lock_data = {
             "name": "test-project",
             "version": "1.0.0",
@@ -1147,7 +1149,7 @@ class TestKevlar(unittest.TestCase):
             json.dump(lock_data, tmp)
             tmp_path = tmp.name
         try:
-            resolved, parents, integrity, direct_versions = kevlar.parse_package_lock(tmp_path)
+            resolved, parents, _integrity, direct_versions = kevlar.parse_package_lock(tmp_path)
             self.assertEqual(resolved.get("direct-dep"), ["1.0.1"])
             self.assertEqual(resolved.get("transitive-dep"), ["1.1.2"])
             self.assertEqual(resolved.get("peer-dep"), ["3.0.1"])
@@ -1189,7 +1191,7 @@ class TestKevlar(unittest.TestCase):
             tmp.write(content)
             tmp_path = tmp.name
         try:
-            resolved, parents, integrity = kevlar.parse_yarn_lock(tmp_path)
+            resolved, parents, _integrity = kevlar.parse_yarn_lock(tmp_path)
             self.assertEqual(resolved.get("direct-dep"), ["1.0.1"])
             self.assertEqual(resolved.get("transitive-dep"), ["1.1.2"])
             self.assertEqual(resolved.get("opt-dep"), ["4.0.5"])
@@ -1265,7 +1267,7 @@ class TestKevlar(unittest.TestCase):
             tmp.write(content)
             tmp_path = tmp.name
         try:
-            resolved, parents, integrity = kevlar.parse_pnpm_lock(tmp_path)
+            resolved, parents, _integrity = kevlar.parse_pnpm_lock(tmp_path)
             self.assertEqual(resolved.get("direct-dep"), ["1.0.1"])
             self.assertEqual(resolved.get("transitive-dep"), ["1.1.2"])
             self.assertEqual(resolved.get("opt-dep"), ["4.0.5"])
@@ -1302,7 +1304,7 @@ class TestKevlar(unittest.TestCase):
             tmp.write(content)
             tmp_path = tmp.name
         try:
-            resolved, parents, integrity = kevlar.parse_pnpm_lock(tmp_path)
+            resolved, parents, _integrity = kevlar.parse_pnpm_lock(tmp_path)
             self.assertEqual(resolved.get("@algolia/abtesting"), ["1.1.0"])
             self.assertEqual(resolved.get("@angular/compiler-cli"), ["20.3.26"])
             self.assertEqual(resolved.get("@algolia/client-common"), ["5.35.0"])
@@ -1314,8 +1316,8 @@ class TestKevlar(unittest.TestCase):
                 os.remove(tmp_path)
 
     def test_python_lock_parsers(self):
-        import tempfile
         import json
+        import tempfile
         # Poetry (Detailed check)
         poetry_content = (
             "# Some metadata comments at start\n"
@@ -1516,8 +1518,8 @@ class TestKevlar(unittest.TestCase):
             os.remove(tmp_path)
 
     def test_parse_composer_lock(self):
-        import tempfile
         import json
+        import tempfile
         composer_data = {
             "packages": [
                 {"name": "guzzlehttp/guzzle", "version": "7.4.1"}
@@ -1530,7 +1532,7 @@ class TestKevlar(unittest.TestCase):
             json.dump(composer_data, tmp)
             tmp_path = tmp.name
         try:
-            resolved, parents = kevlar.parse_composer_lock(tmp_path)
+            resolved, _parents = kevlar.parse_composer_lock(tmp_path)
             self.assertEqual(resolved.get("guzzlehttp/guzzle"), ["7.4.1"])
             self.assertEqual(resolved.get("phpunit/phpunit"), ["9.5.10"])
         finally:
@@ -1611,8 +1613,8 @@ class TestKevlar(unittest.TestCase):
             os.remove(tmp_path)
 
     def test_parser_advanced_edge_cases(self):
-        import tempfile
         import json
+        import tempfile
         
         # 1. Yarn Multi-specifiers and Scoped Packages
         yarn_content = (
@@ -1628,7 +1630,7 @@ class TestKevlar(unittest.TestCase):
             tmp.write(yarn_content)
             tmp_path = tmp.name
         try:
-            resolved, parents, integrity = kevlar.parse_yarn_lock(tmp_path)
+            resolved, parents, _integrity = kevlar.parse_yarn_lock(tmp_path)
             self.assertEqual(resolved.get("@babel/core"), ["7.12.9"])
             self.assertEqual(resolved.get("lodash"), ["4.17.21"])
             self.assertIn("@babel/core", parents.get("@babel/code-frame", []))
@@ -1648,7 +1650,7 @@ class TestKevlar(unittest.TestCase):
             tmp.write(pnpm_content)
             tmp_path = tmp.name
         try:
-            resolved, parents, integrity = kevlar.parse_pnpm_lock(tmp_path)
+            resolved, parents, _integrity = kevlar.parse_pnpm_lock(tmp_path)
             self.assertEqual(resolved.get("foo"), ["1.0.0"])
         finally:
             os.remove(tmp_path)
@@ -1777,8 +1779,8 @@ class TestKevlar(unittest.TestCase):
             os.remove(tmp_path)
 
     def test_check_ruby_package_404_local(self):
-        from unittest.mock import patch, MagicMock
         import urllib.error
+        from unittest.mock import patch
         target = {
             "name": "capybara_accessible_selectors",
             "declared": "0.10.0",
@@ -1833,9 +1835,9 @@ class TestKevlar(unittest.TestCase):
             os.remove(tmp_path)
 
     def test_apply_suppressions_project_path_lookup(self):
-        import tempfile
-        import shutil
         import json
+        import shutil
+        import tempfile
         
         # Create a temporary directory structure representing a project
         temp_dir = tempfile.mkdtemp()
@@ -1888,10 +1890,10 @@ class TestKevlar(unittest.TestCase):
             shutil.rmtree(temp_dir)
 
     def test_engine_abstraction(self):
-        import tempfile
+        import io
         import json
         import shutil
-        import io
+        import tempfile
         
         # Test 1: verify that print_results_table/export_markdown_report/generate_html_report respect is_engine flag
         results = [
@@ -2089,8 +2091,8 @@ class TestKevlar(unittest.TestCase):
                 self.assertEqual(rec, "unknown")
 
     def test_export_sarif_report(self):
-        import tempfile
         import json
+        import tempfile
         
         results = [
             # 1. Package with vulnerabilities
@@ -2242,8 +2244,8 @@ class TestKevlar(unittest.TestCase):
         self.assertEqual(consolidated_log["runs"][1]["results"][0]["ruleId"], "KEVLAR-OUTDATED-DEPENDENCY")
 
     def test_safe_urlopen_security_validations(self):
-        from unittest.mock import patch, MagicMock
         import urllib.request
+        from unittest.mock import MagicMock, patch
         
         # Test allowed schemes (https, http) using mocked urlopen
         with patch("urllib.request.urlopen") as mock_urlopen:
@@ -2288,8 +2290,8 @@ class TestKevlar(unittest.TestCase):
             kevlar.safe_urlopen(req)
 
     def test_check_osv_vulnerabilities_chunking(self):
-        from unittest.mock import patch, MagicMock
         import json
+        from unittest.mock import MagicMock, patch
 
         # Prepare 1500 targets
         targets = []
@@ -2321,8 +2323,8 @@ class TestKevlar(unittest.TestCase):
             self.assertEqual(res, {})
 
     def test_check_osv_vulnerabilities_no_fallback(self):
-        from unittest.mock import patch, MagicMock
         import json
+        from unittest.mock import MagicMock, patch
 
         targets = [{"name": "lodash", "declared": "4.17.20", "installed": ["4.17.20"]}]
         
@@ -2369,9 +2371,9 @@ class TestKevlar(unittest.TestCase):
             self.assertEqual(vulns[0]["severity"], "CVSS:3.0/9.8")
 
     def test_check_osv_vulnerabilities_with_fallback(self):
-        from unittest.mock import patch, MagicMock
         import json
         import sys
+        from unittest.mock import MagicMock, patch
 
         targets = [{"name": "lodash", "declared": "4.17.20", "installed": ["4.17.20"]}]
         
@@ -2466,8 +2468,8 @@ class TestKevlar(unittest.TestCase):
 
     @patch("urllib.request.urlopen")
     def test_check_npm_package_not_found_registry(self, mock_urlopen):
-        from urllib.error import HTTPError
         import io
+        from urllib.error import HTTPError
         mock_urlopen.side_effect = HTTPError("url", 404, "Not Found", {}, io.BytesIO(b""))
         
         target = {
@@ -2494,7 +2496,6 @@ class TestKevlar(unittest.TestCase):
         
     @patch("urllib.request.urlopen")
     def test_check_go_package_pseudo_version_status(self, mock_urlopen):
-        import io
         # Mock empty list returned by Go proxy
         mock_urlopen.return_value.__enter__.return_value.read.return_value = b""
         
@@ -2510,8 +2511,8 @@ class TestKevlar(unittest.TestCase):
         self.assertIsNone(res[0]["latest_absolute"])
 
     def test_parse_go_mod_advanced_directives(self):
-        import tempfile
         import shutil
+        import tempfile
 
         temp_dir = tempfile.mkdtemp()
         try:
@@ -2559,8 +2560,8 @@ class TestKevlar(unittest.TestCase):
             shutil.rmtree(temp_dir)
 
     def test_excluded_version_vulnerability_fix_warning(self):
-        import tempfile
         import shutil
+        import tempfile
         from unittest.mock import patch
 
         temp_dir = tempfile.mkdtemp()
@@ -2607,7 +2608,7 @@ class TestKevlar(unittest.TestCase):
                     }]
                 }
 
-                results, pkg_data, _ = kevlar.run_go_checker(args)
+                results, _pkg_data, _ = kevlar.run_go_checker(args)
                 self.assertEqual(len(results), 1)
                 self.assertIn("excluded_warning", results[0])
                 self.assertIn("v1.0.1", results[0]["excluded_warning"])
@@ -2616,8 +2617,8 @@ class TestKevlar(unittest.TestCase):
             shutil.rmtree(temp_dir)
 
     def test_parse_go_sum_and_verify_checksums(self):
-        import tempfile
         import shutil
+        import tempfile
         from unittest.mock import patch
 
         temp_dir = tempfile.mkdtemp()
@@ -2645,7 +2646,6 @@ class TestKevlar(unittest.TestCase):
             }]
 
             with patch("urllib.request.urlopen") as mock_urlopen:
-                import io
                 mock_urlopen.return_value.__enter__.return_value.read.return_value = (
                     b"51441162\n"
                     b"github.com/fatih/color v1.19.0 h1:Zp3PiM21/9Ld6FzSKyL5c/BULoe/ONr9KlbYVOfG8+w=\n"
@@ -2658,8 +2658,8 @@ class TestKevlar(unittest.TestCase):
             shutil.rmtree(temp_dir)
 
     def test_generate_remediation_diff_cpm_fallback(self):
-        import tempfile
         import shutil
+        import tempfile
         
         temp_dir = tempfile.mkdtemp()
         try:
@@ -2790,10 +2790,10 @@ class TestKevlar(unittest.TestCase):
             shutil.rmtree(temp_dir)
 
     def test_npm_checker_only_engines(self):
-        import tempfile
-        import shutil
-        import types
         import json
+        import shutil
+        import tempfile
+        import types
 
         temp_dir = tempfile.mkdtemp()
         try:
@@ -2815,7 +2815,7 @@ class TestKevlar(unittest.TestCase):
                 suppress=None
             )
 
-            results, pkg_data, elapsed = kevlar.run_npm_checker(args)
+            results, _pkg_data, _elapsed = kevlar.run_npm_checker(args)
             self.assertIsNotNone(results)
             self.assertTrue(len(results) > 0)
             engine_item = next((r for r in results if r.get("name") == "node" and r.get("is_engine")), None)
@@ -2839,8 +2839,8 @@ class TestKevlar(unittest.TestCase):
             shutil.rmtree(temp_dir)
 
     def test_remediation_diff_identical_version_skipped(self):
-        import tempfile
         import shutil
+        import tempfile
 
         temp_dir = tempfile.mkdtemp()
         try:
@@ -2891,8 +2891,8 @@ class TestKevlar(unittest.TestCase):
 
     def test_maven_parent_pom_property_resolution(self):
         """Test that parse_maven_pom resolves properties defined in parent pom.xml when parsing child modules."""
-        import tempfile
         import shutil
+        import tempfile
 
         temp_dir = tempfile.mkdtemp()
         try:
@@ -2942,7 +2942,6 @@ class TestKevlar(unittest.TestCase):
     def test_maven_transitive_dependency_resolution(self):
         """Test that resolve_maven_transitive_dependencies fetches remote POMs and resolves child transitive dependencies."""
         from unittest.mock import patch
-        import xml.etree.ElementTree as ET
 
         parent_pom_xml = (
             '<project>\n'
@@ -2984,8 +2983,8 @@ class TestKevlar(unittest.TestCase):
 
     def test_parse_requirements_txt_relative_inclusion(self):
         """Test that parse_requirements_txt resolves included requirements files and ignores path strings like '..'."""
-        import tempfile
         import shutil
+        import tempfile
 
         temp_dir = tempfile.mkdtemp()
         try:
@@ -3007,8 +3006,8 @@ class TestKevlar(unittest.TestCase):
 
     def test_parse_requirements_txt_path_traversal_prevented(self):
         """Test that parse_requirements_txt blocks inclusions escaping base_dir."""
-        import tempfile
         import shutil
+        import tempfile
 
         temp_dir = tempfile.mkdtemp()
         outside_dir = tempfile.mkdtemp()
@@ -3054,8 +3053,8 @@ class TestKevlar(unittest.TestCase):
 
     def test_remediation_diff_missing_manifest_entry(self):
         """Test that populate_remediation_recommendations generates an addition diff for direct dependencies missing from manifest."""
-        import tempfile
         import shutil
+        import tempfile
 
         temp_dir = tempfile.mkdtemp()
         try:
@@ -3091,8 +3090,521 @@ class TestKevlar(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    # --------------------------------------------------------------------------
+    # RUST ECOSYSTEM TESTS
+    # --------------------------------------------------------------------------
+    def test_find_rust_files_and_parse_cargo_toml_and_lock(self):
+        """Test finding Rust files and parsing Cargo.toml and Cargo.lock."""
+        import shutil
+        import tempfile
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            # 1. Test find_rust_files
+            toml_path, lock_path = kevlar.find_rust_files(temp_dir)
+            self.assertIsNone(toml_path)
+            self.assertIsNone(lock_path)
+
+            cargo_toml_content = """
+            [package]
+            name = "my_crate"
+            version = "0.1.0"
+
+            [dependencies]
+            serde = "1.0.190"
+            tokio = { version = "1.32.0", features = ["full"] }
+            local_lib = { path = "../local_lib" }
+
+            [dev-dependencies]
+            pytest-rs = "^0.5.0"
+
+            [workspace.dependencies]
+            shared_crate = "2.0.0"
+            """
+
+            cargo_lock_content = """
+            version = 3
+
+            [[package]]
+            name = "my_crate"
+            version = "0.1.0"
+            dependencies = [
+             "serde",
+             "tokio",
+            ]
+
+            [[package]]
+            name = "serde"
+            version = "1.0.195"
+            source = "registry+https://github.com/rust-lang/crates.io-index"
+
+            [[package]]
+            name = "tokio"
+            version = "1.35.1"
+            source = "registry+https://github.com/rust-lang/crates.io-index"
+            dependencies = [
+             "bytes",
+             "pin-project-lite",
+            ]
+
+            [[package]]
+            name = "bytes"
+            version = "1.5.0"
+
+            [[package]]
+            name = "pin-project-lite"
+            version = "0.2.13"
+            """
+
+            real_toml = os.path.join(temp_dir, "Cargo.toml")
+            real_lock = os.path.join(temp_dir, "Cargo.lock")
+            with open(real_toml, "w", encoding="utf-8") as f:
+                f.write(cargo_toml_content)
+            with open(real_lock, "w", encoding="utf-8") as f:
+                f.write(cargo_lock_content)
+
+            found_toml, found_lock = kevlar.find_rust_files(temp_dir)
+            self.assertEqual(found_toml, real_toml)
+            self.assertEqual(found_lock, real_lock)
+
+            # 2. Test parse_cargo_toml returns a set of direct dependency names
+            direct_deps = kevlar.parse_cargo_toml(found_toml)
+            self.assertIn("serde", direct_deps)
+            self.assertIn("tokio", direct_deps)
+            self.assertIn("pytest-rs", direct_deps)
+            self.assertIn("shared_crate", direct_deps)
+            self.assertIn("local_lib", direct_deps)
+
+            # 3. Test parse_cargo_lock returns resolved dict and parents dict
+            resolved, parents = kevlar.parse_cargo_lock(found_lock)
+            self.assertEqual(resolved.get("serde"), ["1.0.195"])
+            self.assertEqual(resolved.get("tokio"), ["1.35.1"])
+            self.assertEqual(resolved.get("bytes"), ["1.5.0"])
+            self.assertEqual(resolved.get("pin-project-lite"), ["0.2.13"])
+            self.assertIn("tokio", parents.get("bytes", set()))
+            self.assertIn("tokio", parents.get("pin-project-lite", set()))
+
+            # 4. Test get_crates_index_url
+            self.assertTrue(kevlar.get_crates_index_url("a").endswith("/1/a"))
+            self.assertTrue(kevlar.get_crates_index_url("ab").endswith("/2/ab"))
+            self.assertTrue(kevlar.get_crates_index_url("abc").endswith("/3/a/abc"))
+            self.assertTrue(kevlar.get_crates_index_url("abcd").endswith("/ab/cd/abcd"))
+            self.assertTrue(kevlar.get_crates_index_url("serde").endswith("/se/rd/serde"))
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_check_rust_package_and_run_rust_checker(self):
+        """Test check_rust_package with sparse index and run_rust_checker orchestration."""
+        import shutil
+        import tempfile
+        import types
+        from unittest.mock import MagicMock, patch
+
+        target = {
+            "name": "serde",
+            "declared": "1.0.190",
+            "installed": ["1.0.190"],
+        }
+
+        sparse_lines = (
+            '{"name":"serde","vers":"1.0.189","yanked":false}\n'
+            '{"name":"serde","vers":"1.0.190","yanked":false}\n'
+            '{"name":"serde","vers":"1.0.191","yanked":true}\n'
+            '{"name":"serde","vers":"1.0.195","yanked":false}\n'
+            '{"name":"serde","vers":"2.0.0","yanked":false}\n'
+        )
+
+        with patch("kevlar.safe_urlopen") as mock_url:
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = sparse_lines.encode("utf-8")
+            mock_resp.__enter__.return_value = mock_resp
+            mock_url.return_value = mock_resp
+
+            res = kevlar.check_rust_package(target)
+            self.assertEqual(len(res), 1)
+            row = res[0]
+            self.assertEqual(row["name"], "serde")
+            self.assertEqual(row["status"], "patch-major")
+            self.assertEqual(row["latest_same_major"], "1.0.195")
+            self.assertEqual(row["latest_absolute"], "2.0.0")
+
+        # Test run_rust_checker
+        temp_dir = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(temp_dir, "Cargo.toml"), "w", encoding="utf-8") as f:
+                f.write('[package]\nname = "demo"\nversion = "0.1.0"\n[dependencies]\nserde = "1.0.190"\n')
+            with open(os.path.join(temp_dir, "Cargo.lock"), "w", encoding="utf-8") as f:
+                f.write('version = 3\n[[package]]\nname = "serde"\nversion = "1.0.190"\n')
+
+            args = types.SimpleNamespace(path=temp_dir, all=True, concurrent=2, vuls=False)
+            with patch("kevlar.safe_urlopen") as mock_url:
+                mock_resp = MagicMock()
+                mock_resp.read.return_value = sparse_lines.encode("utf-8")
+                mock_resp.__enter__.return_value = mock_resp
+                mock_url.return_value = mock_resp
+
+                results, pkg_data, _elapsed = kevlar.run_rust_checker(args)
+                self.assertIsNotNone(results)
+                self.assertEqual(len(results), 1)
+                self.assertIn("serde", pkg_data["all_direct"])
+        finally:
+            shutil.rmtree(temp_dir)
+
+    # --------------------------------------------------------------------------
+    # PHP COMPOSER ECOSYSTEM TESTS
+    # --------------------------------------------------------------------------
+    def test_find_composer_files_and_parse_composer_json(self):
+        """Test finding PHP Composer files and parsing composer.json."""
+        import json
+        import shutil
+        import tempfile
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            c_json, c_lock = kevlar.find_composer_files(temp_dir)
+            self.assertIsNone(c_json)
+            self.assertIsNone(c_lock)
+
+            composer_content = {
+                "name": "vendor/project",
+                "require": {
+                    "php": ">=8.1",
+                    "monolog/monolog": "^2.0",
+                    "guzzlehttp/guzzle": "~7.4.0",
+                },
+                "require-dev": {
+                    "phpunit/phpunit": "^9.5",
+                },
+            }
+
+            json_file = os.path.join(temp_dir, "composer.json")
+            with open(json_file, "w", encoding="utf-8") as f:
+                json.dump(composer_content, f)
+
+            found_json, found_lock = kevlar.find_composer_files(temp_dir)
+            self.assertEqual(found_json, json_file)
+            self.assertIsNone(found_lock)
+
+            direct, dev_direct = kevlar.parse_composer_json(found_json)
+            self.assertIn("monolog/monolog", direct)
+            self.assertEqual(direct["monolog/monolog"], "^2.0")
+            self.assertIn("guzzlehttp/guzzle", direct)
+            self.assertEqual(direct["guzzlehttp/guzzle"], "~7.4.0")
+            self.assertIn("phpunit/phpunit", dev_direct)
+            self.assertEqual(dev_direct["phpunit/phpunit"], "^9.5")
+            self.assertNotIn("php", direct)
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_check_composer_package_and_run_composer_checker(self):
+        """Test check_composer_package against Packagist API mock and run_composer_checker."""
+        import json
+        import shutil
+        import tempfile
+        import types
+        from unittest.mock import MagicMock, patch
+
+        target = {
+            "name": "monolog/monolog",
+            "declared": "^2.0",
+            "installed": ["2.8.0"],
+        }
+
+        packagist_resp = {
+            "packages": {
+                "monolog/monolog": [
+                    {"version": "2.8.0", "source": {"url": "https://github.com/Seldaek/monolog.git"}},
+                    {"version": "2.9.3", "source": {"url": "https://github.com/Seldaek/monolog.git"}},
+                    {"version": "3.5.0", "source": {"url": "https://github.com/Seldaek/monolog.git"}},
+                ]
+            }
+        }
+
+        with patch("kevlar.safe_urlopen") as mock_url:
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = json.dumps(packagist_resp).encode("utf-8")
+            mock_resp.__enter__.return_value = mock_resp
+            mock_url.return_value = mock_resp
+
+            res = kevlar.check_composer_package(target)
+            self.assertEqual(len(res), 1)
+            row = res[0]
+            self.assertEqual(row["name"], "monolog/monolog")
+            self.assertEqual(row["status"], "minor-major")
+            self.assertEqual(row["latest_same_major"], "2.9.3")
+            self.assertEqual(row["latest_absolute"], "3.5.0")
+            self.assertIn("github.com/Seldaek/monolog", row["repo_url"])
+
+        # Test run_composer_checker
+        temp_dir = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(temp_dir, "composer.json"), "w", encoding="utf-8") as f:
+                json.dump({"require": {"monolog/monolog": "^2.0"}}, f)
+            with open(os.path.join(temp_dir, "composer.lock"), "w", encoding="utf-8") as f:
+                json.dump({"packages": [{"name": "monolog/monolog", "version": "2.8.0"}]}, f)
+
+            args = types.SimpleNamespace(path=temp_dir, all=True, concurrent=2, vuls=False)
+            with patch("kevlar.safe_urlopen") as mock_url:
+                mock_resp = MagicMock()
+                mock_resp.read.return_value = json.dumps(packagist_resp).encode("utf-8")
+                mock_resp.__enter__.return_value = mock_resp
+                mock_url.return_value = mock_resp
+
+                results, _pkg_data, _elapsed = kevlar.run_composer_checker(args)
+                self.assertIsNotNone(results)
+                self.assertEqual(len(results), 1)
+                self.assertEqual(results[0]["name"], "monolog/monolog")
+        finally:
+            shutil.rmtree(temp_dir)
+
+    # --------------------------------------------------------------------------
+    # RUBY BUNDLER ECOSYSTEM TESTS
+    # --------------------------------------------------------------------------
+    def test_find_ruby_files_and_parse_gemfile(self):
+        """Test finding Ruby files and parsing Gemfile declarations."""
+        import shutil
+        import tempfile
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            g_file, l_file = kevlar.find_ruby_files(temp_dir)
+            self.assertIsNone(g_file)
+            self.assertIsNone(l_file)
+
+            gemfile_content = """
+            source 'https://rubygems.org'
+            ruby '3.2.0'
+
+            gem 'rails', '~> 7.0.4'
+            gem "pg", ">= 1.2.0", "< 2.0"
+            gem 'puma', require: false
+
+            group :development, :test do
+              gem 'rspec-rails', '~> 6.0'
+            end
+            """
+
+            real_gemfile = os.path.join(temp_dir, "Gemfile")
+            with open(real_gemfile, "w", encoding="utf-8") as f:
+                f.write(gemfile_content)
+
+            found_gemfile, _found_lock = kevlar.find_ruby_files(temp_dir)
+            self.assertEqual(found_gemfile, real_gemfile)
+
+            direct = kevlar.parse_gemfile(found_gemfile)
+            self.assertIn("rails", direct)
+            self.assertIn("pg", direct)
+            self.assertIn("puma", direct)
+            self.assertIn("rspec-rails", direct)
+            self.assertNotIn("ruby", direct)
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_check_ruby_package_and_run_ruby_checker(self):
+        """Test check_ruby_package against RubyGems API mock and run_ruby_checker."""
+        import json
+        import shutil
+        import tempfile
+        import types
+        from unittest.mock import MagicMock, patch
+
+        target = {
+            "name": "rails",
+            "declared": "~> 7.0.0",
+            "installed": ["7.0.4"],
+        }
+
+        gem_versions_resp = [
+            {"number": "7.0.4", "prerelease": False, "yanked": False},
+            {"number": "7.0.8", "prerelease": False, "yanked": False},
+            {"number": "7.1.3", "prerelease": False, "yanked": False},
+            {"number": "8.0.0", "prerelease": False, "yanked": False},
+        ]
+        gem_info_resp = {
+            "name": "rails",
+            "source_code_uri": "https://github.com/rails/rails",
+            "homepage_uri": "https://rubyonrails.org",
+        }
+
+        def fake_urlopen(req, *args, **kwargs):
+            url = req.full_url if hasattr(req, "full_url") else str(req)
+            mock_resp = MagicMock()
+            if "versions" in url:
+                mock_resp.read.return_value = json.dumps(gem_versions_resp).encode("utf-8")
+            else:
+                mock_resp.read.return_value = json.dumps(gem_info_resp).encode("utf-8")
+            mock_resp.__enter__.return_value = mock_resp
+            return mock_resp
+
+        with patch("kevlar.safe_urlopen", side_effect=fake_urlopen):
+            res = kevlar.check_ruby_package(target)
+            self.assertEqual(len(res), 1)
+            row = res[0]
+            self.assertEqual(row["name"], "rails")
+            self.assertEqual(row["status"], "minor-major")
+            self.assertEqual(row["latest_same_major"], "7.1.3")
+            self.assertEqual(row["latest_absolute"], "8.0.0")
+            self.assertEqual(row["repo_url"], "https://github.com/rails/rails")
+
+        # Test run_ruby_checker
+        temp_dir = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(temp_dir, "Gemfile"), "w", encoding="utf-8") as f:
+                f.write("source 'https://rubygems.org'\ngem 'rails', '7.0.4'\n")
+            with open(os.path.join(temp_dir, "Gemfile.lock"), "w", encoding="utf-8") as f:
+                f.write("GEM\n  specs:\n    rails (7.0.4)\nDEPENDENCIES\n  rails (= 7.0.4)\n")
+
+            args = types.SimpleNamespace(path=temp_dir, all=True, concurrent=2, vuls=False)
+            with patch("kevlar.safe_urlopen", side_effect=fake_urlopen):
+                results, _pkg_data, _elapsed = kevlar.run_ruby_checker(args)
+                self.assertIsNotNone(results)
+                self.assertEqual(len(results), 1)
+                self.assertEqual(results[0]["name"], "rails")
+        finally:
+            shutil.rmtree(temp_dir)
+
+    # --------------------------------------------------------------------------
+    # .NET NUGET / CPM ECOSYSTEM TESTS
+    # --------------------------------------------------------------------------
+    def test_find_nuget_files_and_parse_csproj_and_assets(self):
+        """Test finding NuGet files, parsing CSProj with CPM, and reading project.assets.json."""
+        import json
+        import shutil
+        import tempfile
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            # 1. find_nuget_files returns (found_files, sln_files)
+            found_files, sln_files = kevlar.find_nuget_files(temp_dir)
+            self.assertEqual(len(found_files), 0)
+            self.assertEqual(len(sln_files), 0)
+
+            cpm_xml = """<Project>
+              <PropertyGroup>
+                <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageVersion Include="Newtonsoft.Json" Version="13.0.1" />
+                <PackageVersion Include="Serilog" Version="2.10.0" />
+              </ItemGroup>
+            </Project>"""
+
+            props_path = os.path.join(temp_dir, "Directory.Packages.props")
+            with open(props_path, "w", encoding="utf-8") as f:
+                f.write(cpm_xml)
+
+            cpm_versions = kevlar.find_and_parse_cpm_versions(props_path)
+            self.assertEqual(cpm_versions.get("Newtonsoft.Json"), "13.0.1")
+            self.assertEqual(cpm_versions.get("Serilog"), "2.10.0")
+
+            csproj_xml = """<Project Sdk="Microsoft.NET.Sdk">
+              <ItemGroup>
+                <PackageReference Include="Newtonsoft.Json" />
+                <PackageReference Include="Dapper" Version="2.0.123" />
+              </ItemGroup>
+            </Project>"""
+
+            csproj_path = os.path.join(temp_dir, "MyApp.csproj")
+            with open(csproj_path, "w", encoding="utf-8") as f:
+                f.write(csproj_xml)
+
+            direct_deps = kevlar.parse_csproj_or_config(temp_dir, cpm_versions)
+            self.assertEqual(direct_deps.get("Newtonsoft.Json"), "13.0.1")
+            self.assertEqual(direct_deps.get("Dapper"), "2.0.123")
+
+            # project.assets.json
+            assets_data = {
+                "version": 3,
+                "libraries": {
+                    "Newtonsoft.Json/13.0.1": {
+                        "type": "package",
+                    },
+                    "Microsoft.CSharp/4.7.0": {
+                        "type": "package",
+                    },
+                },
+                "targets": {
+                    "net6.0": {
+                        "Newtonsoft.Json/13.0.1": {
+                            "type": "package",
+                            "dependencies": {
+                                "Microsoft.CSharp": "4.7.0",
+                            },
+                        },
+                        "Microsoft.CSharp/4.7.0": {
+                            "type": "package",
+                        },
+                    },
+                },
+            }
+            obj_dir = os.path.join(temp_dir, "obj")
+            os.makedirs(obj_dir, exist_ok=True)
+            assets_path = os.path.join(obj_dir, "project.assets.json")
+            with open(assets_path, "w", encoding="utf-8") as f:
+                json.dump(assets_data, f)
+
+            resolved, parents = kevlar.parse_project_assets(assets_path)
+            self.assertEqual(resolved.get("Newtonsoft.Json"), ["13.0.1"])
+            self.assertEqual(resolved.get("Microsoft.CSharp"), ["4.7.0"])
+            self.assertIn("Newtonsoft.Json", parents.get("Microsoft.CSharp", []))
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_check_nuget_package_and_run_nuget_checker(self):
+        """Test check_nuget_package against NuGet Registration API mock and run_nuget_checker."""
+        import json
+        import shutil
+        import tempfile
+        import types
+        from unittest.mock import MagicMock, patch
+
+        target = {
+            "name": "Newtonsoft.Json",
+            "declared": "13.0.1",
+            "installed": ["13.0.1"],
+        }
+
+        nuget_flat_resp = {
+            "versions": ["13.0.1", "13.0.2", "13.0.3"],
+        }
+
+        with patch("kevlar.safe_urlopen") as mock_url:
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = json.dumps(nuget_flat_resp).encode("utf-8")
+            mock_resp.__enter__.return_value = mock_resp
+            mock_url.return_value = mock_resp
+
+            res = kevlar.check_nuget_package(target)
+            self.assertEqual(len(res), 1)
+            row = res[0]
+            self.assertEqual(row["name"], "Newtonsoft.Json")
+            self.assertEqual(row["status"], "patch")
+            self.assertEqual(row["latest_same_major"], "13.0.3")
+            self.assertEqual(row["latest_absolute"], "13.0.3")
+
+        # Test run_nuget_checker
+        temp_dir = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(temp_dir, "App.csproj"), "w", encoding="utf-8") as f:
+                f.write('<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><PackageReference Include="Newtonsoft.Json" Version="13.0.1" /></ItemGroup></Project>')
+
+            args = types.SimpleNamespace(path=temp_dir, all=True, concurrent=2, vuls=False)
+            with patch("kevlar.safe_urlopen") as mock_url:
+                mock_resp = MagicMock()
+                mock_resp.read.return_value = json.dumps(nuget_flat_resp).encode("utf-8")
+                mock_resp.__enter__.return_value = mock_resp
+                mock_url.return_value = mock_resp
+
+                results, _pkg_data, _elapsed = kevlar.run_nuget_checker(args)
+                self.assertIsNotNone(results)
+                self.assertEqual(len(results), 1)
+                self.assertEqual(results[0]["name"], "Newtonsoft.Json")
+        finally:
+            shutil.rmtree(temp_dir)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

@@ -234,7 +234,7 @@ def init_colors_and_encoding():
             if kernel32.GetConsoleMode(h_out, ctypes.byref(mode)):
                 # ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
                 kernel32.SetConsoleMode(h_out, mode.value | 0x0004)
-        except Exception:
+        except (AttributeError, OSError, ctypes.ArgumentError):
             pass
 
     # 2. Check encoding of stdout to fallback if Unicode is not supported
@@ -651,7 +651,7 @@ def parse_secure_xml(content, max_depth=15, max_expanded_size=10 * 1024 * 1024):
             )
             if m:
                 encoding = m.group(1)
-        except Exception:
+        except (UnicodeError, IndexError, AttributeError):
             pass
         try:
             content_str = content.decode(encoding, errors="replace")
@@ -806,7 +806,7 @@ def safe_urlopen(req, timeout=10, max_retries=5, backoff=0.5):
             return urllib.request.urlopen(req, timeout=timeout)
         except urllib.error.HTTPError as e:
             if e.code == 404:
-                raise e
+                raise
             if e.code == 429:
                 last_err = e
                 if attempt < max_retries - 1:
@@ -825,9 +825,9 @@ def safe_urlopen(req, timeout=10, max_retries=5, backoff=0.5):
                         wait_sec = backoff * (2**attempt) + random.uniform(0.5, 1.5)
                     time.sleep(wait_sec)
                     continue
-                raise e
+                raise
             if e.code < 500:
-                raise e
+                raise
             last_err = e
         except (
             urllib.error.URLError,
@@ -1115,7 +1115,7 @@ def satisfy_term(version_str, term):
 
         _, v_maj, v_min, v_pat, _, _ = parse_semver(version_str)
 
-        if (ver_part.endswith(".x") or ver_part.endswith(".*")) and op not in {
+        if (ver_part.endswith((".x", ".*"))) and op not in {
             "^",
             "~",
         }:
@@ -1340,7 +1340,7 @@ def analyze_node_constraint(constraint_str):
     today = date.today()
 
     # Sort and filter known major versions from the schedule keys
-    test_majors = sorted([k for k in schedule.keys() if k.isdigit()], key=int)
+    test_majors = sorted([k for k in schedule if k.isdigit()], key=int)
     test_majors.append(FUTURE_MAJOR_PLACEHOLDER)
 
     # Filter for active (non-EOL) even major versions
@@ -1464,7 +1464,7 @@ def find_node_constraint(base_path, pkg_data):
                         if re.match(r"^v?\d+", content):
                             return f"={content}", ".nvmrc"
                         return content, ".nvmrc"
-        except Exception:
+        except OSError:
             pass
 
     node_ver_path = os.path.join(base_path, ".node-version")
@@ -1478,7 +1478,7 @@ def find_node_constraint(base_path, pkg_data):
                         if re.match(r"^v?\d+", content):
                             return f"={content}", ".node-version"
                         return content, ".node-version"
-        except Exception:
+        except OSError:
             pass
 
     return None, None
@@ -1764,9 +1764,8 @@ def resolve_maven_repo(registry_url, group_path, artifact_id, version):
                     child_tag = child.tag.split("}")[-1]
                     if child_tag == "url":
                         scm_url = child.text
-            elif tag_local == "url":
-                if elem.text:
-                    proj_url = elem.text
+            elif tag_local == "url" and elem.text:
+                proj_url = elem.text
         return clean_repo_url(scm_url or proj_url)
     except Exception as e:
         if DEBUG_MODE:
@@ -1849,7 +1848,7 @@ def format_yarn_berry_checksum(checksum_val):
             raw_bytes = codecs.decode(hash_str.strip(), "hex")
             b64_bytes = base64.b64encode(raw_bytes)
             return f"{algo}-{b64_bytes.decode('utf-8')}"
-        except Exception:
+        except (ValueError, UnicodeError):
             pass
 
     # Fallback to replacing colon with hyphen if it's already in sha512: or sha1: form
@@ -1971,9 +1970,7 @@ def parse_yarn_lock(filepath):
                                 parents.setdefault(dep_name, set()).add(name)
                     else:
                         # Parsing properties of the current package
-                        if stripped.startswith("version ") or stripped.startswith(
-                            "version:"
-                        ):
+                        if stripped.startswith(("version ", "version:")):
                             ver_val = (
                                 stripped.split(" ", 1)[-1]
                                 if " " in stripped
@@ -1984,9 +1981,7 @@ def parse_yarn_lock(filepath):
                             for name in current_names:
                                 resolved.setdefault(name, set()).add(ver_val)
 
-                        elif stripped.startswith("integrity ") or stripped.startswith(
-                            "integrity:"
-                        ):
+                        elif stripped.startswith(("integrity ", "integrity:")):
                             integrity_val = (
                                 stripped.split(" ", 1)[-1]
                                 if " " in stripped
@@ -1997,9 +1992,7 @@ def parse_yarn_lock(filepath):
                             )
                             current_integrity = integrity_val
 
-                        elif stripped.startswith("checksum:") or stripped.startswith(
-                            "checksum "
-                        ):
+                        elif stripped.startswith(("checksum:", "checksum ")):
                             checksum_val = (
                                 stripped.split(" ", 1)[-1]
                                 if " " in stripped
@@ -2091,9 +2084,7 @@ def parse_pnpm_lock(filepath):
                 if stripped.startswith("importers:"):
                     stack.append((indent, "IMPORTERS", None))
                     continue
-                elif stripped.startswith("packages:") or stripped.startswith(
-                    "snapshots:"
-                ):
+                elif stripped.startswith(("packages:", "snapshots:")):
                     stack.append((indent, "PACKAGES", None))
                     continue
 
@@ -2221,7 +2212,7 @@ def parse_pnpm_lock(filepath):
                     # We are in a list of dependencies under a package.
                     # Each line is: dependency_name: version
                     if ":" in stripped:
-                        dep_name, dep_ver = stripped.split(":", 1)
+                        dep_name, _dep_ver = stripped.split(":", 1)
                         dep_name = dep_name.strip().strip("'\"")
                         if (
                             dep_name
@@ -2289,7 +2280,7 @@ def parse_package_lock(filepath):
         if "packages" in data and isinstance(data["packages"], dict):
             # Map path to package name
             path_to_name = {}
-            for pkg_path in data["packages"].keys():
+            for pkg_path in data["packages"]:
                 if pkg_path == "":
                     path_to_name[pkg_path] = "root"
                     continue
@@ -2426,13 +2417,13 @@ def find_direct_installed_version(
                 return satisfying[0]
             elif len(satisfying) > 1:
                 return max(satisfying, key=parse_semver)
-        except Exception:
+        except (ValueError, TypeError, KeyError):
             pass
 
     # Fallback 2: The highest installed version
     try:
         return max(installed_versions, key=parse_semver)
-    except Exception:
+    except (ValueError, TypeError):
         return installed_versions[-1]
 
 
@@ -2448,13 +2439,7 @@ def check_npm_package(target):
             return False
         v = ver_str.strip()
         return (
-            v.startswith("file:")
-            or v.startswith("link:")
-            or v.startswith("portal:")
-            or v.startswith("workspace:")
-            or v.startswith("./")
-            or v.startswith("../")
-            or v.startswith("/")
+            v.startswith(("file:", "link:", "portal:", "workspace:", "./", "../", "/"))
         )
 
     versions_to_check = installed_versions if installed_versions else [declared]
@@ -3290,7 +3275,7 @@ def _resolve_npm_dependency_types(results, pkg_data, parents_data):
                 direct_parents = find_direct_parents(
                     r["name"], parents_data, direct_packages
                 )
-                r["required_by"] = sorted(list(direct_parents - {r["name"]}))
+                r["required_by"] = sorted(direct_parents - {r["name"]})
         else:
             r["dep_type"] = "Engine"
             r["required_by"] = []
@@ -3711,7 +3696,7 @@ def parse_requirements_txt(filepath, seen_files=None, base_dir=None):
                 continue
 
             pkg_name = match.group(1)
-            extras = match.group(2)
+            match.group(2)
             rest = match.group(3).strip()
 
             # Evaluate markers if present
@@ -4253,7 +4238,7 @@ def run_pip_checker(args):
     elif tech_type == "pipenv":
         print(f"{COLOR_GRAY}{ICON_INFO} Reading Pipfile.lock...{COLOR_RESET}")
         lock_deps, parents_data = parse_pipfile_lock(lock_file)
-        direct_deps = {k: "*" for k in lock_deps.keys()}
+        direct_deps = {k: "*" for k in lock_deps}
     elif tech_type == "pyproject":
         print(f"{COLOR_GRAY}{ICON_INFO} Reading pyproject.toml...{COLOR_RESET}")
         direct_deps = parse_pyproject_toml(manifest_file)
@@ -4449,9 +4434,7 @@ def find_nuget_files(path):
     if os.path.isfile(abs_path):
         if abs_path.lower().endswith((".sln", ".slnx")):
             sln_file = abs_path
-        elif abs_path.endswith((".csproj", ".vbproj", ".fsproj")) or abs_path.endswith(
-            "packages.config"
-        ):
+        elif abs_path.endswith((".csproj", ".vbproj", ".fsproj", "packages.config")):
             manifests = [abs_path]
     elif os.path.isdir(abs_path):
         sln_candidates = [
@@ -4560,7 +4543,7 @@ def parse_project_assets(filepath):
                     resolved.setdefault(name, set()).add(version)
 
         targets = data.get("targets", {})
-        for _target_name, target_libs in targets.items():
+        for target_libs in targets.values():
             for lib_key, lib_info in target_libs.items():
                 parts = lib_key.split("/")
                 if len(parts) != 2:
@@ -4568,14 +4551,14 @@ def parse_project_assets(filepath):
                 parent_name = parts[0]
 
                 deps = lib_info.get("dependencies", {})
-                for child_name in deps.keys():
+                for child_name in deps:
                     parents.setdefault(child_name, set()).add(parent_name)
 
         project_info = data.get("project", {})
         frameworks = project_info.get("frameworks", {})
-        for _fw_name, fw_info in frameworks.items():
+        for fw_info in frameworks.values():
             deps = fw_info.get("dependencies", {})
-            for child_name in deps.keys():
+            for child_name in deps:
                 parents.setdefault(child_name, set()).add("root")
 
         resolved_clean = {k: list(v) for k, v in resolved.items()}
@@ -4769,7 +4752,7 @@ def run_nuget_checker(args):
     direct_packages = set(pkg_data.keys()) if pkg_data else set()
     for r in results:
         direct_parents = find_direct_parents(r["name"], parents_data, direct_packages)
-        r["required_by"] = sorted(list(direct_parents - {r["name"]}))
+        r["required_by"] = sorted(direct_parents - {r["name"]})
 
     elapsed = time.time() - start_time
 
@@ -4863,7 +4846,7 @@ def parse_composer_lock(filepath):
                 resolved.setdefault(name, set()).add(clean_ver)
 
                 reqs = pkg.get("require", {})
-                for child_name in reqs.keys():
+                for child_name in reqs:
                     if "/" in child_name:
                         parents.setdefault(child_name, set()).add(name)
 
@@ -4908,9 +4891,8 @@ def check_composer_package(target):
             v_lower = v.lower()
             if not any(
                 x in v_lower for x in ("-", "dev", "alpha", "beta", "rc", "patch")
-            ):
-                if RE_DECIMAL_VER_STRICT.match(v):
-                    stable_versions.append(v)
+            ) and RE_DECIMAL_VER_STRICT.match(v):
+                stable_versions.append(v)
 
         valid_versions = stable_versions if stable_versions else versions_list
 
@@ -5076,7 +5058,7 @@ def run_composer_checker(args):
     direct_packages = set(all_direct.keys())
     for r in results:
         direct_parents = find_direct_parents(r["name"], parents_data, direct_packages)
-        r["required_by"] = sorted(list(direct_parents - {r["name"]}))
+        r["required_by"] = sorted(direct_parents - {r["name"]})
 
     elapsed = time.time() - start_time
 
@@ -5206,7 +5188,7 @@ def find_all_maven_poms(root_pom_path, base_dir=None, visited=None):
                                     module_pom, base_dir=base_dir, visited=visited
                                 )
                             )
-    except Exception:
+    except (OSError, ET.ParseError, ValueError):
         pass
 
     seen = set()
@@ -5418,7 +5400,7 @@ def fetch_remote_maven_pom(group_id, artifact_id, version, custom_registries=Non
             root = _fetch_registry_json_or_xml(url, format="xml")
             if root is not None:
                 break
-        except Exception:
+        except (urllib.error.URLError, OSError, ET.ParseError, TimeoutError):
             continue
 
     _MAVEN_REMOTE_POM_CACHE[cache_key] = root
@@ -5882,7 +5864,7 @@ def run_maven_checker(args):
                             and u not in custom_registries
                         ):
                             custom_registries.append(u)
-        except Exception:
+        except (OSError, ET.ParseError, ValueError):
             pass
 
     # 3. Parse all module poms and merge active dependencies
@@ -5980,7 +5962,7 @@ def run_maven_checker(args):
 
     for r in results:
         name = r["name"]
-        parents = sorted(list(required_by_map.get(name, set())))
+        parents = sorted(required_by_map.get(name, set()))
         r["required_by"] = parents
         r["dep_type"] = dep_types.get(name, "Transitive" if parents else "Direct")
 
@@ -6139,10 +6121,7 @@ def parse_go_mod(filepath):
                 if left_pkg and right_parts:
                     target_path = right_parts[0]
                     is_local_path = (
-                        target_path.startswith(".")
-                        or target_path.startswith("/")
-                        or target_path.startswith("\\")
-                        or len(right_parts) == 1
+                        target_path.startswith((".", "/", "\\")) or len(right_parts) == 1
                     )
                     if is_local_path:
                         local_replacements[left_pkg] = target_path
@@ -6251,7 +6230,7 @@ def check_go_package(target):
                 if err.code == 404 and "/" in candidate_name:
                     candidate_name = candidate_name.rsplit("/", 1)[0]
                 else:
-                    raise err
+                    raise
 
         versions_list = [v.strip() for v in resp_data.split("\n") if v.strip()]
 
@@ -6288,10 +6267,10 @@ def check_go_package(target):
                 latest_same_major = latest_absolute
 
             clean_ver = ver_str.lstrip("v").split("+")[0] if ver_str else ""
-            clean_latest_absolute = (
+            (
                 latest_absolute.lstrip("v").split("+")[0] if latest_absolute else ""
             )
-            clean_latest_same = (
+            (
                 latest_same_major.lstrip("v").split("+")[0] if latest_same_major else ""
             )
             update_type = determine_update_type(
@@ -6426,7 +6405,7 @@ def resolve_go_parent_graph(direct_deps, max_workers=10):
                     ):
                         child_pkg = parts[1]
                         parents.setdefault(child_pkg, set()).add(name)
-            except Exception:
+            except (OSError, UnicodeDecodeError, IndexError):
                 pass
 
         with lock:
@@ -6536,7 +6515,7 @@ def verify_go_checksums(results, go_sum_path, max_workers=10):
                 r["mismatch_checksum"] = True
             elif official_hash:
                 r["checksum_verified"] = True
-        except Exception:
+        except (urllib.error.URLError, OSError, ValueError, TimeoutError):
             pass
 
         with lock:
@@ -6704,7 +6683,7 @@ def run_go_checker(args):
             r["dep_type"] = "Transitive"
             pkg_parents = parent_map.get(r["name"])
             if pkg_parents:
-                r["required_by"] = sorted(list(pkg_parents))
+                r["required_by"] = sorted(pkg_parents)
             else:
                 r["required_by"] = ["indirect"]
         elif r["name"] in direct_keys:
@@ -6919,11 +6898,11 @@ def check_rust_package(target):
                             all_versions.append(v_num)
                             if v_data.get("yanked"):
                                 yanked_versions.add(v_num)
-                    except Exception:
+                    except (json.JSONDecodeError, KeyError, ValueError):
                         pass
                 if all_versions:
                     fetched_index = True
-        except Exception:
+        except (urllib.error.URLError, OSError, TimeoutError):
             pass
 
         # 2. Fallback: REST API if sparse index call failed or returned no versions
@@ -7088,7 +7067,7 @@ def run_rust_checker(args):
             r["dep_type"] = "Transitive"
             r["declared"] = None
         direct_parents = find_direct_parents(r["name"], parents, direct)
-        r["required_by"] = sorted(list(direct_parents - {r["name"]}))
+        r["required_by"] = sorted(direct_parents - {r["name"]})
 
     elapsed = time.time() - start_time
 
@@ -7310,7 +7289,7 @@ def check_ruby_package(target):
                             if is_github_url(repo_url)
                             else repo_url
                         )
-                except Exception:
+                except (KeyError, ValueError, TypeError):
                     pass
 
             display_latest = format_latest_versions(latest_same_major, latest_absolute)
@@ -7446,7 +7425,7 @@ def run_ruby_checker(args):
     # Resolve transitive dependency parents
     for r in results:
         direct_parents = find_direct_parents(r["name"], parents, direct)
-        r["required_by"] = sorted(list(direct_parents - {r["name"]}))
+        r["required_by"] = sorted(direct_parents - {r["name"]})
 
     elapsed = time.time() - start_time
 
@@ -7475,13 +7454,13 @@ def find_gradle_files(path):
                     for f in os.listdir(lock_dir):
                         if f.endswith(".lockfile"):
                             lock_files.append(os.path.join(lock_dir, f))
-                except Exception:
+                except OSError:
                     pass
             gl = os.path.join(path, "gradle.lockfile")
             if os.path.exists(gl):
                 lock_files.append(gl)
         elif os.path.isfile(path):
-            if path.endswith(".gradle") or path.endswith(".gradle.kts"):
+            if path.endswith((".gradle", ".gradle.kts")):
                 gradle_files.append(path)
             elif path.endswith(".lockfile"):
                 lock_files.append(path)
@@ -7518,7 +7497,7 @@ def parse_libs_versions_toml(filepath):
 
         libraries = data.get("libraries", {})
         if isinstance(libraries, dict):
-            for alias, val in libraries.items():
+            for val in libraries.values():
                 group = ""
                 name = ""
                 ver = "*"
@@ -7757,24 +7736,7 @@ def validate_configuration_drift(results):
 
         # Skip checking if declared constraint is a git URL, local path, workspace, patch, catalog reference, etc.
         if (
-            decl_str.startswith(
-                (
-                    "@",
-                    "git+",
-                    "git:",
-                    "http:",
-                    "https:",
-                    "ssh:",
-                    "file:",
-                    "workspace:",
-                    "patch:",
-                    "portal:",
-                    "link:",
-                    "catalog:",
-                )
-            )
-            or "github:" in decl_str.lower()
-            or decl_str.startswith((".", "/"))
+            decl_str.startswith(("@", "git+", "git:", "http:", "https:", "ssh:", "file:", "workspace:", "patch:", "portal:", "link:", "catalog:", ".", "/")) or "github:" in decl_str.lower()
         ):
             continue
 
@@ -9127,7 +9089,7 @@ def generate_remediation_diff(
                         )
                         if line_idx_p is not None:
                             return parent_pom, line_idx_p, val_p
-                    except Exception:
+                    except (OSError, UnicodeDecodeError):
                         pass
                     curr_dir_p = parent_pom
                 else:
@@ -9170,7 +9132,7 @@ def generate_remediation_diff(
                 line_idx_to_change = resolved_line_idx - 1
                 target_text = current_val
                 resolved_version = current_val
-            except Exception:
+            except (OSError, UnicodeDecodeError):
                 pass
     else:
         resolved_version = target_text
@@ -9205,9 +9167,7 @@ def generate_remediation_diff(
                     return True
                 m1 = RE_NUM_START.match(c1)
                 m2 = RE_NUM_START.match(c2)
-                if m1 and m2 and m1.group(1) == m2.group(1):
-                    return True
-                return False
+                return bool(m1 and m2 and m1.group(1) == m2.group(1))
 
             if not is_version_compatible(declared_ver, resolved_version):
                 return None
@@ -9252,8 +9212,8 @@ def generate_remediation_diff(
             escaped_orig = escape_html(orig_line)
             if target_text and target_text in orig_line:
                 escaped_target = escape_html(target_text)
-                escaped_prefix = escape_html(effective_prefix)
-                escaped_version = escape_html(match_version)
+                escape_html(effective_prefix)
+                escape_html(match_version)
 
                 html_orig = escaped_orig.replace(
                     escaped_target,
@@ -9663,13 +9623,12 @@ def populate_remediation_recommendations(results, default_project_path):
             or _clean_v(latest_sm) == _clean_v(latest_patch)
         ):
             latest_sm = None
-        if latest_abs and " or " not in str(latest_abs):
-            if (
-                _clean_v(latest_abs) in (clean_inst_v, clean_decl_v)
-                or _clean_v(latest_abs) == _clean_v(latest_sm)
-                or _clean_v(latest_abs) == _clean_v(latest_patch)
-            ):
-                latest_abs = None
+        if latest_abs and " or " not in str(latest_abs) and (
+            _clean_v(latest_abs) in (clean_inst_v, clean_decl_v)
+            or _clean_v(latest_abs) == _clean_v(latest_sm)
+            or _clean_v(latest_abs) == _clean_v(latest_patch)
+        ):
+            latest_abs = None
 
         manifest_files = _get_manifest_files(
             project_path, tech, r.get("is_engine", False)
@@ -12958,12 +12917,12 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
 
         # Check if we should show the project path in the global header or per-card
         unique_project_paths = sorted(
-            list(set(r.get("project_path") for r in results if r.get("project_path")))
+            {r.get("project_path") for r in results if r.get("project_path")}
         )
         show_project_globally = len(unique_project_paths) <= 1
 
         unique_technologies = sorted(
-            list(set(r.get("technology") for r in results if r.get("technology")))
+            {r.get("technology") for r in results if r.get("technology")}
         )
 
         technology_dropdown_html = ""
@@ -12995,13 +12954,11 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
         if show_project_globally and unique_project_paths:
             single_path = unique_project_paths[0]
             techs = sorted(
-                list(
-                    set(
+                {
                         r.get("technology")
                         for r in results
                         if r.get("project_path") == single_path and r.get("technology")
-                    )
-                )
+                    }
             )
             tech_suffix = f" [{', '.join(techs)}]" if techs else ""
             project_path_header_html = f"<div>Path: <strong>{escape_html(single_path)}{escape_html(tech_suffix)}</strong></div>"
@@ -13769,11 +13726,6 @@ def run_scan_all(args, parser):
         )
         sys.exit(0)
 
-    combined_pkg_data = {
-        "dependencies": combined_dependencies,
-        "devDependencies": combined_devDependencies,
-        "all_direct": combined_all_direct,
-    }
 
     combined_results = sorted(combined_results, key=lambda x: x["name"].lower())
 
