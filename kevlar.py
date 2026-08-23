@@ -11,6 +11,7 @@ import base64
 import codecs
 import ctypes
 import functools
+import gzip
 import json
 import os
 import random
@@ -58,6 +59,51 @@ sys.stderr = SafeWriter(sys.stderr)
 
 # Global lock to protect concurrent console writes (sys.stdout, sys.stderr, print)
 console_lock = threading.Lock()
+
+from typing import Any, Dict, List, Optional, Set, Tuple, TypedDict, Union
+
+
+class CheckTarget(TypedDict, total=False):
+    name: str
+    declared: Optional[str]
+    installed: List[str]
+
+
+class VulnerabilityItem(TypedDict, total=False):
+    id: str
+    aliases: List[str]
+    summary: str
+    details: str
+    severity: str
+    score: Optional[float]
+    fixed_version: Optional[str]
+    suppressed_reason: Optional[str]
+
+
+class RemediationOption(TypedDict, total=False):
+    id: str
+    label: str
+    badge: str
+    badge_class: str
+    diff: Dict[str, Any]
+
+
+class ScanResultRow(TypedDict, total=False):
+    name: str
+    declared: Optional[str]
+    installed: Optional[str]
+    latest: Optional[str]
+    latest_same_major: Optional[str]
+    latest_absolute: Optional[str]
+    status: str
+    deprecated: Union[bool, str, None]
+    error: Optional[str]
+    repo_url: Optional[str]
+    compare_url: Optional[str]
+    releases_url: Optional[str]
+    vulnerabilities: List[VulnerabilityItem]
+    remediation: Optional[Dict[str, Any]]
+
 
 VERSION = "1.10.10"
 
@@ -7812,14 +7858,8 @@ class TerminalTextFormatter:
             return (" " * left) + text + (" " * right)
 
 
-def print_results_table(
-    results, pkg_data, show_all, vuls_enabled=False, no_show_console=False
-):
-    """Draws a beautiful styled console report table with precise alignment."""
-    if no_show_console:
-        return
-
-    filtered_results = []
+def _filter_table_results(results, show_all, vuls_enabled):
+    filtered = []
     for r in results:
         is_issue = (
             r["status"] in {"major", "minor", "patch"}
@@ -7831,39 +7871,138 @@ def print_results_table(
             or r.get("mismatch_checksum")
         )
         if show_all or is_issue:
-            filtered_results.append(r)
+            filtered.append(r)
+    return filtered
 
-    if not filtered_results:
-        print(
-            f"\n{COLOR_GREEN}{ICON_OK} All dependencies are up-to-date and secure!{COLOR_RESET}\n"
-        )
+
+def _format_status_badge(r):
+    status_str = r["status"]
+    color = COLOR_RESET
+    icon = ""
+
+    if status_str == "up-to-date":
+        color, status_display, icon = COLOR_GREEN, "Up-to-date", ICON_OK
+    elif status_str == "patch":
+        color, status_display, icon = COLOR_CYAN, "Patch Update", ICON_WARN
+    elif status_str == "minor":
+        color, status_display, icon = COLOR_YELLOW, "Minor Update", ICON_WARN
+    elif status_str == "major":
+        color, status_display, icon = COLOR_RED, "Major Update", ICON_ERROR
+    elif status_str == "error":
+        color, status_display, icon = COLOR_GRAY, "Error", ICON_ERROR
+    elif status_str == "local":
+        color, status_display, icon = COLOR_CYAN, "Verify Local", "🔍"
+    elif status_str == "minor-major":
+        color, status_display, icon = COLOR_RED, "Minor/Major", ICON_ERROR
+    elif status_str == "patch-major":
+        color, status_display, icon = COLOR_RED, "Patch/Major", ICON_ERROR
+    else:
+        status_display = status_str
+
+    if r["deprecated"]:
+        status_display = "Deprecated"
+        color = COLOR_MAGENTA
+        icon = ICON_DEPRECATED
+
+    return f"{color}{icon} {status_display}{COLOR_RESET}"
+
+
+def _print_table_notes_and_diffs(filtered_results):
+    notes_to_print = []
+    for r in filtered_results:
+        parent_suffix = f" (via {', '.join(r['required_by'])})" if r.get("required_by") else ""
+        if r["deprecated"]:
+            notes_to_print.append(f"  {COLOR_MAGENTA}{ICON_DEPRECATED} {r['name']}@{r['installed']}{parent_suffix}: {r['deprecated']}{COLOR_RESET}")
+        elif r["status"] == "error" and r["error"]:
+            notes_to_print.append(f"  {COLOR_RED}{ICON_ERROR} {r['name']}{parent_suffix}: {r['error']}{COLOR_RESET}")
+
+        if r.get("missing_checksum"):
+            notes_to_print.append(f"  {COLOR_YELLOW}{ICON_WARN} {r['name']}@{r['installed']}{parent_suffix}: Missing integrity checksum in lockfile{COLOR_RESET}")
+        elif r.get("weak_checksum"):
+            notes_to_print.append(f"  {COLOR_YELLOW}{ICON_WARN} {r['name']}@{r['installed']}{parent_suffix}: Weak checksum (SHA-1) in lockfile{COLOR_RESET}")
+
+        if r.get("mismatch_checksum"):
+            notes_to_print.append(f"  {COLOR_RED}{ICON_ERROR} {r['name']}@{r['installed']}{parent_suffix}: INTEGRITY MISMATCH! Lockfile checksum does not match official registry checksum.{COLOR_RESET}")
+
+    if notes_to_print:
+        print(f"\n{COLOR_BOLD}Notes & Warnings:{COLOR_RESET}")
+        for note in notes_to_print:
+            print(note)
+
+    major_diffs_to_print = []
+    for r in filtered_results:
+        if r["status"] in {"major", "minor-major", "patch-major"} and r.get("compare_url"):
+            major_diffs_to_print.append(f"  {COLOR_BOLD}{r['name']}{COLOR_RESET}: {COLOR_CYAN}{r['compare_url']}{COLOR_RESET}")
+
+    if major_diffs_to_print:
+        print(f"\n{COLOR_BOLD}Major Update Diffs:{COLOR_RESET}")
+        for diff_note in major_diffs_to_print:
+            print(diff_note)
+
+
+def _print_table_vulnerabilities(filtered_results):
+    vuls_to_print = []
+    suppressed_to_print = []
+    severity_order = {"malicious": 5, "critical": 4, "high": 3, "medium": 2, "low": 1, "unknown": 0}
+
+    for r in filtered_results:
+        vuls_list = r.get("vulnerabilities", [])
+        if vuls_list:
+            sorted_v = sorted(vuls_list, key=lambda v: severity_order.get(get_severity_level(v), 0), reverse=True)
+            vuls_to_print.append((r["name"], r["installed"] if r["installed"] else r["declared"], sorted_v, r.get("required_by", [])))
+
+        suppressed_list = r.get("suppressed_vulnerabilities", [])
+        if suppressed_list:
+            suppressed_to_print.append((r["name"], r["installed"] if r["installed"] else r["declared"], suppressed_list, r.get("required_by", [])))
+
+    if vuls_to_print:
+        vuls_to_print.sort(key=lambda x: (
+            -max(severity_order.get(get_severity_level(v), 0) for v in x[2]) if x[2] else 1,
+            x[0].lower()
+        ))
+        print(f"\n{COLOR_BOLD}{COLOR_RED}{ICON_SHIELD} Security Vulnerabilities Details:{COLOR_RESET}")
+        for name, ver, v_list, required_by in vuls_to_print:
+            parent_suffix = f" (via {', '.join(required_by)})" if required_by else ""
+            print(f"  {COLOR_BOLD}{name}@{ver}{parent_suffix}{COLOR_RESET} ({len(v_list)} vulnerabilities found):")
+            for vuln in v_list:
+                vid, severity, summary = vuln["id"], vuln["severity"], vuln["summary"]
+                level = get_severity_level(vuln)
+                sev_color = COLOR_RED + COLOR_BOLD if level == "malicious" else COLOR_RED if level in {"critical", "high"} else COLOR_YELLOW if level == "medium" else COLOR_CYAN if level == "low" else COLOR_GRAY
+                display_severity = "MALICIOUS CODE" if level == "malicious" else severity
+                print(f"    - {COLOR_BOLD}{vid}{COLOR_RESET} [{sev_color}{display_severity}{COLOR_RESET}]: {summary}")
+
+    if suppressed_to_print:
+        print(f"\n{COLOR_BOLD}{COLOR_GRAY}{ICON_INFO} Suppressed Vulnerabilities (Ignored):{COLOR_RESET}")
+        for name, ver, s_list, required_by in suppressed_to_print:
+            parent_suffix = f" (via {', '.join(required_by)})" if required_by else ""
+            print(f"  {COLOR_BOLD}{COLOR_GRAY}{name}@{ver}{parent_suffix}{COLOR_RESET} ({len(s_list)} suppressed):")
+            for vuln in s_list:
+                vid = vuln["id"]
+                reason = vuln.get("suppressed_reason", "No reason provided")
+                summary = vuln["summary"]
+                print(f"    - {COLOR_BOLD}{COLOR_GRAY}{vid}{COLOR_RESET}: {summary} {COLOR_GRAY}(Reason: {reason}){COLOR_RESET}")
+
+
+def print_results_table(
+    results, pkg_data, show_all, vuls_enabled=False, no_show_console=False
+):
+    """Draws a beautiful styled console report table with precise alignment."""
+    if no_show_console:
         return
 
-    col_name = "Package"
-    col_type = "Type"
-    col_dec = "Declared"
-    col_inst = "Installed"
-    col_latest = "Latest"
-    col_status = "Status"
-    col_vuls = "Vuls"
+    filtered_results = _filter_table_results(results, show_all, vuls_enabled)
+    if not filtered_results:
+        print(f"\n{COLOR_GREEN}{ICON_OK} All dependencies are up-to-date and secure!{COLOR_RESET}\n")
+        return
 
+    col_name, col_type, col_dec, col_inst, col_latest, col_status, col_vuls = "Package", "Type", "Declared", "Installed", "Latest", "Status", "Vuls"
     w_name = max(len(col_name), max(len(r["name"]) for r in filtered_results)) + 2
     w_type = 12
-    w_dec = (
-        max(len(col_dec), max(len(r["declared"] or "N/A") for r in filtered_results))
-        + 2
-    )
-    w_inst = (
-        max(len(col_inst), max(len(r["installed"] or "N/A") for r in filtered_results))
-        + 2
-    )
-    w_latest = (
-        max(len(col_latest), max(len(r["latest"] or "N/A") for r in filtered_results))
-        + 2
-    )
+    w_dec = max(len(col_dec), max(len(r["declared"] or "N/A") for r in filtered_results)) + 2
+    w_inst = max(len(col_inst), max(len(r["installed"] or "N/A") for r in filtered_results)) + 2
+    w_latest = max(len(col_latest), max(len(r["latest"] or "N/A") for r in filtered_results)) + 2
     w_status = 15
     w_vuls = 8
-
     t = BORDER_CHARS
 
     if vuls_enabled:
@@ -7876,7 +8015,6 @@ def print_results_table(
         border_bot = f"{t['bot_left']}{t['horizontal'] * w_name}{t['bot_join']}{t['horizontal'] * w_type}{t['bot_join']}{t['horizontal'] * w_dec}{t['bot_join']}{t['horizontal'] * w_inst}{t['bot_join']}{t['horizontal'] * w_latest}{t['bot_join']}{t['horizontal'] * w_status}{t['bot_right']}"
 
     print(border_top)
-
     hdr_name = TerminalTextFormatter.pad_string(f" {col_name}", w_name, align="left")
     hdr_type = TerminalTextFormatter.pad_string(col_type, w_type, align="center")
     hdr_dec = TerminalTextFormatter.pad_string(col_dec, w_dec, align="center")
@@ -7886,13 +8024,9 @@ def print_results_table(
     hdr_vuls = TerminalTextFormatter.pad_string(col_vuls, w_vuls, align="center")
 
     if vuls_enabled:
-        print(
-            f"{t['vertical']}{hdr_name}{t['vertical']}{hdr_type}{t['vertical']}{hdr_dec}{t['vertical']}{hdr_inst}{t['vertical']}{hdr_latest}{t['vertical']}{hdr_status}{t['vertical']}{hdr_vuls}{t['vertical']}"
-        )
+        print(f"{t['vertical']}{hdr_name}{t['vertical']}{hdr_type}{t['vertical']}{hdr_dec}{t['vertical']}{hdr_inst}{t['vertical']}{hdr_latest}{t['vertical']}{hdr_status}{t['vertical']}{hdr_vuls}{t['vertical']}")
     else:
-        print(
-            f"{t['vertical']}{hdr_name}{t['vertical']}{hdr_type}{t['vertical']}{hdr_dec}{t['vertical']}{hdr_inst}{t['vertical']}{hdr_latest}{t['vertical']}{hdr_status}{t['vertical']}"
-        )
+        print(f"{t['vertical']}{hdr_name}{t['vertical']}{hdr_type}{t['vertical']}{hdr_dec}{t['vertical']}{hdr_inst}{t['vertical']}{hdr_latest}{t['vertical']}{hdr_status}{t['vertical']}")
 
     print(border_mid)
 
@@ -7910,244 +8044,27 @@ def print_results_table(
                 elif r["name"] in pkg_data.get("dependencies", {}):
                     dep_type = "Direct"
 
-        status_str = r["status"]
-        color = COLOR_RESET
-        icon = ""
-
-        if status_str == "up-to-date":
-            color = COLOR_GREEN
-            status_display = "Up-to-date"
-            icon = ICON_OK
-        elif status_str == "patch":
-            color = COLOR_CYAN
-            status_display = "Patch Update"
-            icon = ICON_WARN
-        elif status_str == "minor":
-            color = COLOR_YELLOW
-            status_display = "Minor Update"
-            icon = ICON_WARN
-        elif status_str == "major":
-            color = COLOR_RED
-            status_display = "Major Update"
-            icon = ICON_ERROR
-        elif status_str == "error":
-            color = COLOR_GRAY
-            status_display = "Error"
-            icon = ICON_ERROR
-        elif status_str == "local":
-            color = COLOR_CYAN
-            status_display = "Verify Local"
-            icon = "🔍"
-        elif status_str == "minor-major":
-            color = COLOR_RED
-            status_display = "Minor/Major"
-            icon = ICON_ERROR
-        elif status_str == "patch-major":
-            color = COLOR_RED
-            status_display = "Patch/Major"
-            icon = ICON_ERROR
-
-        if r["deprecated"]:
-            status_display = "Deprecated"
-            color = COLOR_MAGENTA
-            icon = ICON_DEPRECATED
-
-        styled_status = f"{color}{icon} {status_display}{COLOR_RESET}"
-
-        name_cell = TerminalTextFormatter.pad_string(
-            f" {r['name']}", w_name, align="left"
-        )
+        styled_status = _format_status_badge(r)
+        name_cell = TerminalTextFormatter.pad_string(f" {r['name']}", w_name, align="left")
         type_cell = TerminalTextFormatter.pad_string(dep_type, w_type, align="center")
-        dec_cell = TerminalTextFormatter.pad_string(
-            r["declared"] or "N/A", w_dec, align="center"
-        )
-        inst_cell = TerminalTextFormatter.pad_string(
-            r["installed"] or "N/A", w_inst, align="center"
-        )
-        latest_cell = TerminalTextFormatter.pad_string(
-            r["latest"] or "N/A", w_latest, align="center"
-        )
-        status_cell = TerminalTextFormatter.pad_string(
-            styled_status, w_status, align="center"
-        )
+        dec_cell = TerminalTextFormatter.pad_string(r["declared"] or "N/A", w_dec, align="center")
+        inst_cell = TerminalTextFormatter.pad_string(r["installed"] or "N/A", w_inst, align="center")
+        latest_cell = TerminalTextFormatter.pad_string(r["latest"] or "N/A", w_latest, align="center")
+        status_cell = TerminalTextFormatter.pad_string(styled_status, w_status, align="center")
 
         if vuls_enabled:
             vuls_list = r.get("vulnerabilities", [])
             vuls_count = len(vuls_list)
-            if vuls_count > 0:
-                styled_vuls = f"{COLOR_RED}{COLOR_BOLD}{vuls_count}{COLOR_RESET}"
-            else:
-                styled_vuls = (
-                    f"{COLOR_GREEN}{ICON_OK}{COLOR_RESET}"
-                    if ICON_OK == "✔"
-                    else f"{COLOR_GREEN}0{COLOR_RESET}"
-                )
-            vuls_cell = TerminalTextFormatter.pad_string(
-                styled_vuls, w_vuls, align="center"
-            )
-
-            print(
-                f"{t['vertical']}{name_cell}{t['vertical']}{type_cell}{t['vertical']}{dec_cell}{t['vertical']}{inst_cell}{t['vertical']}{latest_cell}{t['vertical']}{status_cell}{t['vertical']}{vuls_cell}{t['vertical']}"
-            )
+            styled_vuls = f"{COLOR_RED}{COLOR_BOLD}{vuls_count}{COLOR_RESET}" if vuls_count > 0 else (f"{COLOR_GREEN}{ICON_OK}{COLOR_RESET}" if ICON_OK == "✔" else f"{COLOR_GREEN}0{COLOR_RESET}")
+            vuls_cell = TerminalTextFormatter.pad_string(styled_vuls, w_vuls, align="center")
+            print(f"{t['vertical']}{name_cell}{t['vertical']}{type_cell}{t['vertical']}{dec_cell}{t['vertical']}{inst_cell}{t['vertical']}{latest_cell}{t['vertical']}{status_cell}{t['vertical']}{vuls_cell}{t['vertical']}")
         else:
-            print(
-                f"{t['vertical']}{name_cell}{t['vertical']}{type_cell}{t['vertical']}{dec_cell}{t['vertical']}{inst_cell}{t['vertical']}{latest_cell}{t['vertical']}{status_cell}{t['vertical']}"
-            )
+            print(f"{t['vertical']}{name_cell}{t['vertical']}{type_cell}{t['vertical']}{dec_cell}{t['vertical']}{inst_cell}{t['vertical']}{latest_cell}{t['vertical']}{status_cell}{t['vertical']}")
 
     print(border_bot)
-
-    # Print warnings & errors section
-    notes_to_print = []
-    for r in filtered_results:
-        parent_suffix = (
-            f" (via {', '.join(r['required_by'])})" if r.get("required_by") else ""
-        )
-        if r["deprecated"]:
-            notes_to_print.append(
-                f"  {COLOR_MAGENTA}{ICON_DEPRECATED} {r['name']}@{r['installed']}{parent_suffix}: {r['deprecated']}{COLOR_RESET}"
-            )
-        elif r["status"] == "error" and r["error"]:
-            notes_to_print.append(
-                f"  {COLOR_RED}{ICON_ERROR} {r['name']}{parent_suffix}: {r['error']}{COLOR_RESET}"
-            )
-
-        if r.get("missing_checksum"):
-            notes_to_print.append(
-                f"  {COLOR_YELLOW}{ICON_WARN} {r['name']}@{r['installed']}{parent_suffix}: Missing integrity checksum in lockfile{COLOR_RESET}"
-            )
-        elif r.get("weak_checksum"):
-            notes_to_print.append(
-                f"  {COLOR_YELLOW}{ICON_WARN} {r['name']}@{r['installed']}{parent_suffix}: Weak checksum (SHA-1) in lockfile{COLOR_RESET}"
-            )
-
-        if r.get("mismatch_checksum"):
-            notes_to_print.append(
-                f"  {COLOR_RED}{ICON_ERROR} {r['name']}@{r['installed']}{parent_suffix}: INTEGRITY MISMATCH! Lockfile checksum does not match official registry checksum.{COLOR_RESET}"
-            )
-
-    if notes_to_print:
-        print(f"\n{COLOR_BOLD}Notes & Warnings:{COLOR_RESET}")
-        for note in notes_to_print:
-            print(note)
-
-    # Print Major Update Diffs section
-    major_diffs_to_print = []
-    for r in filtered_results:
-        if r["status"] in {"major", "minor-major", "patch-major"} and r.get(
-            "compare_url"
-        ):
-            major_diffs_to_print.append(
-                f"  {COLOR_BOLD}{r['name']}{COLOR_RESET}: {COLOR_CYAN}{r['compare_url']}{COLOR_RESET}"
-            )
-
-    if major_diffs_to_print:
-        print(f"\n{COLOR_BOLD}Major Update Diffs:{COLOR_RESET}")
-        for diff_note in major_diffs_to_print:
-            print(diff_note)
-
-    # Print security vulnerabilities details section
+    _print_table_notes_and_diffs(filtered_results)
     if vuls_enabled:
-        vuls_to_print = []
-        suppressed_to_print = []
-        severity_order = {
-            "malicious": 5,
-            "critical": 4,
-            "high": 3,
-            "medium": 2,
-            "low": 1,
-            "unknown": 0,
-        }
-        for r in filtered_results:
-            vuls_list = r.get("vulnerabilities", [])
-            if vuls_list:
-                sorted_v = sorted(
-                    vuls_list,
-                    key=lambda v: severity_order.get(get_severity_level(v), 0),
-                    reverse=True,
-                )
-                vuls_to_print.append(
-                    (
-                        r["name"],
-                        r["installed"] if r["installed"] else r["declared"],
-                        sorted_v,
-                        r.get("required_by", []),
-                    )
-                )
-            suppressed_list = r.get("suppressed_vulnerabilities", [])
-            if suppressed_list:
-                suppressed_to_print.append(
-                    (
-                        r["name"],
-                        r["installed"] if r["installed"] else r["declared"],
-                        suppressed_list,
-                        r.get("required_by", []),
-                    )
-                )
-
-        if vuls_to_print:
-            # Sort package groups by their maximum vulnerability severity descending, and alphabetically by package name ascending
-            vuls_to_print.sort(
-                key=lambda x: (
-                    (
-                        -max(severity_order.get(get_severity_level(v), 0) for v in x[2])
-                        if x[2]
-                        else 1
-                    ),
-                    x[0].lower(),
-                )
-            )
-            print(
-                f"\n{COLOR_BOLD}{COLOR_RED}{ICON_SHIELD} Security Vulnerabilities Details:{COLOR_RESET}"
-            )
-            for name, ver, v_list, required_by in vuls_to_print:
-                parent_suffix = (
-                    f" (via {', '.join(required_by)})" if required_by else ""
-                )
-                print(
-                    f"  {COLOR_BOLD}{name}@{ver}{parent_suffix}{COLOR_RESET} ({len(v_list)} vulnerabilities found):"
-                )
-                for vuln in v_list:
-                    vid = vuln["id"]
-                    severity = vuln["severity"]
-                    summary = vuln["summary"]
-
-                    # Highlight severity
-                    sev_color = COLOR_GRAY
-                    level = get_severity_level(vuln)
-                    if level == "malicious":
-                        sev_color = COLOR_RED + COLOR_BOLD
-                    elif level == "critical" or level == "high":
-                        sev_color = COLOR_RED
-                    elif level == "medium":
-                        sev_color = COLOR_YELLOW
-                    elif level == "low":
-                        sev_color = COLOR_CYAN
-
-                    display_severity = (
-                        "MALICIOUS CODE" if level == "malicious" else severity
-                    )
-                    print(
-                        f"    - {COLOR_BOLD}{vid}{COLOR_RESET} [{sev_color}{display_severity}{COLOR_RESET}]: {summary}"
-                    )
-
-        if suppressed_to_print:
-            print(
-                f"\n{COLOR_BOLD}{COLOR_GRAY}{ICON_INFO} Suppressed Vulnerabilities (Ignored):{COLOR_RESET}"
-            )
-            for name, ver, s_list, required_by in suppressed_to_print:
-                parent_suffix = (
-                    f" (via {', '.join(required_by)})" if required_by else ""
-                )
-                print(
-                    f"  {COLOR_BOLD}{COLOR_GRAY}{name}@{ver}{parent_suffix}{COLOR_RESET} ({len(s_list)} suppressed):"
-                )
-                for vuln in s_list:
-                    vid = vuln["id"]
-                    reason = vuln.get("suppressed_reason", "No reason provided")
-                    summary = vuln["summary"]
-                    print(
-                        f"    - {COLOR_BOLD}{COLOR_GRAY}{vid}{COLOR_RESET}: {summary} {COLOR_GRAY}(Reason: {reason}){COLOR_RESET}"
-                    )
+        _print_table_vulnerabilities(filtered_results)
 
 
 def print_summary(results, elapsed_time, vuls_enabled=False, projects_count=None):
@@ -8926,131 +8843,73 @@ def find_manifest_files(project_path, technology):
     return manifest_files
 
 
-def generate_remediation_diff(
-    manifest_path, line_index, declared_ver, latest_ver, tech, package_name=None
-):
-    """Generates remediation diff showing current vs suggested change."""
-    try:
-        with open(manifest_path, "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()
-    except Exception:
-        return None
-
-    idx = line_index - 1
-    if idx < 0 or idx >= len(lines):
-        return None
-
-    line_idx_to_change = None
-    target_text = None
-
-    search_range = range(idx, min(idx + 4, len(lines)))
-
+def _find_target_version_line(lines, search_range, declared_ver, tech, package_name, fallback_idx):
+    """Finds the line index and target text to replace in the manifest lines."""
     if declared_ver:
         for i in search_range:
             if declared_ver in lines[i]:
-                line_idx_to_change = i
-                target_text = declared_ver
-                break
+                return i, declared_ver
 
-    if line_idx_to_change is None:
-        if tech == "maven":
-            for i in search_range:
-                m = re.search(
-                    r"<version>\s*(.*?)\s*</version>", lines[i], re.IGNORECASE
-                )
-                if m:
-                    line_idx_to_change = i
-                    target_text = m.group(1)
-                    break
-        elif tech == "gradle":
-            for i in search_range:
-                m_ref = re.search(r'version\.ref\s*=\s*["\']([^"\']+)["\']', lines[i])
-                if m_ref:
-                    line_idx_to_change = i
-                    target_text = m_ref.group(1)
-                    break
-                m_eq = re.search(r'version\s*=\s*["\']([^"\']+)["\']', lines[i])
-                if m_eq:
-                    line_idx_to_change = i
-                    target_text = m_eq.group(1)
-                    break
-                m_colon = re.search(r'version:\s*["\']([^"\']+)["\']', lines[i])
-                if m_colon:
-                    line_idx_to_change = i
-                    target_text = m_colon.group(1)
-                    break
-                if package_name:
-                    pattern = re.escape(package_name) + r':([^\'"]+)'
-                    m_str = re.search(pattern, lines[i])
-                    if m_str:
-                        line_idx_to_change = i
-                        target_text = m_str.group(1)
-                        break
-        elif tech == "nuget":
-            for i in search_range:
-                m = re.search(
-                    r'Version\s*=\s*["\']([^"\']+)["\']', lines[i], re.IGNORECASE
-                )
-                if m:
-                    line_idx_to_change = i
-                    target_text = m.group(1)
-                    break
+    if tech == "maven":
+        for i in search_range:
+            m = re.search(r"<version>\s*(.*?)\s*</version>", lines[i], re.IGNORECASE)
+            if m:
+                return i, m.group(1)
+    elif tech == "gradle":
+        for i in search_range:
+            m_ref = re.search(r'version\.ref\s*=\s*["\']([^"\']+)["\']', lines[i])
+            if m_ref:
+                return i, m_ref.group(1)
+            m_eq = re.search(r'version\s*=\s*["\']([^"\']+)["\']', lines[i])
+            if m_eq:
+                return i, m_eq.group(1)
+            m_colon = re.search(r'version:\s*["\']([^"\']+)["\']', lines[i])
+            if m_colon:
+                return i, m_colon.group(1)
+            if package_name:
+                pattern = re.escape(package_name) + r':([^\'"]+)'
+                m_str = re.search(pattern, lines[i])
+                if m_str:
+                    return i, m_str.group(1)
+    elif tech == "nuget":
+        for i in search_range:
+            m = re.search(r'Version\s*=\s*["\']([^"\']+)["\']', lines[i], re.IGNORECASE)
+            if m:
+                return i, m.group(1)
 
-    if line_idx_to_change is None and declared_ver:
+    if declared_ver:
         ver_digits = RE_DECIMAL_VER.search(declared_ver)
         if ver_digits:
             ver_clean = ver_digits.group(0)
             for i in search_range:
                 if ver_clean in lines[i]:
-                    line_idx_to_change = i
-                    target_text = ver_clean
-                    break
+                    return i, ver_clean
 
-    if line_idx_to_change is None:
-        line_idx_to_change = idx
-        ver_pattern = RE_DECIMAL_VER.search(lines[idx])
-        if ver_pattern:
-            target_text = ver_pattern.group(0)
-        else:
-            quotes_match = re.search(r'["\']([^"\']+)["\']', lines[idx])
-            if quotes_match:
-                quoted_vals = re.findall(r'["\']([^"\']+)["\']', lines[idx])
-                if quoted_vals:
-                    target_text = quoted_vals[-1]
+    target_text = None
+    ver_pattern = RE_DECIMAL_VER.search(lines[fallback_idx])
+    if ver_pattern:
+        target_text = ver_pattern.group(0)
+    else:
+        quotes_match = re.search(r'["\']([^"\']+)["\']', lines[fallback_idx])
+        if quotes_match:
+            quoted_vals = re.findall(r'["\']([^"\']+)["\']', lines[fallback_idx])
+            if quoted_vals:
+                target_text = quoted_vals[-1]
 
-    if line_idx_to_change is None:
-        return None
+    return fallback_idx, target_text
 
-    if (
-        target_text
-        and package_name
-        and target_text.lower().strip() == package_name.lower().strip()
-    ):
-        target_text = None
 
-    if not target_text:
-        return None
-
-    # --- Property placeholder resolution nested helpers & logic ---
+def _resolve_property_placeholder(manifest_path, target_text, tech, lines, line_idx_to_change, declared_ver):
+    """Resolves Maven/Gradle/NuGet property placeholders to concrete files and line numbers."""
     def _search_lines_for_property(lines_list, prop_name_val, tech_type):
-        if tech_type == "maven" or tech_type == "nuget":
-            pattern = (
-                r"<\s*"
-                + re.escape(prop_name_val)
-                + r"\s*>\s*(.*?)\s*<\s*/\s*"
-                + re.escape(prop_name_val)
-                + r"\s*>"
-            )
+        if tech_type in ("maven", "nuget"):
+            pattern = r"<\s*" + re.escape(prop_name_val) + r"\s*>\s*(.*?)\s*<\s*/\s*" + re.escape(prop_name_val) + r"\s*>"
             for idx_p, line_p in enumerate(lines_list):
                 m_p = re.search(pattern, line_p, re.IGNORECASE)
                 if m_p:
                     return idx_p + 1, m_p.group(1)
         elif tech_type == "gradle":
-            pattern = (
-                r"^\s*([a-zA-Z0-9_.-]+)?\s*"
-                + re.escape(prop_name_val)
-                + r'\s*=\s*["\']([^"\']+)["\']'
-            )
+            pattern = r"^\s*([a-zA-Z0-9_.-]+)?\s*" + re.escape(prop_name_val) + r'\s*=\s*["\']([^"\']+)["\']'
             for idx_p, line_p in enumerate(lines_list):
                 m_p = re.search(pattern, line_p)
                 if m_p:
@@ -9064,9 +8923,7 @@ def generate_remediation_diff(
         except Exception:
             return None, None, None
 
-        line_idx_p, val_p = _search_lines_for_property(
-            lines_list, prop_name_val, tech_type
-        )
+        line_idx_p, val_p = _search_lines_for_property(lines_list, prop_name_val, tech_type)
         if line_idx_p is not None:
             return current_path, line_idx_p, val_p
 
@@ -9080,13 +8937,9 @@ def generate_remediation_diff(
                 parent_pom = os.path.join(parent_dir_p, "pom.xml")
                 if os.path.exists(parent_pom):
                     try:
-                        with open(
-                            parent_pom, "r", encoding="utf-8", errors="ignore"
-                        ) as f_p:
+                        with open(parent_pom, "r", encoding="utf-8", errors="ignore") as f_p:
                             parent_lines = f_p.readlines()
-                        line_idx_p, val_p = _search_lines_for_property(
-                            parent_lines, prop_name_val, tech_type
-                        )
+                        line_idx_p, val_p = _search_lines_for_property(parent_lines, prop_name_val, tech_type)
                         if line_idx_p is not None:
                             return parent_pom, line_idx_p, val_p
                     except (OSError, UnicodeDecodeError):
@@ -9094,13 +8947,12 @@ def generate_remediation_diff(
                     curr_dir_p = parent_pom
                 else:
                     break
-
         return None, None, None
 
     is_placeholder = False
     prop_name = None
-
     if tech == "maven":
+        m = re.match(r"^\s*\$\SafeWriter?\{\s*(.*?)\s*\}\s*$", target_text) if hasattr(re, 'match') else None
         m = re.match(r"^\s*\$\{\s*(.*?)\s*\}\s*$", target_text)
         if m:
             is_placeholder = True
@@ -9119,59 +8971,82 @@ def generate_remediation_diff(
             is_placeholder = True
             prop_name = target_text[1:]
 
-    resolved_version = None
+    new_path = manifest_path
+    new_idx = line_idx_to_change
+    resolved_ver = target_text
+    new_lines = lines
+
     if is_placeholder and prop_name:
-        resolved_path, resolved_line_idx, current_val = find_property_definition(
-            manifest_path, prop_name, tech
-        )
+        resolved_path, resolved_line_idx, current_val = find_property_definition(manifest_path, prop_name, tech)
         if resolved_path and resolved_line_idx:
-            manifest_path = resolved_path
+            new_path = resolved_path
             try:
-                with open(manifest_path, "r", encoding="utf-8", errors="ignore") as f:
-                    lines = f.readlines()
-                line_idx_to_change = resolved_line_idx - 1
-                target_text = current_val
-                resolved_version = current_val
+                with open(new_path, "r", encoding="utf-8", errors="ignore") as f:
+                    new_lines = f.readlines()
+                new_idx = resolved_line_idx - 1
+                resolved_ver = current_val
             except (OSError, UnicodeDecodeError):
                 pass
-    else:
-        resolved_version = target_text
 
-    # Verify that the resolved version matches the row's declared version to avoid cross-module mismatches
-    if declared_ver and resolved_version:
-        is_val_placeholder = False
-        if (
-            tech == "maven"
-            and "${" in resolved_version
-            or tech == "nuget"
-            and "$(" in resolved_version
-            or tech == "gradle"
-            and "$" in resolved_version
-        ):
-            is_val_placeholder = True
-
+    if declared_ver and resolved_ver:
+        is_val_placeholder = (
+            (tech == "maven" and "${" in resolved_ver) or
+            (tech == "nuget" and "$(" in resolved_ver) or
+            (tech == "gradle" and "$" in resolved_ver)
+        )
         if not is_val_placeholder:
-
             def clean_ver(v):
-                v = v.strip().lower()
-                v = v.removeprefix("v")
-                v = RE_OPERATOR_PREFIX.sub("", v)
-                return v
+                v = v.strip().lower().removeprefix("v")
+                return RE_OPERATOR_PREFIX.sub("", v)
 
             def is_version_compatible(v1, v2):
-                c1 = clean_ver(v1)
-                c2 = clean_ver(v2)
-                if not c1 or not c2:
+                c1, c2 = clean_ver(v1), clean_ver(v2)
+                if not c1 or not c2 or c1 == c2 or c1.startswith(c2) or c2.startswith(c1):
                     return True
-                if c1 == c2 or c1.startswith(c2) or c2.startswith(c1):
-                    return True
-                m1 = RE_NUM_START.match(c1)
-                m2 = RE_NUM_START.match(c2)
+                m1, m2 = RE_NUM_START.match(c1), RE_NUM_START.match(c2)
                 return bool(m1 and m2 and m1.group(1) == m2.group(1))
 
-            if not is_version_compatible(declared_ver, resolved_version):
-                return None
-    # --- End of property placeholder logic ---
+            if not is_version_compatible(declared_ver, resolved_ver):
+                return None, None, None, None
+
+    return new_path, new_idx, resolved_ver, new_lines
+
+
+def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ver, tech, package_name=None):
+    """Generates remediation diff showing current vs suggested change."""
+    try:
+        with open(manifest_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+    except Exception:
+        return None
+
+    idx = line_index - 1
+    if idx < 0 or idx >= len(lines):
+        return None
+
+    search_range = range(idx, min(idx + 4, len(lines)))
+    line_idx_to_change, target_text = _find_target_version_line(lines, search_range, declared_ver, tech, package_name, idx)
+
+    if (
+        target_text
+        and package_name
+        and target_text.lower().strip() == package_name.lower().strip()
+    ):
+        target_text = None
+
+    if not target_text:
+        return None
+
+    res_path, res_idx, res_text, res_lines = _resolve_property_placeholder(
+        manifest_path, target_text, tech, lines, line_idx_to_change, declared_ver
+    )
+    if res_path is None:
+        return None
+
+    manifest_path = res_path
+    line_idx_to_change = res_idx
+    target_text = res_text
+    lines = res_lines
 
     match_prefix = ""
     match_version = target_text or ""
@@ -9187,12 +9062,10 @@ def generate_remediation_diff(
 
     upgraded_str = effective_prefix + latest_ver
 
-    # Do not generate a diff if target version is identical to current version
     def _clean_v(v):
         if not v:
             return ""
-        v = v.strip().lower()
-        v = v.removeprefix("v")
+        v = str(v).strip().lower().removeprefix("v")
         return RE_OPERATOR_PREFIX.sub("", v)
 
     if target_text and latest_ver and _clean_v(target_text) == _clean_v(latest_ver):
@@ -9212,9 +9085,6 @@ def generate_remediation_diff(
             escaped_orig = escape_html(orig_line)
             if target_text and target_text in orig_line:
                 escaped_target = escape_html(target_text)
-                escape_html(effective_prefix)
-                escape_html(match_version)
-
                 html_orig = escaped_orig.replace(
                     escaped_target,
                     f'<span class="diff-remove-chunk">{escaped_target}</span>',
@@ -9235,20 +9105,12 @@ def generate_remediation_diff(
             else:
                 html_new = escaped_new
 
-            current_block.append(
-                {"line_num": line_num, "html": html_orig, "is_changed": True}
-            )
-            suggested_block.append(
-                {"line_num": line_num, "html": html_new, "is_changed": True}
-            )
+            current_block.append({"line_num": line_num, "html": html_orig, "is_changed": True})
+            suggested_block.append({"line_num": line_num, "html": html_new, "is_changed": True})
         else:
             escaped_orig = escape_html(orig_line)
-            current_block.append(
-                {"line_num": line_num, "html": escaped_orig, "is_changed": False}
-            )
-            suggested_block.append(
-                {"line_num": line_num, "html": escaped_orig, "is_changed": False}
-            )
+            current_block.append({"line_num": line_num, "html": escaped_orig, "is_changed": False})
+            suggested_block.append({"line_num": line_num, "html": escaped_orig, "is_changed": False})
 
     return {
         "manifest_path": manifest_path,
@@ -9500,16 +9362,252 @@ def format_remediation_option_label(ver_str: str) -> str:
         return f"Version {clean_v}"
 
 
+def _clean_version_str(v):
+    if not v:
+        return ""
+    v = str(v).strip().lower().removeprefix("v")
+    return RE_OPERATOR_PREFIX.sub("", v)
+
+
+def _populate_direct_strategies(r, manifest_path, found_line_idx, name, declared, tech, latest_patch, latest_sm, latest_abs):
+    direct_options = []
+    target_string = latest_abs or (r.get("latest") if r.get("name") == name else "") or ""
+    if " or " in target_string:
+        parts = [p.strip() for p in target_string.split(" or ") if p.strip()]
+        if len(parts) >= 2:
+            for p in parts:
+                diff_p = (
+                    generate_remediation_diff(manifest_path, found_line_idx, declared, p, tech, name)
+                    if found_line_idx
+                    else generate_addition_remediation_diff(manifest_path, name, p, tech)
+                )
+                if diff_p:
+                    direct_options.append({
+                        "id": f"option_{p}",
+                        "label": format_remediation_option_label(p),
+                        "badge": "Option",
+                        "badge_class": "v-chip-safe",
+                        "diff": diff_p,
+                    })
+            diff_comb = (
+                generate_remediation_diff(manifest_path, found_line_idx, declared, target_string, tech, name)
+                if found_line_idx
+                else generate_addition_remediation_diff(manifest_path, name, target_string, tech)
+            )
+            if diff_comb:
+                direct_options.append({
+                    "id": f"option_{target_string}",
+                    "label": format_remediation_option_label(target_string),
+                    "badge": "Option",
+                    "badge_class": "v-chip-major",
+                    "diff": diff_comb,
+                })
+
+    if latest_patch:
+        diff_patch = (
+            generate_remediation_diff(manifest_path, found_line_idx, declared, latest_patch, tech, name)
+            if found_line_idx
+            else generate_addition_remediation_diff(manifest_path, name, latest_patch, tech)
+        )
+        if diff_patch:
+            direct_options.append({
+                "id": "patch",
+                "label": f"Patch: v{_clean_version_str(latest_patch)}",
+                "badge": "Patch / Bugfix",
+                "badge_class": "v-chip-ok",
+                "diff": diff_patch,
+            })
+
+    if latest_sm:
+        diff_sm = (
+            generate_remediation_diff(manifest_path, found_line_idx, declared, latest_sm, tech, name)
+            if found_line_idx
+            else generate_addition_remediation_diff(manifest_path, name, latest_sm, tech)
+        )
+        if diff_sm:
+            direct_options.append({
+                "id": "minor",
+                "label": f"Minor: v{_clean_version_str(latest_sm)}",
+                "badge": "Minor / Feature",
+                "badge_class": "v-chip-safe",
+                "diff": diff_sm,
+            })
+
+    if latest_abs and " or " not in str(latest_abs):
+        diff_abs = (
+            generate_remediation_diff(manifest_path, found_line_idx, declared, latest_abs, tech, name)
+            if found_line_idx
+            else generate_addition_remediation_diff(manifest_path, name, latest_abs, tech)
+        )
+        if diff_abs:
+            direct_options.append({
+                "id": "major",
+                "label": f"Major: v{_clean_version_str(latest_abs)}",
+                "badge": "Major / Breaking",
+                "badge_class": "v-chip-major",
+                "diff": diff_abs,
+            })
+
+    if direct_options:
+        return [{
+            "id": "direct_upgrade",
+            "title": f"Update Direct Dependency ({name})",
+            "description": f"Updates '{name}' in manifest file.",
+            "is_recommended": True,
+            "options": direct_options,
+        }]
+    return []
+
+
+def _populate_parent_strategies(r, results, manifest_path, lines, tech, name, get_line_idx_fn):
+    strategies = []
+    if not r.get("required_by"):
+        return strategies
+
+    for parent_name in r.get("required_by", []):
+        parent_candidate = next(
+            (
+                item
+                for item in results
+                if item.get("name") == parent_name
+                and item.get("project_path") == r.get("project_path")
+            ),
+            None,
+        )
+        if not parent_candidate:
+            continue
+
+        parent_line_idx = get_line_idx_fn(manifest_path, lines, parent_name, tech, parent_candidate.get("declared"), False)
+        if parent_line_idx is None:
+            continue
+
+        p_name = parent_candidate.get("name")
+        p_inst = parent_candidate.get("installed")
+        p_clean_inst = p_inst[0] if (isinstance(p_inst, list) and p_inst) else p_inst
+        p_decl = parent_candidate.get("declared")
+        p_patch = parent_candidate.get("latest_patch")
+        p_sm = parent_candidate.get("latest_same_major")
+        p_abs = parent_candidate.get("latest_absolute") or parent_candidate.get("latest")
+
+        p_clean_inst_v = _clean_version_str(p_clean_inst)
+        p_clean_decl_v = _clean_version_str(p_decl)
+
+        if p_patch and _clean_version_str(p_patch) in (p_clean_inst_v, p_clean_decl_v):
+            p_patch = None
+        if p_sm and (
+            _clean_version_str(p_sm) in (p_clean_inst_v, p_clean_decl_v)
+            or _clean_version_str(p_sm) == _clean_version_str(p_patch)
+        ):
+            p_sm = None
+        if p_abs and (
+            _clean_version_str(p_abs) in (p_clean_inst_v, p_clean_decl_v)
+            or _clean_version_str(p_abs) == _clean_version_str(p_sm)
+            or _clean_version_str(p_abs) == _clean_version_str(p_patch)
+        ):
+            p_abs = None
+
+        parent_options = []
+        if p_patch:
+            p_diff = generate_remediation_diff(manifest_path, parent_line_idx, p_decl, p_patch, tech, p_name)
+            if p_diff:
+                parent_options.append({
+                    "id": "patch",
+                    "label": f"Patch {p_name}: v{_clean_version_str(p_patch)}",
+                    "badge": "Patch / Bugfix",
+                    "badge_class": "v-chip-ok",
+                    "diff": p_diff,
+                })
+        if p_sm:
+            p_diff = generate_remediation_diff(manifest_path, parent_line_idx, p_decl, p_sm, tech, p_name)
+            if p_diff:
+                parent_options.append({
+                    "id": "minor",
+                    "label": f"Minor {p_name}: v{_clean_version_str(p_sm)}",
+                    "badge": "Minor / Feature",
+                    "badge_class": "v-chip-safe",
+                    "diff": p_diff,
+                })
+        if p_abs:
+            p_diff = generate_remediation_diff(manifest_path, parent_line_idx, p_decl, p_abs, tech, p_name)
+            if p_diff:
+                parent_options.append({
+                    "id": "major",
+                    "label": f"Major {p_name}: v{_clean_version_str(p_abs)}",
+                    "badge": "Major / Breaking",
+                    "badge_class": "v-chip-major",
+                    "diff": p_diff,
+                })
+
+        if parent_options:
+            strategies.append({
+                "id": "parent_upgrade",
+                "title": f"Upgrade Parent Package ({p_name})",
+                "description": f"Recommended. Upgrades parent package '{p_name}' which requires '{name}'.",
+                "is_recommended": True,
+                "options": parent_options,
+            })
+            break
+
+    return strategies
+
+
+def _populate_override_strategies(manifest_path, name, tech, latest_patch, latest_sm, latest_abs, clean_installed, has_prior_strategies):
+    target_ver_str = latest_patch or latest_sm or latest_abs or clean_installed
+    if not target_ver_str:
+        return []
+
+    ov_diff = generate_override_remediation_diff(manifest_path, name, target_ver_str, tech)
+    if not ov_diff:
+        return []
+
+    ov_badge = "Patch" if target_ver_str == latest_patch else "Minor" if target_ver_str == latest_sm else "Major"
+    ov_badge_class = "v-chip-ok" if ov_badge == "Patch" else "v-chip-safe" if ov_badge == "Minor" else "v-chip-major"
+
+    return [{
+        "id": "override",
+        "title": f"Force Transitive Override ({name})",
+        "description": f"Adds explicit override / resolution for '{name}' in manifest.",
+        "is_recommended": not has_prior_strategies,
+        "options": [{
+            "id": "override",
+            "label": f"Override {name}: v{_clean_version_str(target_ver_str)}",
+            "badge": ov_badge,
+            "badge_class": ov_badge_class,
+            "diff": ov_diff,
+        }],
+    }]
+
+
+def _build_final_remediation(strategies, manifest_missing):
+    if not strategies:
+        return None
+
+    all_flat_options = []
+    for st in strategies:
+        all_flat_options.extend(st.get("options", []))
+
+    remediation_safe = next((opt["diff"] for opt in all_flat_options if opt["id"] in {"patch", "minor"}), None)
+    remediation_major = next((opt["diff"] for opt in all_flat_options if opt["id"] == "major"), None)
+    remediation_options = (
+        [{"label": opt["label"], "diff": opt["diff"]} for opt in all_flat_options]
+        if all_flat_options
+        else None
+    )
+
+    first_diff = all_flat_options[0]["diff"] if all_flat_options else None
+    last_diff = all_flat_options[-1]["diff"] if all_flat_options else None
+
+    return {
+        "safe": remediation_safe or first_diff,
+        "major": remediation_major or last_diff,
+        "options": remediation_options,
+        "manifest_missing": manifest_missing,
+        "strategies": strategies,
+    }
+
+
 def populate_remediation_recommendations(results, default_project_path):
     """Calculates and attaches remediation info with multi-level strategies (Patch, Minor, Major, Parent Upgrade, Override) to each result."""
-
-    def _clean_v(v):
-        if not v:
-            return ""
-        v = str(v).strip().lower()
-        v = v.removeprefix("v")
-        return RE_OPERATOR_PREFIX.sub("", v)
-
     manifest_file_cache = {}
 
     def _get_manifest_lines(m_path):
@@ -9531,19 +9629,12 @@ def populate_remediation_recommendations(results, default_project_path):
         found_line_idx = None
         best_score = -1
         for idx, line in enumerate(lines):
-            if is_engine:
-                matched = f'"{pkg_name}"' in line or '"engines"' in line
-            else:
-                matched = match_line_for_dependency(line, pkg_name, tech)
+            matched = (f'"{pkg_name}"' in line or '"engines"' in line) if is_engine else match_line_for_dependency(line, pkg_name, tech)
             if matched:
                 score = 1
                 if declared:
                     ver_digits = re.search(r"\d+\.\d+", str(declared))
-                    if (
-                        ver_digits
-                        and ver_digits.group(0) in line
-                        or str(declared).strip() in line
-                    ):
+                    if ver_digits and ver_digits.group(0) in line or str(declared).strip() in line:
                         score = 2
                 if score > best_score:
                     best_score = score
@@ -9559,10 +9650,8 @@ def populate_remediation_recommendations(results, default_project_path):
         cache_key = (p_path, tech, is_engine)
         if cache_key not in manifest_files_cache:
             if is_engine:
-                package_json_path = os.path.join(p_path, "package.json")
-                manifest_files_cache[cache_key] = (
-                    [package_json_path] if os.path.exists(package_json_path) else []
-                )
+                pkg_json = os.path.join(p_path, "package.json")
+                manifest_files_cache[cache_key] = [pkg_json] if os.path.exists(pkg_json) else []
             else:
                 manifest_files_cache[cache_key] = find_manifest_files(p_path, tech)
         return manifest_files_cache[cache_key]
@@ -9582,13 +9671,7 @@ def populate_remediation_recommendations(results, default_project_path):
 
         r["remediation"] = None
 
-        is_outdated = r.get("status") in {
-            "major",
-            "minor",
-            "patch",
-            "minor-major",
-            "patch-major",
-        }
+        is_outdated = r.get("status") in {"major", "minor", "patch", "minor-major", "patch-major"}
         has_vulns = bool(r.get("vulnerabilities"))
         is_depr = bool(r.get("deprecated"))
 
@@ -9605,35 +9688,29 @@ def populate_remediation_recommendations(results, default_project_path):
         installed = r.get("installed")
         dep_type = r.get("dep_type")
 
-        clean_installed = (
-            installed[0] if (isinstance(installed, list) and installed) else installed
-        )
-
+        clean_installed = installed[0] if (isinstance(installed, list) and installed) else installed
         latest_patch = r.get("latest_patch")
         latest_sm = r.get("latest_same_major")
         latest_abs = r.get("latest_absolute") or r.get("latest")
 
-        clean_inst_v = _clean_v(clean_installed)
-        clean_decl_v = _clean_v(declared)
+        clean_inst_v = _clean_version_str(clean_installed)
+        clean_decl_v = _clean_version_str(declared)
 
-        if latest_patch and _clean_v(latest_patch) in (clean_inst_v, clean_decl_v):
+        if latest_patch and _clean_version_str(latest_patch) in (clean_inst_v, clean_decl_v):
             latest_patch = None
         if latest_sm and (
-            _clean_v(latest_sm) in (clean_inst_v, clean_decl_v)
-            or _clean_v(latest_sm) == _clean_v(latest_patch)
+            _clean_version_str(latest_sm) in (clean_inst_v, clean_decl_v)
+            or _clean_version_str(latest_sm) == _clean_version_str(latest_patch)
         ):
             latest_sm = None
         if latest_abs and " or " not in str(latest_abs) and (
-            _clean_v(latest_abs) in (clean_inst_v, clean_decl_v)
-            or _clean_v(latest_abs) == _clean_v(latest_sm)
-            or _clean_v(latest_abs) == _clean_v(latest_patch)
+            _clean_version_str(latest_abs) in (clean_inst_v, clean_decl_v)
+            or _clean_version_str(latest_abs) == _clean_version_str(latest_sm)
+            or _clean_version_str(latest_abs) == _clean_version_str(latest_patch)
         ):
             latest_abs = None
 
-        manifest_files = _get_manifest_files(
-            project_path, tech, r.get("is_engine", False)
-        )
-
+        manifest_files = _get_manifest_files(project_path, tech, r.get("is_engine", False))
         if not manifest_files:
             continue
 
@@ -9642,333 +9719,25 @@ def populate_remediation_recommendations(results, default_project_path):
         if not lines:
             continue
 
-        found_line_idx = _find_line_idx(
-            manifest_path, lines, name, tech, declared, r.get("is_engine", False)
-        )
-
-        parent_r = None
-        parent_line_idx = None
-        if r.get("required_by"):
-            for parent_name in r.get("required_by", []):
-                parent_candidate = next(
-                    (
-                        item
-                        for item in results
-                        if item.get("name") == parent_name
-                        and item.get("project_path") == r.get("project_path")
-                    ),
-                    None,
-                )
-                if parent_candidate:
-                    parent_line_idx = _find_line_idx(
-                        manifest_path,
-                        lines,
-                        parent_name,
-                        tech,
-                        parent_candidate.get("declared"),
-                        False,
-                    )
-                    if parent_line_idx is not None:
-                        parent_r = parent_candidate
-                        break
-
-        manifest_missing = False
-        if (
-            found_line_idx is None
-            and dep_type != "Transitive"
-            and not r.get("required_by")
-        ):
-            manifest_missing = True
+        found_line_idx = _find_line_idx(manifest_path, lines, name, tech, declared, r.get("is_engine", False))
+        manifest_missing = (found_line_idx is None and dep_type != "Transitive" and not r.get("required_by"))
 
         strategies = []
 
         if dep_type != "Transitive" or found_line_idx is not None:
-            # Direct/Dev dependency or explicit package in manifest
-            direct_options = []
-            target_string = (
-                latest_abs or (r.get("latest") if r.get("name") == name else "") or ""
-            )
-            if " or " in target_string:
-                parts = [p.strip() for p in target_string.split(" or ") if p.strip()]
-                if len(parts) >= 2:
-                    for p in parts:
-                        diff_p = (
-                            generate_remediation_diff(
-                                manifest_path, found_line_idx, declared, p, tech, name
-                            )
-                            if found_line_idx
-                            else generate_addition_remediation_diff(
-                                manifest_path, name, p, tech
-                            )
-                        )
-                        if diff_p:
-                            lbl = format_remediation_option_label(p)
-                            direct_options.append(
-                                {
-                                    "id": f"option_{p}",
-                                    "label": lbl,
-                                    "badge": "Option",
-                                    "badge_class": "v-chip-safe",
-                                    "diff": diff_p,
-                                }
-                            )
-                    diff_comb = (
-                        generate_remediation_diff(
-                            manifest_path,
-                            found_line_idx,
-                            declared,
-                            target_string,
-                            tech,
-                            name,
-                        )
-                        if found_line_idx
-                        else generate_addition_remediation_diff(
-                            manifest_path, name, target_string, tech
-                        )
-                    )
-                    if diff_comb:
-                        lbl_comb = format_remediation_option_label(target_string)
-                        direct_options.append(
-                            {
-                                "id": f"option_{target_string}",
-                                "label": lbl_comb,
-                                "badge": "Option",
-                                "badge_class": "v-chip-major",
-                                "diff": diff_comb,
-                            }
-                        )
-
-            if latest_patch:
-                diff_patch = (
-                    generate_remediation_diff(
-                        manifest_path,
-                        found_line_idx,
-                        declared,
-                        latest_patch,
-                        tech,
-                        name,
-                    )
-                    if found_line_idx
-                    else generate_addition_remediation_diff(
-                        manifest_path, name, latest_patch, tech
-                    )
-                )
-                if diff_patch:
-                    direct_options.append(
-                        {
-                            "id": "patch",
-                            "label": f"Patch: v{_clean_v(latest_patch)}",
-                            "badge": "Patch / Bugfix",
-                            "badge_class": "v-chip-ok",
-                            "diff": diff_patch,
-                        }
-                    )
-
-            if latest_sm:
-                diff_sm = (
-                    generate_remediation_diff(
-                        manifest_path, found_line_idx, declared, latest_sm, tech, name
-                    )
-                    if found_line_idx
-                    else generate_addition_remediation_diff(
-                        manifest_path, name, latest_sm, tech
-                    )
-                )
-                if diff_sm:
-                    direct_options.append(
-                        {
-                            "id": "minor",
-                            "label": f"Minor: v{_clean_v(latest_sm)}",
-                            "badge": "Minor / Feature",
-                            "badge_class": "v-chip-safe",
-                            "diff": diff_sm,
-                        }
-                    )
-
-            if latest_abs and " or " not in str(latest_abs):
-                diff_abs = (
-                    generate_remediation_diff(
-                        manifest_path, found_line_idx, declared, latest_abs, tech, name
-                    )
-                    if found_line_idx
-                    else generate_addition_remediation_diff(
-                        manifest_path, name, latest_abs, tech
-                    )
-                )
-                if diff_abs:
-                    direct_options.append(
-                        {
-                            "id": "major",
-                            "label": f"Major: v{_clean_v(latest_abs)}",
-                            "badge": "Major / Breaking",
-                            "badge_class": "v-chip-major",
-                            "diff": diff_abs,
-                        }
-                    )
-
-            if direct_options:
-                strategies.append(
-                    {
-                        "id": "direct_upgrade",
-                        "title": f"Update Direct Dependency ({name})",
-                        "description": f"Updates '{name}' in manifest file.",
-                        "is_recommended": True,
-                        "options": direct_options,
-                    }
-                )
+            strategies.extend(_populate_direct_strategies(
+                r, manifest_path, found_line_idx, name, declared, tech, latest_patch, latest_sm, latest_abs
+            ))
 
         if dep_type == "Transitive":
-            # Strategy 1: Upgrade Parent Package
-            if parent_r and parent_line_idx is not None:
-                p_name = parent_r.get("name")
-                p_inst = parent_r.get("installed")
-                p_clean_inst = (
-                    p_inst[0] if (isinstance(p_inst, list) and p_inst) else p_inst
-                )
-                p_decl = parent_r.get("declared")
-                p_patch = parent_r.get("latest_patch")
-                p_sm = parent_r.get("latest_same_major")
-                p_abs = parent_r.get("latest_absolute") or parent_r.get("latest")
+            strategies.extend(_populate_parent_strategies(r, results, manifest_path, lines, tech, name, _find_line_idx))
+            strategies.extend(_populate_override_strategies(
+                manifest_path, name, tech, latest_patch, latest_sm, latest_abs, clean_installed, bool(strategies)
+            ))
 
-                p_clean_inst_v = _clean_v(p_clean_inst)
-                p_clean_decl_v = _clean_v(p_decl)
-
-                if p_patch and _clean_v(p_patch) in (p_clean_inst_v, p_clean_decl_v):
-                    p_patch = None
-                if p_sm and (
-                    _clean_v(p_sm) in (p_clean_inst_v, p_clean_decl_v)
-                    or _clean_v(p_sm) == _clean_v(p_patch)
-                ):
-                    p_sm = None
-                if p_abs and (
-                    _clean_v(p_abs) in (p_clean_inst_v, p_clean_decl_v)
-                    or _clean_v(p_abs) == _clean_v(p_sm)
-                    or _clean_v(p_abs) == _clean_v(p_patch)
-                ):
-                    p_abs = None
-
-                parent_options = []
-                if p_patch:
-                    p_diff = generate_remediation_diff(
-                        manifest_path, parent_line_idx, p_decl, p_patch, tech, p_name
-                    )
-                    if p_diff:
-                        parent_options.append(
-                            {
-                                "id": "patch",
-                                "label": f"Patch {p_name}: v{_clean_v(p_patch)}",
-                                "badge": "Patch / Bugfix",
-                                "badge_class": "v-chip-ok",
-                                "diff": p_diff,
-                            }
-                        )
-                if p_sm:
-                    p_diff = generate_remediation_diff(
-                        manifest_path, parent_line_idx, p_decl, p_sm, tech, p_name
-                    )
-                    if p_diff:
-                        parent_options.append(
-                            {
-                                "id": "minor",
-                                "label": f"Minor {p_name}: v{_clean_v(p_sm)}",
-                                "badge": "Minor / Feature",
-                                "badge_class": "v-chip-safe",
-                                "diff": p_diff,
-                            }
-                        )
-                if p_abs:
-                    p_diff = generate_remediation_diff(
-                        manifest_path, parent_line_idx, p_decl, p_abs, tech, p_name
-                    )
-                    if p_diff:
-                        parent_options.append(
-                            {
-                                "id": "major",
-                                "label": f"Major {p_name}: v{_clean_v(p_abs)}",
-                                "badge": "Major / Breaking",
-                                "badge_class": "v-chip-major",
-                                "diff": p_diff,
-                            }
-                        )
-
-                if parent_options:
-                    strategies.append(
-                        {
-                            "id": "parent_upgrade",
-                            "title": f"Upgrade Parent Package ({p_name})",
-                            "description": f"Recommended. Upgrades parent package '{p_name}' which requires '{name}'.",
-                            "is_recommended": True,
-                            "options": parent_options,
-                        }
-                    )
-
-            # Strategy 2: Force Transitive Override / Resolution
-            target_ver_str = latest_patch or latest_sm or latest_abs or clean_installed
-            if target_ver_str:
-                ov_diff = generate_override_remediation_diff(
-                    manifest_path, name, target_ver_str, tech
-                )
-                if ov_diff:
-                    ov_badge = (
-                        "Patch"
-                        if target_ver_str == latest_patch
-                        else "Minor" if target_ver_str == latest_sm else "Major"
-                    )
-                    ov_badge_class = (
-                        "v-chip-ok"
-                        if ov_badge == "Patch"
-                        else "v-chip-safe" if ov_badge == "Minor" else "v-chip-major"
-                    )
-                    override_options = [
-                        {
-                            "id": "override",
-                            "label": f"Override {name}: v{_clean_v(target_ver_str)}",
-                            "badge": ov_badge,
-                            "badge_class": ov_badge_class,
-                            "diff": ov_diff,
-                        }
-                    ]
-                    strategies.append(
-                        {
-                            "id": "override",
-                            "title": f"Force Transitive Override ({name})",
-                            "description": f"Adds explicit override / resolution for '{name}' in manifest.",
-                            "is_recommended": len(strategies) == 0,
-                            "options": override_options,
-                        }
-                    )
-
-        all_flat_options = []
-        for st in strategies:
-            all_flat_options.extend(st.get("options", []))
-
-        remediation_safe = next(
-            (
-                opt["diff"]
-                for opt in all_flat_options
-                if opt["id"] in {"patch", "minor"}
-            ),
-            None,
-        )
-        remediation_major = next(
-            (opt["diff"] for opt in all_flat_options if opt["id"] == "major"), None
-        )
-        remediation_options = (
-            [{"label": opt["label"], "diff": opt["diff"]} for opt in all_flat_options]
-            if all_flat_options
-            else None
-        )
-
-        if strategies:
-            first_diff = all_flat_options[0]["diff"] if all_flat_options else None
-            last_diff = all_flat_options[-1]["diff"] if all_flat_options else None
-            r["remediation"] = {
-                "safe": remediation_safe or first_diff,
-                "major": remediation_major or last_diff,
-                "options": remediation_options,
-                "manifest_missing": manifest_missing,
-                "strategies": strategies,
-            }
+        remed_dict = _build_final_remediation(strategies, manifest_missing)
+        if remed_dict:
+            r["remediation"] = remed_dict
             if manifest_missing:
                 r["manifest_missing"] = True
 
@@ -9979,2760 +9748,306 @@ def populate_remediation_recommendations(results, default_project_path):
         sys.stdout.flush()
 
 
+# Compressed embedded HTML Report Template (gzip + base64)
+# To edit the template with full IDE support, modify 'assets/report_template.html'
+# and run 'python scripts/pack_template.py' to update this string.
+_HTML_TEMPLATE_GZIP_B64 = (
+    "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"
+)
+
+
 class HTMLReportTemplateProvider:
-    @staticmethod
-    def get_template():
-        return """<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dependency Status & Security Report</title>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700;800&display=swap" rel="stylesheet">
-    <style>
-        :root {
-            --bg-color: #0b0f19;
-            --card-bg: #111827;
-            --card-hover: #1f2937;
-            --text-main: #f9fafb;
-            --text-muted: #9ca3af;
-            --border-color: #374151;
-            --primary: #38bdf8;
-            --success: #10b981;
-            --warning: #f59e0b;
-            --error: #ef4444;
-            --info: #0ea5e9;
-            --depr: #a855f7;
-            --muted: #4b5563;
-        }
-        
-        body {
-            background-color: var(--bg-color);
-            color: var(--text-main);
-            font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            margin: 0;
-            padding: 40px 20px;
-            display: flex;
-            justify-content: center;
-        }
-        
-        .container {
-            max-width: 1000px;
-            width: 100%;
-        }
-        
-        header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 30px;
-            border-bottom: 1px solid var(--border-color);
-            padding-bottom: 20px;
-        }
-        
-        h1 {
-            margin: 0;
-            font-size: 28px;
-            font-weight: 800;
-            background: linear-gradient(135deg, #38bdf8 0%, #3b82f6 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-        }
-        
-        .meta-info {
-            font-size: 13px;
-            color: var(--text-muted);
-            text-align: right;
-        }
-        
-        /* Grid Dashboard */
-        .dashboard-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 20px;
-            margin-bottom: 30px;
-        }
-        
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 15px;
-        }
-        
-        @media (max-width: 768px) {
-            .dashboard-grid {
-                grid-template-columns: 1fr;
-            }
-            .stats-grid {
-                grid-template-columns: repeat(2, 1fr);
-            }
-        }
-        
-        .stat-card {
-            background-color: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 12px;
-            padding: 15px;
-            text-align: center;
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-        }
-        
-        .stat-card.primary-large {
-            grid-column: span 2;
-        }
-        
-        .stat-val {
-            font-size: 24px;
-            font-weight: 700;
-            margin-bottom: 5px;
-        }
-        
-        .stat-lbl {
-            font-size: 11px;
-            color: var(--text-muted);
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-        
-        .stat-card.primary .stat-val, .stat-card.primary-large .stat-val { color: var(--primary); }
-        .stat-card.warning .stat-val { color: var(--warning); }
-        .stat-card.error .stat-val { color: var(--error); }
-        .stat-card.success .stat-val { color: var(--success); }
-        .stat-card.muted .stat-val { color: var(--text-muted); }
-        .stat-card.depr .stat-val { color: var(--depr); }
-        .stat-card.malicious { background-color: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); }
-        .stat-card.malicious .stat-val { color: #fca5a5; }
-        
-        /* Controls Panel Card & Layout */
-        .controls-placeholder {
-            display: block;
-            margin-bottom: 24px;
-            position: relative;
-        }
+    """Provides the HTML/CSS/JS template for interactive dependency reports."""
 
-        .controls-toolbar {
-            background: rgba(17, 24, 39, 0.75);
-            backdrop-filter: blur(16px);
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            border-radius: 12px;
-            padding: 14px 18px;
-            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-            box-sizing: border-box;
-            transition: background 0.25s ease, border-color 0.25s ease;
-        }
-        
-        /* Floating controls-toolbar styles on scroll */
-        @media (min-width: 768px) {
-            .controls-toolbar.floating {
-                position: fixed;
-                top: 0;
-                left: 50%;
-                transform: translate(-50%, 0);
-                width: calc(100% - 40px);
-                max-width: 1000px;
-                border-radius: 0 0 12px 12px;
-                border-left: 1px solid rgba(255, 255, 255, 0.12);
-                border-right: 1px solid rgba(255, 255, 255, 0.12);
-                border-top: none;
-                border-bottom: 1px solid rgba(255, 255, 255, 0.12);
-                background-color: rgba(17, 24, 39, 0.95);
-                backdrop-filter: blur(16px);
-                z-index: 1000;
-                box-shadow: 0 12px 36px rgba(0, 0, 0, 0.6);
-                padding: 10px 16px;
-                box-sizing: border-box;
-                animation: desktopStickyIn 0.2s ease;
-            }
-        }
-        
-        /* Mobile Sticky fallback */
-        @media (max-width: 767px) {
-            .controls-toolbar.floating {
-                position: fixed;
-                top: 0;
-                left: 0;
-                width: 100%;
-                border-radius: 0;
-                border-left: 0;
-                border-right: 0;
-                border-top: 0;
-                border-bottom: 1px solid rgba(255, 255, 255, 0.12);
-                background-color: rgba(17, 24, 39, 0.95);
-                backdrop-filter: blur(16px);
-                z-index: 1000;
-                box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
-                padding: 10px 14px;
-                margin-bottom: 0;
-                box-sizing: border-box;
-                animation: mobileStickyIn 0.2s ease;
-            }
-        }
-        
-        @keyframes desktopStickyIn {
-            from {
-                transform: translate(-50%, -100%);
-            }
-            to {
-                transform: translate(-50%, 0);
-            }
-        }
-        
-        @keyframes mobileStickyIn {
-            from {
-                transform: translateY(-100%);
-            }
-            to {
-                transform: translateY(0);
-            }
-        }
-        
-        .controls-row {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 16px;
-            width: 100%;
-        }
-        
-        .primary-row {
-            flex-wrap: wrap;
-        }
-        
-        .secondary-row {
-            flex-wrap: wrap;
-            padding-top: 10px;
-            border-top: 1px solid rgba(255, 255, 255, 0.06);
-            font-size: 13px;
-        }
+    _cached_template = None
 
-        .search-box {
-            position: relative;
-            display: inline-flex;
-            align-items: center;
-            flex: 1 1 320px;
-            min-width: 240px;
-            height: 38px;
-        }
-        
-        .search-box input {
-            width: 100%;
-            height: 100%;
-            background-color: rgba(15, 23, 42, 0.6);
-            border: 1px solid rgba(255, 255, 255, 0.12);
-            border-radius: 8px;
-            color: var(--text-main);
-            padding: 0 38px 0 36px;
-            font-size: 13.5px;
-            box-sizing: border-box;
-            font-family: inherit;
-            transition: all 0.2s ease;
-        }
-        
-        .search-box input:focus {
-            outline: none;
-            background-color: rgba(15, 23, 42, 0.95);
-            border-color: var(--primary);
-            box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.2);
-        }
-        
-        .search-icon {
-            position: absolute;
-            left: 12px;
-            top: 50%;
-            transform: translateY(-50%);
-            color: var(--text-muted);
-            pointer-events: none;
-            z-index: 2;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-        
-        .search-kbd {
-            position: absolute;
-            right: 12px;
-            top: 50%;
-            transform: translateY(-50%);
-            background: rgba(255, 255, 255, 0.08);
-            border: 1px solid rgba(255, 255, 255, 0.15);
-            border-radius: 4px;
-            padding: 1px 6px;
-            font-size: 11px;
-            color: var(--text-muted);
-            font-family: monospace;
-            pointer-events: none;
-            z-index: 2;
-            line-height: 1.2;
-        }
+    @classmethod
+    def get_template(cls):
+        if cls._cached_template is not None:
+            return cls._cached_template
 
-        #clearSearch {
-            position: absolute;
-            right: 10px;
-            top: 50%;
-            transform: translateY(-50%);
-            background: none;
-            border: none;
-            color: var(--text-muted);
-            font-size: 18px;
-            cursor: pointer;
-            padding: 0;
-            line-height: 1;
-            display: none;
-            z-index: 3;
-        }
+        # 1. In local development mode, read from assets/report_template.html if present
+        dev_template_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "assets",
+            "report_template.html",
+        )
+        if os.path.exists(dev_template_path):
+            try:
+                with open(dev_template_path, "r", encoding="utf-8") as f:
+                    cls._cached_template = f.read()
+                    return cls._cached_template
+            except OSError:
+                pass
 
-        .segmented-control {
-            display: inline-flex;
-            align-items: center;
-            background: rgba(15, 23, 42, 0.6);
-            padding: 3px;
-            border-radius: 9px;
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            gap: 3px;
-            flex-wrap: wrap;
-        }
-
-        .secondary-filters-group {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            flex-wrap: wrap;
-        }
-
-        .facet-label {
-            font-size: 11.5px;
-            font-weight: 600;
-            color: var(--text-muted);
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            margin-right: 4px;
-        }
-
-        .filter-divider {
-            width: 1px;
-            height: 18px;
-            background: rgba(255, 255, 255, 0.1);
-            margin: 0 4px;
-        }
-
-        .btn-facet {
-            background: rgba(30, 41, 59, 0.4);
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            font-size: 12.5px;
-            padding: 5px 12px;
-        }
-
-        .btn-facet:hover {
-            background: rgba(51, 65, 85, 0.6);
-            border-color: rgba(255, 255, 255, 0.18);
-            transform: translateY(-1px);
-        }
-
-        .btn-reset-filters {
-            background: transparent;
-            border: 1px solid rgba(255, 255, 255, 0.12);
-            color: var(--text-muted);
-            font-size: 12px;
-            padding: 5px 12px;
-            border-radius: 6px;
-            cursor: pointer;
-            transition: all 0.2s ease;
-            display: inline-flex;
-            align-items: center;
-        }
-
-        .btn-reset-filters:hover {
-            color: var(--text-main);
-            background: rgba(239, 68, 68, 0.15);
-            border-color: rgba(239, 68, 68, 0.4);
-        }
-        
-        .filter-group {
-            position: relative;
-            display: inline-block;
-        }
-        
-        .chevron-inline {
-            display: inline-block;
-            font-size: 8px;
-            margin-left: 6px;
-            opacity: 0.7;
-            transition: transform 0.2s ease;
-        }
-        
-        .filter-btn.dropdown-open .chevron-inline {
-            transform: rotate(180deg);
-        }
-        
-        .filter-dropdown {
-            position: absolute;
-            top: calc(100% + 6px);
-            left: 0;
-            z-index: 100;
-            background: rgba(17, 24, 39, 0.95);
-            backdrop-filter: blur(10px);
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            padding: 12px;
-            min-width: 200px;
-            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5), 0 4px 6px -2px rgba(0, 0, 0, 0.5);
-            display: none;
-        }
-        
-        .dropdown-row {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 12px;
-            width: 100%;
-        }
-        
-        .row-actions {
-            display: inline-flex;
-            align-items: center;
-            opacity: 0;
-            pointer-events: none;
-            transition: opacity 0.15s ease;
-            user-select: none;
-        }
-        
-        .dropdown-row:hover .row-actions {
-            opacity: 1;
-            pointer-events: auto;
-        }
-        
-        .action-btn {
-            font-size: 10px;
-            color: var(--primary);
-            cursor: pointer;
-            text-decoration: underline;
-            font-weight: 500;
-        }
-        
-        .action-btn:hover {
-            color: var(--text-main);
-        }
-        
-        .action-separator {
-            font-size: 10px;
-            color: var(--text-muted);
-            margin: 0 3px;
-        }
-        
-        @keyframes fadeInSlide {
-            from {
-                opacity: 0;
-                transform: translateY(-8px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
-        
-        .filter-dropdown.show {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-            animation: fadeInSlide 0.15s ease-out forwards;
-        }
-        
-        .filter-dropdown label {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            font-size: 13px;
-            color: var(--text-main);
-            cursor: pointer;
-            user-select: none;
-            transition: opacity 0.15s;
-        }
-        
-        .filter-dropdown label:hover {
-            opacity: 0.85;
-        }
-        
-        .filter-dropdown input[type="checkbox"] {
-            accent-color: var(--primary);
-            cursor: pointer;
-            width: 14px;
-            height: 14px;
-        }
-        
-        .dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            display: inline-block;
-        }
-        .mal-dot { background-color: #b91c1c; border: 1px solid #f87171; box-shadow: 0 0 6px #ef4444; }
-        .crit-dot { background-color: var(--error); }
-        .high-dot { background-color: #f97316; }
-        .med-dot { background-color: var(--warning); }
-        .low-dot { background-color: var(--info); }
-        .unkn-dot { background-color: var(--text-muted); }
-        
-        .filter-btn {
-            background-color: var(--bg-color);
-            border: 1px solid var(--border-color);
-            color: var(--text-muted);
-            border-radius: 8px;
-            padding: 8px 14px;
-            font-size: 13px;
-            cursor: pointer;
-            font-family: inherit;
-            transition: all 0.2s ease;
-            display: inline-flex;
-            align-items: center;
-        }
-        
-        .filter-btn:hover {
-            background-color: var(--card-hover);
-            color: var(--text-main);
-        }
-        
-        .filter-btn.active {
-            background: linear-gradient(135deg, #38bdf8 0%, #3b82f6 100%);
-            border-color: var(--primary);
-            color: white;
-            font-weight: 600;
-        }
-        
-        .filter-btn:disabled {
-            opacity: 0.3;
-            cursor: not-allowed;
-            pointer-events: none;
-        }
-        
-        /* Packages list */
-        .packages-list {
-            display: flex;
-            flex-direction: column;
-            gap: 15px;
-        }
-        
-        .package-card {
-            background-color: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 12px;
-            overflow: hidden;
-            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-        }
-        
-        .package-card:hover {
-            border-color: rgba(59, 130, 246, 0.5);
-            background-color: var(--card-hover);
-            transform: translateY(-1px);
-            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
-        }
-        
-        .card-header {
-            padding: 18px 20px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            cursor: pointer;
-            user-select: none;
-            gap: 20px;
-        }
-        
-        .card-header:hover {
-            background-color: #161e2e;
-        }
-        
-        .header-left {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
-        
-        .pkg-title {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-        
-        .pkg-name {
-            font-weight: 700;
-            font-size: 16px;
-        }
-        
-        .pkg-type-badge {
-            font-size: 10px;
-            background-color: #1e293b;
-            color: var(--text-muted);
-            padding: 0 6px;
-            height: 20px;
-            box-sizing: border-box;
-            border-radius: 5px;
-            text-transform: uppercase;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            line-height: 1;
-        }
-        
-        .pkg-badges {
-            display: flex;
-            gap: 6px;
-            flex-wrap: wrap;
-            align-items: center;
-        }
-        
-        .badge {
-            font-size: 11px;
-            padding: 0 7px;
-            height: 20px;
-            box-sizing: border-box;
-            border-radius: 5px;
-            font-weight: 600;
-            line-height: 1;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-        }
-        
-        .badge-success { background-color: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
-        .badge-warning { background-color: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
-        .badge-error { background-color: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
-        .badge-info { background-color: rgba(14, 165, 233, 0.15); color: #38bdf8; border: 1px solid rgba(14, 165, 233, 0.3); }
-        .badge-depr { background-color: rgba(168, 85, 247, 0.15); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.3); }
-        .badge-danger { background-color: rgba(220, 38, 38, 0.25); color: #fca5a5; border: 1px solid rgba(220, 38, 38, 0.4); }
-        .badge-muted { background-color: rgba(100, 116, 139, 0.15); color: #94a3b8; border: 1px solid rgba(100, 116, 139, 0.3); }
-        .badge-project { background-color: rgba(55, 65, 81, 0.4); color: #9ca3af; border: 1px solid rgba(75, 85, 99, 0.4); }
-        .badge-tech { font-family: var(--font-sans); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; padding: 0 6px; height: 18px; line-height: 18px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; margin-left: 6px; }
-        .badge-tech-npm { background-color: rgba(203, 56, 55, 0.18); color: #f87171; border: 1px solid rgba(203, 56, 55, 0.4); }
-        .badge-tech-ruby { background-color: rgba(204, 52, 45, 0.18); color: #fb7185; border: 1px solid rgba(204, 52, 45, 0.4); }
-        .badge-tech-pip, .badge-tech-python { background-color: rgba(55, 118, 171, 0.18); color: #60a5fa; border: 1px solid rgba(55, 118, 171, 0.4); }
-        .badge-tech-nuget, .badge-tech-csharp { background-color: rgba(0, 72, 128, 0.18); color: #38bdf8; border: 1px solid rgba(0, 72, 128, 0.4); }
-        .badge-tech-go { background-color: rgba(0, 173, 216, 0.18); color: #22d3ee; border: 1px solid rgba(0, 173, 216, 0.4); }
-        .badge-tech-cargo, .badge-tech-rust { background-color: rgba(222, 165, 132, 0.18); color: #fb923c; border: 1px solid rgba(222, 165, 132, 0.4); }
-        .badge-tech-composer, .badge-tech-php { background-color: rgba(136, 146, 191, 0.18); color: #a78bfa; border: 1px solid rgba(136, 146, 191, 0.4); }
-        .badge-tech-maven, .badge-tech-gradle, .badge-tech-java { background-color: rgba(237, 139, 0, 0.18); color: #facc15; border: 1px solid rgba(237, 139, 0, 0.4); }
-        
-        .badge-vuln-stats {
-            background-color: rgba(239, 68, 68, 0.12);
-            border: 1px solid rgba(239, 68, 68, 0.25);
-            color: #ef4444;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 5px;
-            padding: 0 7px;
-            height: 20px;
-            box-sizing: border-box;
-            font-weight: 700;
-            line-height: 1;
-        }
-        .badge-vuln-stats .vuln-severity-pills-inner {
-            display: inline-flex;
-            gap: 3px;
-            align-items: center;
-            justify-content: center;
-            margin-left: 2px;
-        }
-        .vuln-severity-pills {
-            display: inline-flex;
-            gap: 3px;
-            align-items: center;
-            justify-content: center;
-        }
-        .sev-pill {
-            font-size: 9px;
-            padding: 0 4px;
-            height: 14px;
-            line-height: 14px;
-            box-sizing: border-box;
-            border-radius: 3px;
-            font-weight: 700;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-        }
-        .sev-pill.sev-mal { background-color: rgba(127, 29, 29, 0.4); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.5); }
-        .sev-pill.sev-c { background-color: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
-        .sev-pill.sev-h { background-color: rgba(245, 158, 11, 0.2); color: #fb923c; border: 1px solid rgba(245, 158, 11, 0.3); }
-        .sev-pill.sev-m { background-color: rgba(234, 179, 8, 0.2); color: #facc15; border: 1px solid rgba(234, 179, 8, 0.3); }
-        .sev-pill.sev-l { background-color: rgba(156, 163, 175, 0.2); color: #d1d5db; border: 1px solid rgba(156, 163, 175, 0.3); }
-        .sev-pill.sev-u { background-color: rgba(156, 163, 175, 0.15); color: #9ca3af; border: 1px solid rgba(156, 163, 175, 0.25); }
-        
-        .header-right {
-            display: flex;
-            align-items: center;
-            gap: 20px;
-        }
-        
-        .pkg-versions {
-            display: flex;
-            flex-direction: column;
-            align-items: flex-end;
-            gap: 6px;
-            font-family: 'Outfit', sans-serif;
-        }
-        
-        .version-installed {
-            font-size: 13px;
-            color: var(--text-main);
-            font-weight: 600;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-        
-        .version-installed .label {
-            font-size: 11px;
-            color: var(--text-muted);
-            font-weight: 400;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-        
-        .version-chips {
-            display: flex;
-            flex-direction: column;
-            align-items: flex-end;
-            gap: 4px;
-        }
-        
-        .v-chip {
-            font-size: 11px;
-            padding: 3px 8px;
-            border-radius: 6px;
-            font-weight: 600;
-            display: inline-flex;
-            align-items: center;
-            gap: 4px;
-            transition: all 0.2s ease;
-        }
-        
-        .v-chip-ok {
-            background-color: rgba(16, 185, 129, 0.1);
-            border: 1px solid rgba(16, 185, 129, 0.2);
-            color: #34d399;
-        }
-        
-        .v-chip-safe {
-            background-color: rgba(14, 165, 233, 0.1);
-            border: 1px solid rgba(14, 165, 233, 0.2);
-            color: #38bdf8;
-        }
-        
-        .v-chip-major {
-            background-color: rgba(245, 158, 11, 0.1);
-            border: 1px solid rgba(245, 158, 11, 0.2);
-            color: #fbbf24;
-        }
-        
-        .chevron {
-            color: var(--text-muted);
-            transition: transform 0.2s ease;
-        }
-        
-        /* Details Expanded */
-        .card-details {
-            display: none;
-            padding: 20px;
-            background-color: #0d131f;
-            border-top: 1px solid var(--border-color);
-        }
-        
-        .required-by-section {
-            font-size: 12px;
-            color: var(--text-muted);
-            background-color: var(--card-bg);
-            border: 1px solid var(--border-color);
-            padding: 8px 12px;
-            border-radius: 6px;
-            margin-bottom: 15px;
-            display: inline-block;
-        }
-        
-        .error-section {
-            color: #f87171;
-            font-size: 13px;
-            background-color: rgba(220, 38, 38, 0.1);
-            border: 1px solid rgba(220, 38, 38, 0.3);
-            padding: 10px 14px;
-            border-radius: 6px;
-            margin-bottom: 15px;
-        }
-        
-        .section-title {
-            font-size: 12px;
-            font-weight: 700;
-            color: var(--text-muted);
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            margin: 15px 0 10px 0;
-        }
-        
-        /* Vulnerability item */
-        .vuln-item {
-            background-color: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-left: 3px solid var(--error);
-            border-radius: 8px;
-            padding: 12px 15px;
-            margin-bottom: 12px;
-        }
-        
-        .vuln-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 6px;
-        }
-        
-        .vuln-id {
-            font-weight: 700;
-            font-size: 14px;
-            color: #fca5a5;
-        }
-        
-        .sev-badge {
-            font-size: 10px;
-            font-weight: 700;
-            padding: 2px 6px;
-            border-radius: 4px;
-            text-transform: uppercase;
-            display: inline-block;
-        }
-        
-        .sev-malicious { background-color: #7f1d1d; color: #fee2e2; border: 1px solid #ef4444; font-weight: 800; }
-        .sev-critical { background-color: #ef4444; color: white; }
-        .sev-high { background-color: #f97316; color: white; }
-        .sev-medium { background-color: #eab308; color: black; }
-        .sev-low { background-color: #0ea5e9; color: white; }
-        .sev-unknown { background-color: #374151; color: white; }
-        
-        .vuln-summary {
-            font-size: 13.5px;
-            color: var(--text-main);
-            margin-bottom: 8px;
-            line-height: 1.4;
-        }
-        
-        .vuln-details {
-            font-family: monospace;
-            font-size: 11px;
-            background-color: var(--bg-color);
-            padding: 10px;
-            border-radius: 6px;
-            border: 1px solid var(--border-color);
-            overflow-x: auto;
-            color: var(--text-muted);
-            margin: 0;
-            white-space: pre-wrap;
-        }
-        
-        /* Suppressed item */
-        .suppressed-item {
-            background-color: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-left: 3px solid var(--muted);
-            border-radius: 8px;
-            padding: 12px 15px;
-            margin-bottom: 12px;
-        }
-        
-        .suppressed-item .vuln-id {
-            color: var(--text-muted);
-        }
-        
-        .suppressed-label {
-            font-size: 10px;
-            font-weight: 700;
-            background-color: var(--muted);
-            color: var(--text-main);
-            padding: 2px 6px;
-            border-radius: 4px;
-            text-transform: uppercase;
-        }
-        
-        .suppressed-reason {
-            font-size: 12.5px;
-            background-color: var(--bg-color);
-            border: 1px solid var(--border-color);
-            padding: 8px 12px;
-            border-radius: 6px;
-            margin-top: 8px;
-            color: #94a3b8;
-        }
-        
-        /* Notes & Warnings inline section */
-        .notes-warnings-section {
-            background-color: rgba(245, 158, 11, 0.05);
-            border: 1px solid rgba(245, 158, 11, 0.25);
-            border-left: 4px solid var(--warning);
-            border-radius: 8px;
-            padding: 12px 15px;
-            margin-bottom: 15px;
-        }
-        
-        .section-title-inline {
-            font-size: 11px;
-            font-weight: 700;
-            color: var(--warning);
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            margin-bottom: 8px;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-        
-        .section-title-inline svg {
-            stroke: var(--warning);
-            fill: none;
-        }
-        
-        .notes-warnings-body {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
-        
-        .note-warning-item {
-            display: flex;
-            align-items: flex-start;
-            gap: 8px;
-            font-size: 13px;
-            line-height: 1.45;
-            color: var(--text-main);
-        }
-        
-        .note-warning-icon {
-            flex-shrink: 0;
-            font-size: 14px;
-        }
-        
-        /* Changelog & Migration buttons */
-        .changelog-btn {
-            display: inline-flex;
-            align-items: center;
-            background-color: var(--border-color);
-            color: var(--text-main);
-            border: 1px solid var(--border-color);
-            padding: 5px 12px;
-            border-radius: 6px;
-            font-size: 11px;
-            font-weight: 600;
-            text-decoration: none;
-            margin-right: 8px;
-            transition: all 0.2s ease;
-        }
-        .changelog-btn:hover {
-            background-color: var(--primary);
-            color: #0b0f19;
-            border-color: var(--primary);
-        }
-
-        /* Modal backdrop */
-        .modal-backdrop {
-            display: none;
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background-color: rgba(0, 0, 0, 0.7);
-            z-index: 1000;
-            backdrop-filter: blur(4px);
-            transition: opacity 0.3s ease;
-        }
-        
-        /* Modal box */
-        .remediation-modal {
-            display: none;
-            position: fixed;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%) scale(0.9);
-            width: 90%;
-            max-width: 950px;
-            max-height: 85vh;
-            background-color: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 16px;
-            z-index: 1001;
-            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
-            overflow: hidden;
-            transition: transform 0.3s ease, opacity 0.3s ease;
-            opacity: 0;
-        }
-        
-        .remediation-modal.active, .modal-backdrop.active {
-            display: block;
-            opacity: 1;
-        }
-        
-        .remediation-modal.active {
-            transform: translate(-50%, -50%) scale(1);
-            display: flex;
-            flex-direction: column;
-        }
-        
-        .modal-header {
-            padding: 20px 24px;
-            border-bottom: 1px solid var(--border-color);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            background-color: #161e2e;
-        }
-        
-        .modal-header h3 {
-            margin: 0;
-            font-size: 18px;
-            font-weight: 700;
-            color: var(--primary);
-        }
-        
-        .modal-close {
-            background: none;
-            border: none;
-            color: var(--text-muted);
-            font-size: 24px;
-            cursor: pointer;
-            line-height: 1;
-            padding: 0;
-        }
-        
-        .modal-close:hover {
-            color: var(--text-main);
-        }
-        
-        .modal-body {
-            padding: 24px;
-            overflow-y: auto;
-            flex-grow: 1;
-        }
-        
-        .modal-tabs {
-            display: none;
-            gap: 8px;
-            margin-bottom: 20px;
-            border-bottom: 1px solid var(--border-color);
-            padding-bottom: 1px;
-        }
-        
-        .modal-tab {
-            background: none;
-            border: none;
-            color: var(--text-muted);
-            padding: 8px 16px;
-            cursor: pointer;
-            font-size: 13px;
-            font-weight: 600;
-            border-radius: 6px 6px 0 0;
-            border-bottom: 2px solid transparent;
-            transition: all 0.2s ease;
-        }
-        
-        .modal-tab:hover {
-            color: var(--text-main);
-            background-color: var(--card-hover);
-        }
-        
-        .modal-tab.active {
-            color: var(--primary);
-            border-bottom-color: var(--primary);
-        }
-
-        .modal-strategy-tab {
-            background-color: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            padding: 8px 14px;
-            font-size: 13px;
-            font-weight: 600;
-            color: var(--text-muted);
-            cursor: pointer;
-            transition: all 0.2s ease;
-        }
-        .modal-strategy-tab:hover {
-            color: var(--text-main);
-            border-color: var(--primary);
-        }
-        .modal-strategy-tab.active {
-            background-color: rgba(56, 189, 248, 0.15);
-            color: var(--primary);
-            border-color: var(--primary);
-        }
-
-        .modal-level-tab {
-            background-color: #1e293b;
-            border: 1px solid var(--border-color);
-            border-radius: 6px;
-            padding: 6px 12px;
-            font-size: 12px;
-            font-weight: 600;
-            color: var(--text-muted);
-            cursor: pointer;
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            transition: all 0.2s ease;
-        }
-        .modal-level-tab:hover {
-            color: var(--text-main);
-            border-color: var(--primary);
-        }
-        .modal-level-tab.active {
-            background-color: var(--card-bg);
-            color: #ffffff;
-            border-color: var(--primary);
-            box-shadow: 0 0 0 1px var(--primary);
-        }
-        
-        .modal-info-bar {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            background-color: #1e293b;
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            padding: 10px 16px;
-            font-family: monospace;
-            font-size: 14px;
-            margin-bottom: 20px;
-            color: #e2e8f0;
-        }
-        
-        .modal-diff-container {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 20px;
-        }
-        
-        @media (max-width: 768px) {
-            .modal-diff-container {
-                grid-template-columns: 1fr;
-            }
-        }
-        
-        .diff-box {
-            background-color: #0b0f19;
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            overflow: hidden;
-        }
-        
-        .diff-box-title {
-            padding: 10px 16px;
-            border-bottom: 1px solid var(--border-color);
-            font-size: 12px;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            background-color: #111827;
-        }
-        
-        .diff-box-title.current {
-            color: var(--error);
-            border-left: 3px solid var(--error);
-        }
-        
-        .diff-box-title.suggested {
-            color: var(--success);
-            border-left: 3px solid var(--success);
-        }
-        
-        .diff-code {
-            padding: 16px 0;
-            margin: 0;
-            font-family: 'Consolas', 'Courier New', Courier, monospace;
-            font-size: 13px;
-            line-height: 1.5;
-            overflow-x: auto;
-            white-space: pre;
-        }
-        
-        .diff-line {
-            display: flex;
-            width: 100%;
-            min-width: max-content;
-            box-sizing: border-box;
-            padding: 0 16px;
-        }
-        
-        .diff-line-num {
-            flex-shrink: 0;
-            width: 58px;
-            text-align: right;
-            padding-right: 12px;
-            color: var(--text-muted);
-            user-select: none;
-            border-right: 1px solid var(--border-color);
-            margin-right: 12px;
-            font-size: 11px;
-            box-sizing: border-box;
-        }
-        
-        .diff-line-content {
-            flex-grow: 1;
-        }
-        
-        .diff-line.removed {
-            background-color: rgba(239, 68, 68, 0.15);
-        }
-        
-        .diff-line.added {
-            background-color: rgba(16, 185, 129, 0.15);
-        }
-        
-        .diff-remove-chunk {
-            background-color: rgba(239, 68, 68, 0.4);
-            text-decoration: line-through;
-            padding: 1px 3px;
-            border-radius: 3px;
-        }
-        
-        .diff-add-chunk {
-            background-color: rgba(16, 185, 129, 0.4);
-            padding: 1px 3px;
-            border-radius: 3px;
-        }
-        
-        .btn-remediation {
-            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
-            border: none;
-            color: white;
-            font-weight: 600;
-            padding: 8px 16px;
-            font-size: 12px;
-            border-radius: 6px;
-            cursor: pointer;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 6px;
-            line-height: 1;
-            transition: filter 0.2s ease;
-        }
-        
-        .btn-remediation:hover {
-            filter: brightness(1.1);
-        }
-        
-        .btn-ai-prompt {
-            background: linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%);
-            border: none;
-            color: white;
-            font-weight: 600;
-            padding: 8px 16px;
-            font-size: 12px;
-            border-radius: 6px;
-            cursor: pointer;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 6px;
-            line-height: 1;
-            transition: filter 0.2s ease;
-            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
-        }
-        
-        .btn-ai-prompt:hover {
-            filter: brightness(1.15);
-        }
-        
-        .changelog-section, .remediation-section {
-            margin-top: 12px;
-            border-top: 1px solid var(--border-color);
-            padding-top: 10px;
-            margin-bottom: 12px;
-        }
-        
-        .card-details > .changelog-section:first-child,
-        .card-details > .remediation-section:first-child {
-            border-top: none;
-            padding-top: 0;
-            margin-top: 0;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <header>
-            <div>
-                <h1 style="display: flex; align-items: center; gap: 10px;">
-                    <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="var(--primary)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0; filter: drop-shadow(0 2px 8px rgba(56, 189, 248, 0.3));">
-                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
-                    </svg>
-                    <span>Kevlar CheckDeps <span style="font-size: 13px; font-weight: normal; color: var(--text-muted); margin-left: 6px;">v${VERSION}</span></span>
-                </h1>
-                <div style="font-size: 14px; color: var(--text-muted); margin-top: 4px;">Dependency Status & Security Audit</div>
-                <div style="font-size: 12px; margin-top: 6px;"><a href="https://github.com/brunoevn/kevlar-checkdeps" target="_blank" style="color: var(--primary); text-decoration: none;">https://github.com/brunoevn/kevlar-checkdeps</a></div>
-            </div>
-            <div class="meta-info">
-                <div>Report Generated: <strong>${scan_date}</strong></div>
-                <div>Ecosystem: <strong>${project_title}</strong></div>
-                ${project_path_header_html}
-            </div>
-        </header>
-        
-        <div class="dashboard-grid">
-            <!-- Stats -->
-            <div class="stats-grid">
-                <div class="stat-card primary">
-                    <div class="stat-val">${total}</div>
-                    <div class="stat-lbl">Checked</div>
-                </div>
-                <div class="stat-card malicious">
-                    <div class="stat-val">☠️ ${malicious}</div>
-                    <div class="stat-lbl">Malicious</div>
-                </div>
-                <div class="stat-card error">
-                    <div class="stat-val">${total_vulns}</div>
-                    <div class="stat-lbl">Vulnerable</div>
-                </div>
-                <div class="stat-card error" style="background-color: rgba(239, 68, 68, 0.05);">
-                    <div class="stat-val">${errors}</div>
-                    <div class="stat-lbl">Errors</div>
-                </div>
-                <div class="stat-card success">
-                    <div class="stat-val">${up_to_date}</div>
-                    <div class="stat-lbl">Up-to-date</div>
-                </div>
-                <div class="stat-card warning">
-                    <div class="stat-val">${outdated}</div>
-                    <div class="stat-lbl">Outdated</div>
-                </div>
-                <div class="stat-card depr">
-                    <div class="stat-val">${deprecated}</div>
-                    <div class="stat-lbl">Deprecated</div>
-                </div>
-                <div class="stat-card muted">
-                    <div class="stat-val">${suppressed_vulns}</div>
-                    <div class="stat-lbl">Suppressed</div>
-                </div>
-            </div>
-            
-            <!-- SVG Bar Chart -->
-            <div>
-                ${svg_chart}
-            </div>
-        </div>
-        
-        <!-- Controls -->
-        <div class="controls-placeholder">
-            <div class="controls-toolbar">
-                <!-- Top Row: Search + Main Views Segmented Control -->
-                <div class="controls-row primary-row">
-                    <div class="search-box">
-                        <svg class="search-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-                        <input type="text" id="searchInput" placeholder="Search packages by name... (Press / to focus)" oninput="onSearchInput()">
-                        <kbd class="search-kbd" id="searchKbd">/</kbd>
-                        <button id="clearSearch" style="display: none;" onclick="clearSearchInput()">&times;</button>
-                    </div>
-                    
-                    <div class="segmented-control">
-                        <button class="filter-btn active" data-cat="all" onclick="setCategory('all', event)">All</button>
-                        
-                        <div class="filter-group">
-                            <button class="filter-btn" data-cat="vulnerable" onclick="setCategory('vulnerable', event)">
-                                Vulnerable <span class="chevron-inline">▼</span>
-                            </button>
-                            <div class="filter-dropdown" id="dropdown-vulnerable">
-                                <div class="dropdown-row">
-                                    <label><input type="checkbox" value="malicious" checked onchange="filterPackages()"> <span class="dot mal-dot"></span> Malicious Code</label>
-                                    <span class="row-actions">
-                                        <span class="action-btn" onclick="selectOnly(event, 'malicious')">only</span>
-                                        <span class="action-separator">/</span>
-                                        <span class="action-btn" onclick="selectAll(event)">all</span>
-                                    </span>
-                                </div>
-                                <div class="dropdown-row">
-                                    <label><input type="checkbox" value="critical" checked onchange="filterPackages()"> <span class="dot crit-dot"></span> Critical</label>
-                                    <span class="row-actions">
-                                        <span class="action-btn" onclick="selectOnly(event, 'critical')">only</span>
-                                        <span class="action-separator">/</span>
-                                        <span class="action-btn" onclick="selectAll(event)">all</span>
-                                    </span>
-                                </div>
-                                <div class="dropdown-row">
-                                    <label><input type="checkbox" value="high" checked onchange="filterPackages()"> <span class="dot high-dot"></span> High</label>
-                                    <span class="row-actions">
-                                        <span class="action-btn" onclick="selectOnly(event, 'high')">only</span>
-                                        <span class="action-separator">/</span>
-                                        <span class="action-btn" onclick="selectAll(event)">all</span>
-                                    </span>
-                                </div>
-                                <div class="dropdown-row">
-                                    <label><input type="checkbox" value="medium" checked onchange="filterPackages()"> <span class="dot med-dot"></span> Medium</label>
-                                    <span class="row-actions">
-                                        <span class="action-btn" onclick="selectOnly(event, 'medium')">only</span>
-                                        <span class="action-separator">/</span>
-                                        <span class="action-btn" onclick="selectAll(event)">all</span>
-                                    </span>
-                                </div>
-                                <div class="dropdown-row">
-                                    <label><input type="checkbox" value="low" checked onchange="filterPackages()"> <span class="dot low-dot"></span> Low</label>
-                                    <span class="row-actions">
-                                        <span class="action-btn" onclick="selectOnly(event, 'low')">only</span>
-                                        <span class="action-separator">/</span>
-                                        <span class="action-btn" onclick="selectAll(event)">all</span>
-                                    </span>
-                                </div>
-                                <div class="dropdown-row">
-                                    <label><input type="checkbox" value="unknown" checked onchange="filterPackages()"> <span class="dot unkn-dot"></span> Unknown</label>
-                                    <span class="row-actions">
-                                        <span class="action-btn" onclick="selectOnly(event, 'unknown')">only</span>
-                                        <span class="action-separator">/</span>
-                                        <span class="action-btn" onclick="selectAll(event)">all</span>
-                                    </span>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <div class="filter-group">
-                            <button class="filter-btn" data-cat="outdated" onclick="setCategory('outdated', event)">
-                                Outdated <span class="chevron-inline">▼</span>
-                            </button>
-                            <div class="filter-dropdown" id="dropdown-outdated">
-                                <div class="dropdown-row">
-                                    <label><input type="checkbox" value="major" checked onchange="filterPackages()"> Major Update</label>
-                                    <span class="row-actions">
-                                        <span class="action-btn" onclick="selectOnly(event, 'major')">only</span>
-                                        <span class="action-separator">/</span>
-                                        <span class="action-btn" onclick="selectAll(event)">all</span>
-                                    </span>
-                                </div>
-                                <div class="dropdown-row">
-                                    <label><input type="checkbox" value="minor" checked onchange="filterPackages()"> Minor Update</label>
-                                    <span class="row-actions">
-                                        <span class="action-btn" onclick="selectOnly(event, 'minor')">only</span>
-                                        <span class="action-separator">/</span>
-                                        <span class="action-btn" onclick="selectAll(event)">all</span>
-                                    </span>
-                                </div>
-                                <div class="dropdown-row">
-                                    <label><input type="checkbox" value="patch" checked onchange="filterPackages()"> Patch Update</label>
-                                    <span class="row-actions">
-                                        <span class="action-btn" onclick="selectOnly(event, 'patch')">only</span>
-                                        <span class="action-separator">/</span>
-                                        <span class="action-btn" onclick="selectAll(event)">all</span>
-                                    </span>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <button class="filter-btn" data-cat="clean" onclick="setCategory('clean', event)">Clean</button>
-                    </div>
-                </div>
-                
-                <!-- Bottom Row: Alerts + Dimensions + Reset -->
-                <div class="controls-row secondary-row">
-                    <div class="secondary-filters-group">
-                        <span class="facet-label">Alerts:</span>
-                        <button class="filter-btn btn-facet" data-cat="error" onclick="setCategory('error', event)">Errors</button>
-                        <button class="filter-btn btn-facet" data-cat="deprecated" onclick="setCategory('deprecated', event)">Deprecated</button>
-                        <button class="filter-btn btn-facet" data-cat="suppressed" onclick="setCategory('suppressed', event)">Suppressed</button>
-                    </div>
-                    
-                    <div class="filter-divider"></div>
-                    
-                    <div class="secondary-filters-group">
-                        <span class="facet-label">Dimensions:</span>
-                        <div class="filter-group">
-                            <button class="filter-btn btn-facet" data-cat="scope" onclick="setCategory('scope', event)">
-                                Scope <span class="chevron-inline">▼</span>
-                            </button>
-                            <div class="filter-dropdown" id="dropdown-scope">
-                                <div class="dropdown-row">
-                                    <label><input type="checkbox" value="direct" checked onchange="filterPackages()"> Direct</label>
-                                    <span class="row-actions">
-                                        <span class="action-btn" onclick="selectOnly(event, 'direct')">only</span>
-                                        <span class="action-separator">/</span>
-                                        <span class="action-btn" onclick="selectAll(event)">all</span>
-                                    </span>
-                                </div>
-                                <div class="dropdown-row">
-                                    <label><input type="checkbox" value="dev" checked onchange="filterPackages()"> Dev</label>
-                                    <span class="row-actions">
-                                        <span class="action-btn" onclick="selectOnly(event, 'dev')">only</span>
-                                        <span class="action-separator">/</span>
-                                        <span class="action-btn" onclick="selectAll(event)">all</span>
-                                    </span>
-                                </div>
-                                <div class="dropdown-row">
-                                    <label><input type="checkbox" value="transitive" checked onchange="filterPackages()"> Transitive</label>
-                                    <span class="row-actions">
-                                        <span class="action-btn" onclick="selectOnly(event, 'transitive')">only</span>
-                                        <span class="action-separator">/</span>
-                                        <span class="action-btn" onclick="selectAll(event)">all</span>
-                                    </span>
-                                </div>
-                                <div class="dropdown-row">
-                                    <label><input type="checkbox" value="engine" checked onchange="filterPackages()"> Engine</label>
-                                    <span class="row-actions">
-                                        <span class="action-btn" onclick="selectOnly(event, 'engine')">only</span>
-                                        <span class="action-separator">/</span>
-                                        <span class="action-btn" onclick="selectAll(event)">all</span>
-                                    </span>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        ${technology_dropdown_html}
-                    </div>
-                    
-                    <div style="margin-left: auto;">
-                        <button class="btn-reset-filters" onclick="resetAllFilters()" title="Reset search and filters">
-                            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 5px; vertical-align: middle;"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>Reset
-                        </button>
-                    </div>
-                </div>
-            </div>
-        </div>
-        
-        <!-- Packages List -->
-        <div class="packages-list" id="packageContainer">
-            <!-- Dynamic cards are rendered here -->
-        </div>
-    </div>
-    
-    <script>
-        const KEVLAR_REPORT_PACKAGES = ${packages_json_data};
-        const KEVLAR_VULNERABILITY_STORE = ${vulns_json_data};
-        const SHOW_PROJECT_GLOBALLY = ${show_project_globally};
-        const UNIQUE_PROJECT_PATHS = ${unique_project_paths};
-        const UNIQUE_TECHNOLOGIES = ${unique_technologies};
-        const VULS_ENABLED = ${vuls_enabled};
-        
-        function renderPackages() {
-            const container = document.getElementById('packageContainer');
-            if (!container) return;
-            
-            let htmlBuffer = '';
-            
-            KEVLAR_REPORT_PACKAGES.forEach((r, i) => {
-                const name = r.name;
-                const declared = r.declared;
-                const installed = r.installed;
-                const latest = r.latest;
-                const status = r.status;
-                const is_deprecated = r.deprecated;
-                const error = r.error;
-                const dep_type = r.dep_type;
-                
-                const name_esc = escapeHtml(name);
-                const declared_esc = declared ? escapeHtml(declared) : "";
-                const installed_esc = escapeHtml(installed);
-                const latest_esc = escapeHtml(latest);
-                const status_esc = escapeHtml(status);
-                const error_esc = escapeHtml(error || '');
-                const dep_type_esc = escapeHtml(dep_type);
-                
-                let project_badge = "";
-                if (!SHOW_PROJECT_GLOBALLY && r.project_path) {
-                    const proj_path = r.project_path;
-                    const tech_val = r.technology || "";
-                    project_badge = '<span class="badge badge-project" style="font-family: monospace; text-transform: none; margin-left: 4px;">' + escapeHtml(proj_path) + ' [' + escapeHtml(tech_val) + ']</span>';
-                }
-                
-                let tech_badge = "";
-                if (UNIQUE_TECHNOLOGIES.length > 1 && r.technology) {
-                    const tech_name = r.technology;
-                    const tech_val = tech_name.toLowerCase();
-                    tech_badge = '<span class="badge badge-tech badge-tech-' + escapeHtml(tech_val) + '">' + escapeHtml(tech_name) + '</span>';
-                }
-                
-                let badges = [];
-                if (error) {
-                    badges.push('<span class="badge badge-error">Error</span>');
-                } else if (status.includes("major")) {
-                    badges.push('<span class="badge badge-error">Major Update</span>');
-                } else if (status === "minor") {
-                    badges.push('<span class="badge badge-warning">Minor Update</span>');
-                } else if (status === "patch") {
-                    badges.push('<span class="badge badge-info">Patch Update</span>');
-                } else if (status === "local") {
-                    badges.push('<span class="badge badge-info">Verify Local</span>');
-                }
-                
-                if (is_deprecated) {
-                    badges.push('<span class="badge badge-depr">Deprecated</span>');
-                }
-                
-                if (r.missing_checksum) {
-                    badges.push('<span class="badge badge-warning">No Checksum</span>');
-                } else if (r.weak_checksum) {
-                    badges.push('<span class="badge badge-warning">Weak Checksum</span>');
-                }
-                
-                if (r.mismatch_checksum) {
-                    badges.push('<span class="badge badge-error">Checksum Mismatch</span>');
-                }
-                
-                const pkg_vulns = r.vulnerabilities || [];
-                const pkg_suppressed_vulns = r.suppressed_vulnerabilities || [];
-                const is_vulnerable = pkg_vulns.length > 0;
-                const is_suppressed = pkg_suppressed_vulns.length > 0;
-                
-                let severities_list = [];
-                pkg_vulns.forEach(vid => {
-                    const v = KEVLAR_VULNERABILITY_STORE[vid];
-                    if (v && v.severity) {
-                        severities_list.push(getSeverityLevel(v.severity));
-                    }
-                });
-                const data_severities = severities_list.join(',');
-                
-                if (is_vulnerable) {
-                    let mal_cnt = 0, c_cnt = 0, h_cnt = 0, m_cnt = 0, l_cnt = 0, u_cnt = 0;
-                    pkg_vulns.forEach(vid => {
-                        const v = KEVLAR_VULNERABILITY_STORE[vid];
-                        if (v) {
-                            const level = getSeverityLevel(v.severity || (v.id && v.id.startsWith("MAL-") ? "malicious" : ""));
-                            if (level === "malicious") mal_cnt++;
-                            else if (level === "critical") c_cnt++;
-                            else if (level === "high") h_cnt++;
-                            else if (level === "medium") m_cnt++;
-                            else if (level === "low") l_cnt++;
-                            else u_cnt++;
-                        }
-                    });
-                    
-                    let pills = [];
-                    if (mal_cnt > 0) pills.push('<span class="sev-pill sev-mal" title="Malicious Code">☠️ ' + mal_cnt + '</span>');
-                    if (c_cnt > 0) pills.push('<span class="sev-pill sev-c">' + c_cnt + ' C</span>');
-                    if (h_cnt > 0) pills.push('<span class="sev-pill sev-h">' + h_cnt + ' H</span>');
-                    if (m_cnt > 0) pills.push('<span class="sev-pill sev-m">' + m_cnt + ' M</span>');
-                    if (l_cnt > 0) pills.push('<span class="sev-pill sev-l">' + l_cnt + ' L</span>');
-                    if (u_cnt > 0) pills.push('<span class="sev-pill sev-u">' + u_cnt + ' U</span>');
-
-                    let pills_html = '';
-                    if (pills.length > 0) {
-                        pills_html = '<span class="vuln-severity-pills-inner">' + pills.join('') + '</span>';
-                    }
-
-                    const total_v = pkg_vulns.length;
-                    const badge_html = 
-                        '<span class="badge badge-vuln-stats" title="' + total_v + ' Vulnerabilities">' +
-                            '<svg class="icon-shield" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px; vertical-align: middle;"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>' +
-                            '<span>' + total_v + ' vuls</span>' +
-                            pills_html +
-                        '</span>';
-                    badges.push(badge_html);
-                }
-                
-                if (is_suppressed) {
-                    badges.push('<span class="badge badge-muted">' + pkg_suppressed_vulns.length + ' Suppressed</span>');
-                }
-                
-                let vuln_details_html = '';
-                if (is_vulnerable && VULS_ENABLED) {
-                    vuln_details_html += '<div class="section-title">Active Vulnerabilities</div>';
-                    
-                    const severity_order = {
-                        "malicious": 5,
-                        "critical": 4,
-                        "high": 3,
-                        "medium": 2,
-                        "low": 1,
-                        "unknown": 0
-                    };
-                    
-                    const sorted_vulns = [...pkg_vulns].sort((a_id, b_id) => {
-                        const a = KEVLAR_VULNERABILITY_STORE[a_id];
-                        const b = KEVLAR_VULNERABILITY_STORE[b_id];
-                        const a_sev = a ? getSeverityLevel(a.severity || (a_id.startsWith("MAL-") ? "malicious" : "")) : "unknown";
-                        const b_sev = b ? getSeverityLevel(b.severity || (b_id.startsWith("MAL-") ? "malicious" : "")) : "unknown";
-                        return (severity_order[b_sev] || 0) - (severity_order[a_sev] || 0);
-                    });
-                    
-                    sorted_vulns.forEach(vid => {
-                        const v = KEVLAR_VULNERABILITY_STORE[vid];
-                        if (!v) return;
-                        
-                        const severity = v.severity;
-                        const summary = v.summary;
-                        const details = v.details || "";
-                        
-                        const vid_esc = escapeHtml(vid);
-                        const severity_esc = escapeHtml(severity);
-                        const summary_esc = escapeHtml(summary);
-                        const details_esc = escapeHtml(details);
-                        
-                        const sev_lower = getSeverityLevel(severity || (vid.startsWith("MAL-") ? "malicious" : ""));
-                        const sev_badge_class = 'sev-' + escapeHtml(sev_lower);
-                        
-                        let cvss_html = '';
-                        // severity is now always a normalized text label (critical/high/medium/low/unknown)
-                        const label_text = sev_lower === "malicious" ? "☠️ MALICIOUS CODE" : (sev_lower || 'unknown').toUpperCase();
-                        const sev_badge_html = '<span class="sev-badge ' + sev_badge_class + '">' + escapeHtml(label_text) + '</span>';
-                        
-                        vuln_details_html += 
-                            '<div class="vuln-item">' +
-                                '<div class="vuln-header">' +
-                                    '<span class="vuln-id">' + vid_esc + '</span>' +
-                                '</div>' +
-                                cvss_html +
-                                '<div style="margin-top: 4px; margin-bottom: 8px;">' +
-                                    sev_badge_html +
-                                '</div>' +
-                                '<div class="vuln-summary">' + summary_esc + '</div>' +
-                                (details ? '<pre class="vuln-details">' + details_esc + '</pre>' : '') +
-                            '</div>';
-                    });
-                }
-                
-                let suppressed_details_html = '';
-                if (is_suppressed) {
-                    suppressed_details_html += '<div class="section-title">Suppressed Vulnerabilities (Ignored)</div>';
-                    pkg_suppressed_vulns.forEach(sv => {
-                        const vid = sv.id;
-                        const v_info = KEVLAR_VULNERABILITY_STORE[vid] || {};
-                        const summary = v_info.summary || sv.summary || "";
-                        const reason = sv.suppressed_reason || "No reason provided";
-                        const justification = sv.justification || "N/A";
-                        const expires_at = sv.expires_at || "N/A";
-                        const approved_by = sv.approved_by || "";
-                        
-                        const vid_esc = escapeHtml(vid);
-                        const summary_esc = escapeHtml(summary);
-                        const reason_esc = escapeHtml(reason);
-                        const justification_esc = escapeHtml(justification);
-                        const expires_at_esc = escapeHtml(expires_at);
-                        const approved_by_esc = escapeHtml(approved_by);
-                        
-                        const approved_by_html = approved_by_esc ? '<div style="margin-top: 4px; font-size: 12.5px; padding: 0 4px; color: var(--text-muted);"><strong>Approved By:</strong> ' + approved_by_esc + '</div>' : '';
-                        
-                        suppressed_details_html += 
-                            '<div class="suppressed-item">' +
-                                '<div class="vuln-header">' +
-                                    '<span class="vuln-id">' + vid_esc + '</span>' +
-                                    '<span class="suppressed-label">Ignored</span>' +
-                                '</div>' +
-                                '<div class="vuln-summary">' + summary_esc + '</div>' +
-                                '<div class="suppressed-reason"><strong>Reason:</strong> ' + reason_esc + '</div>' +
-                                '<div style="margin-top: 6px; font-size: 12.5px; padding: 0 4px; color: var(--text-muted);">' +
-                                    '<strong>Justification:</strong> ' + justification_esc +
-                                '</div>' +
-                                '<div style="margin-top: 4px; font-size: 12.5px; padding: 0 4px; color: var(--text-muted);">' +
-                                    '<strong>Expires At:</strong> ' + expires_at_esc +
-                                '</div>' +
-                                approved_by_html +
-                            '</div>';
-                    });
-                }
-                
-                let required_by_html = '';
-                const required_by = r.required_by || [];
-                const is_direct = (dep_type !== 'Transitive');
-                if (required_by.length > 0 && !is_direct) {
-                    const required_by_esc = required_by.map(rb => escapeHtml(rb));
-                    required_by_html = 
-                        '<div class="required-by-section">' +
-                            '<strong>Required by:</strong> ' + required_by_esc.join(', ') +
-                        '</div>';
-                }
-                
-                let notes_warnings_html = '';
-                let notes_warnings_list = [];
-                if (is_deprecated) {
-                    const msg = typeof is_deprecated === 'string' ? is_deprecated : "This package has been deprecated.";
-                    notes_warnings_list.push('<div class="note-warning-item"><span class="note-warning-icon">🚫</span> <div><strong>Deprecation Warning:</strong> ' + escapeHtml(msg) + '</div></div>');
-                }
-                if (error) {
-                    notes_warnings_list.push('<div class="note-warning-item"><span class="note-warning-icon">❌</span> <div><strong>Error:</strong> ' + error_esc + '</div></div>');
-                }
-                if (r.missing_checksum) {
-                    notes_warnings_list.push('<div class="note-warning-item"><span class="note-warning-icon">⚠️</span> <div><strong>Security Warning:</strong> Missing integrity checksum in lockfile</div></div>');
-                } else if (r.weak_checksum) {
-                    notes_warnings_list.push('<div class="note-warning-item"><span class="note-warning-icon">⚠️</span> <div><strong>Security Warning:</strong> Weak checksum (SHA-1) in lockfile</div></div>');
-                }
-                if (r.mismatch_checksum) {
-                    notes_warnings_list.push('<div class="note-warning-item"><span class="note-warning-icon">❌</span> <div><strong>INTEGRITY MISMATCH:</strong> Lockfile checksum does not match official registry checksum!</div></div>');
-                }
-                if (r.excluded_warning) {
-                    notes_warnings_list.push('<div class="note-warning-item"><span class="note-warning-icon">⚠️</span> <div><strong>Excluded Version Alert:</strong> ' + escapeHtml(r.excluded_warning) + '</div></div>');
-                }
-                if (r.manifest_missing || (r.remediation && r.remediation.manifest_missing)) {
-                    notes_warnings_list.push(
-                        '<div class="note-warning-item"><span class="note-warning-icon">⚠️</span> ' +
-                        '<div><strong>Manifest / Lockfile Discrepancy (Lockfile Drift):</strong> Package is resolved in lockfile as direct dependency but is missing from <code>package.json</code>.<br/>' +
-                        '<span style="font-size: 11.5px; opacity: 0.9; display: block; margin-top: 4px;"><strong>Potential causes to analyze:</strong><br/>' +
-                        '• <em>Lockfile Drift:</em> <code>package.json</code> was edited or merged manually without running <code>npm install</code>.<br/>' +
-                        '• <em>Branch Switch:</em> Switched Git branches without updating dependencies.<br/>' +
-                        '• <em>Tool Conflict:</em> Mixed usage of <code>npm</code> and <code>pnpm</code> in workspace.</span>' +
-                        '</div></div>'
-                    );
-                }
-                
-                if (notes_warnings_list.length > 0) {
-                    notes_warnings_html = 
-                        '<div class="notes-warnings-section">' +
-                            '<div class="section-title-inline">' +
-                                '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>' +
-                                ' Notes & Warnings' +
-                            '</div>' +
-                            '<div class="notes-warnings-body">' +
-                                notes_warnings_list.join('') +
-                            '</div>' +
-                        '</div>';
-                }
-                
-                let ai_button_html = '';
-                const requires_attention = (['major', 'minor', 'patch', 'minor-major', 'patch-major'].includes(status)) || is_deprecated || is_vulnerable;
-                if (requires_attention) {
-                    ai_button_html = '<button class="btn-ai-prompt" onclick="copiarPromptRemediacionByIndex(' + i + '); event.stopPropagation();">📋 AI Prompt</button>';
-                }
-                
-                let remediation_button_html = '';
-                const has_remediation = r.remediation && (r.remediation.safe || r.remediation.major || (r.remediation.options && r.remediation.options.length));
-                if (has_remediation) {
-                    remediation_button_html = 
-                        '<div class="remediation-section">' +
-                            '<div style="font-size: 12px; font-weight: 700; color: var(--success); margin-bottom: 8px;">Remediation Support:</div>' +
-                            '<div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">' +
-                                '<button class="btn-remediation" onclick="openRemediationModalByIndex(' + i + '); event.stopPropagation();">' +
-                                    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;">' +
-                                        '<path d="M12 20h9"></path>' +
-                                        '<path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>' +
-                                    '</svg>' +
-                                    'Show suggested change' +
-                                '</button>' +
-                                ai_button_html +
-                            '</div>' +
-                        '</div>';
-                } else if (ai_button_html) {
-                    remediation_button_html = 
-                        '<div class="remediation-section">' +
-                            '<div style="font-size: 12px; font-weight: 700; color: var(--success); margin-bottom: 8px;">Remediation Support:</div>' +
-                            ai_button_html +
-                        '</div>';
-                }
-                
-                let changelog_html = '';
-                if (status === "major" || status === "minor-major" || status === "patch-major") {
-                    const compare_url = r.compare_url;
-                    const releases_url = r.releases_url;
-                    let buttons = [];
-                    if (compare_url) {
-                        buttons.push('<a href="' + escapeHtml(compare_url) + '" target="_blank" class="changelog-btn">Compare Diff</a>');
-                    }
-                    if (releases_url) {
-                        buttons.push('<a href="' + escapeHtml(releases_url) + '" target="_blank" class="changelog-btn">Release Notes</a>');
-                    }
-                    if (buttons.length > 0) {
-                        changelog_html = 
-                            '<div class="changelog-section">' +
-                                '<div style="font-size: 12px; font-weight: 700; color: var(--warning); margin-bottom: 8px;">Analysis & Migration Links:</div>' +
-                                buttons.join('') +
-                            '</div>';
-                    }
-                }
-                
-                htmlBuffer += 
-                    '<div class="package-card" ' +
-                         'data-name="' + name_esc + '" ' +
-                         'data-status="' + status_esc + '" ' +
-                         'data-vulnerable="' + (is_vulnerable ? 'true' : 'false') + '" ' +
-                         'data-severities="' + escapeHtml(data_severities) + '" ' +
-                         'data-suppressed="' + (is_suppressed ? 'true' : 'false') + '" ' +
-                         'data-deprecated="' + (is_deprecated ? 'true' : 'false') + '" ' +
-                         'data-error="' + (error ? 'true' : 'false') + '" ' +
-                         'data-deptype="' + dep_type_esc.toLowerCase() + '" ' +
-                         'data-technology="' + escapeHtml((r.technology || '').toLowerCase()) + '" ' +
-                         'id="pkg-' + i + '">' +
-                        '<div class="card-header" onclick="toggleDetails(' + i + ')">' +
-                            '<div class="header-left">' +
-                                '<div class="pkg-title">' +
-                                    '<span class="pkg-name">' + name_esc + '</span>' +
-                                    '<span class="pkg-type-badge">' + dep_type_esc + '</span>' + tech_badge + project_badge +
-                                '</div>' +
-                                '<div class="pkg-badges">' +
-                                    badges.join(' ') +
-                                '</div>' +
-                            '</div>' +
-                            '<div class="header-right">' +
-                                (function() {
-                                    const installed = r.installed;
-                                    const latest_sm = r.latest_same_major || installed;
-                                    const latest_abs = r.latest_absolute || installed;
-                                    
-                                    const clean_ver_str = (val) => (val ? val.toString().replace(/^v/i, '') : '');
-                                    const latest_sm_clean = clean_ver_str(latest_sm);
-                                    const latest_abs_clean = clean_ver_str(latest_abs);
-                                    
-                                    let declared_html = '';
-                                    if (declared_esc) {
-                                        declared_html = '<div class="version-installed" style="margin-bottom: 2px;">' +
-                                            '<span class="label">Declared:</span>' +
-                                            '<span>' + declared_esc + '</span>' +
-                                        '</div>';
-                                    }
-                                    
-                                    let versions_html = '<div class="pkg-versions">' +
-                                        declared_html +
-                                        '<div class="version-installed">' +
-                                            '<span class="label">Installed:</span>' +
-                                            '<span>' + escapeHtml(installed || 'N/A') + '</span>' +
-                                        '</div>' +
-                                        '<div class="version-chips">';
-                                    
-                                    if (status === 'up-to-date' || status === 'local') {
-                                        versions_html += 
-                                            '<span class="v-chip v-chip-ok">' +
-                                                '<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 3px;"><polyline points="20 6 9 17 4 12"></polyline></svg>' +
-                                                'Up to date' +
-                                            '</span>';
-                                    } else {
-                                        // Safe update available (minor or patch)
-                                        if ((status.includes('minor') || status.includes('patch')) && latest_sm !== installed) {
-                                            versions_html += 
-                                                '<span class="v-chip v-chip-safe" title="Safe update within the same major version">' +
-                                                    '<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 3px;"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>' +
-                                                    'Safe: v' + escapeHtml(latest_sm_clean) +
-                                                '</span>';
-                                        }
-                                        // Major update available (requires upgrade to new major)
-                                        if (status.includes('major') && latest_abs !== installed) {
-                                            versions_html += 
-                                                '<span class="v-chip v-chip-major" title="Major update with potential breaking changes">' +
-                                                    '<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 3px;"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path></svg>' +
-                                                    'Major: v' + escapeHtml(latest_abs_clean) +
-                                                '</span>';
-                                        }
-                                    }
-                                    
-                                    versions_html += '</div></div>';
-                                    return versions_html;
-                                })() +
-                                '<svg class="chevron" id="chevron-' + i + '" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
-                                    '<polyline points="6 9 12 15 18 9"></polyline>' +
-                                    '</svg>' +
-                            '</div>' +
-                        '</div>' +
-                        '<div class="card-details" id="detail-' + i + '" style="display: none;">' +
-                            required_by_html +
-                            notes_warnings_html +
-                            changelog_html +
-                            remediation_button_html +
-                            vuln_details_html +
-                            suppressed_details_html +
-                        '</div>' +
-                    '</div>';
-            });
-            
-            container.innerHTML = htmlBuffer;
-        }
-        
-        function getSeverityLevel(severity) {
-            if (!severity) return 'unknown';
-            const s = severity.toLowerCase();
-            if (s.includes('malicious')) return 'malicious';
-            if (s.includes('critical')) return 'critical';
-            if (s.includes('high')) return 'high';
-            if (s.includes('medium')) return 'medium';
-            if (s.includes('low')) return 'low';
-            return 'unknown';
-        }
-        
-        function openRemediationModalByIndex(i) {
-            const r = KEVLAR_REPORT_PACKAGES[i];
-            if (r && r.remediation) {
-                openRemediationModal(r.remediation);
-            }
-        }
-        
-        function escapeJsString(str) {
-            if (!str) return '';
-            return str.toString()
-                      .replace(/\\\\/g, '\\\\\\\\')
-                      .replace(/'/g, "\\\\'")
-                      .replace(/"/g, '\\\\"')
-                      .replace(/\\n/g, '\\\\n')
-                      .replace(/\\r/g, '\\\\r');
-        }
-        
-        function copiarPromptRemediacionByIndex(i) {
-            const r = KEVLAR_REPORT_PACKAGES[i];
-            const name = r.name;
-            const status = r.status;
-            const is_deprecated = r.deprecated;
-            const pkg_vulns = r.vulnerabilities || [];
-            const is_vulnerable = pkg_vulns.length > 0;
-            const required_by = r.required_by || [];
-            
-            let alert_types = [];
-            let details_parts = [];
-            if (is_vulnerable) {
-                alert_types.push("Vulnerability");
-                let vuln_strings = [];
-                pkg_vulns.forEach(vid => {
-                    const v = KEVLAR_VULNERABILITY_STORE[vid];
-                    if (v) {
-                        let str = vid + ': ' + (v.summary || '');
-                        if (v.details) {
-                            let det = String(v.details).trim();
-                            if (det.length > 1000) {
-                                det = det.substring(0, 1000) + '...';
-                            }
-                            str += '\\\\n   Description/Details: ' + det;
-                        }
-                        vuln_strings.push(str);
-                    }
-                });
-                details_parts.push("Vulnerabilities:\\\\n" + vuln_strings.join('\\\\n\\\\n'));
-            }
-            if (is_deprecated) {
-                alert_types.push("Deprecation");
-                const dep_msg = typeof is_deprecated === 'string' ? is_deprecated : "This package has been deprecated.";
-                details_parts.push("Deprecation Warning: " + dep_msg);
-            }
-            if (['major', 'minor', 'patch', 'minor-major', 'patch-major'].includes(status)) {
-                alert_types.push("Outdated (" + status.charAt(0).toUpperCase() + status.slice(1) + ")");
-                details_parts.push("Outdated: " + status.toUpperCase() + " update available (Latest: " + r.latest + ")");
-            }
-            
-            const alert_type = alert_types.join(', ');
-            const details_str = details_parts.join(' | ');
-            
-            const tech_val = r.technology || "";
-            const tech_map = {
-                "npm": "Node.js / npm",
-                "pip": "Python / pip",
-                "nuget": ".NET / NuGet",
-                "php": "PHP / Composer",
-                "maven": "Java / Maven",
-                "go": "Go",
-                "rust": "Rust / Crates.io",
-                "ruby": "Ruby / RubyGems",
-                "gradle": "Java / Gradle",
-                "android": "Android / Gradle"
-            };
-            const ecosystem_name = tech_map[tech_val.toLowerCase()] || tech_val || "Software Development";
-            const curr_ver = r.installed ? r.installed : r.declared;
-            const latest_sm = r.latest_same_major || r.latest;
-            const latest_abs = r.latest_absolute || r.latest;
-            
-            const proj_path = r.project_path || "";
-            const proj_name = proj_path ? proj_path.split(/[\\/]/).pop() || "Project" : "Project";
-            const required_by_str = required_by.join(', ');
-            
-            let manifest_file = "";
-            let manifest_line = "";
-            if (r.remediation) {
-                const rem = r.remediation.safe || r.remediation.major;
-                if (rem) {
-                    manifest_file = rem.manifest_path || "";
-                    manifest_line = rem.line_number || "";
-                }
-            }
-            
-            copiarPromptRemediacion(name, ecosystem_name, curr_ver, latest_sm, latest_abs, alert_type, details_str, proj_name, proj_path, r.dep_type, required_by_str, manifest_file, manifest_line);
-        }
-        
-        // Floating toolbar logic on scroll
-        document.addEventListener('DOMContentLoaded', () => {
-            renderPackages();
-            const toolbar = document.querySelector('.controls-toolbar');
-            const placeholder = document.querySelector('.controls-placeholder');
-            const pkgList = document.querySelector('.packages-list');
-            
-            function updatePlaceholderHeight() {
-                if (placeholder && toolbar) {
-                    if (toolbar.classList.contains('floating')) {
-                        placeholder.style.height = toolbar.offsetHeight + 'px';
-                    } else {
-                        placeholder.style.height = 'auto';
-                    }
-                }
-            }
-            
-            // Set initial height
-            updatePlaceholderHeight();
-            window.addEventListener('resize', updatePlaceholderHeight);
-            
-            // Observe changes in toolbar height (e.g. wrap on screen resize)
-            if (window.ResizeObserver) {
-                const ro = new ResizeObserver(() => {
-                    updatePlaceholderHeight();
-                });
-                ro.observe(toolbar);
-            }
-            
-            window.addEventListener('scroll', () => {
-                if (!toolbar || !placeholder) return;
-                
-                const placeholderRect = placeholder.getBoundingClientRect();
-                
-                if (placeholderRect.top < 20) {
-                    if (!toolbar.classList.contains('floating')) {
-                        placeholder.style.height = toolbar.offsetHeight + 'px';
-                        toolbar.classList.add('floating');
-                        pkgList.classList.add('floating-active');
-                    }
-                } else {
-                    if (toolbar.classList.contains('floating')) {
-                        toolbar.classList.remove('floating');
-                        pkgList.classList.remove('floating-active');
-                        placeholder.style.height = 'auto';
-                    }
-                }
-            });
-
-            // Disable empty filter buttons on page load
-            const cards = document.querySelectorAll('.package-card');
-            const hasVulnerable = Array.from(cards).some(card => card.getAttribute('data-vulnerable') === 'true');
-            const hasOutdated = Array.from(cards).some(card => ['major', 'minor', 'patch'].includes(card.getAttribute('data-status')));
-            const hasDeprecated = Array.from(cards).some(card => card.getAttribute('data-deprecated') === 'true');
-            const hasSuppressed = Array.from(cards).some(card => card.getAttribute('data-suppressed') === 'true');
-            const hasErrors = Array.from(cards).some(card => card.getAttribute('data-error') === 'true');
-            const hasClean = Array.from(cards).some(card => 
-                card.getAttribute('data-status') === 'up-to-date' && 
-                card.getAttribute('data-vulnerable') === 'false' && 
-                card.getAttribute('data-deprecated') === 'false' && 
-                card.getAttribute('data-error') === 'false'
-            );
-            
-            if (!hasVulnerable) {
-                const btn = document.querySelector('.filter-btn[data-cat="vulnerable"]');
-                if (btn) btn.disabled = true;
-            }
-            if (!hasOutdated) {
-                const btn = document.querySelector('.filter-btn[data-cat="outdated"]');
-                if (btn) btn.disabled = true;
-            }
-            if (!hasDeprecated) {
-                const btn = document.querySelector('.filter-btn[data-cat="deprecated"]');
-                if (btn) btn.disabled = true;
-            }
-            if (!hasSuppressed) {
-                const btn = document.querySelector('.filter-btn[data-cat="suppressed"]');
-                if (btn) btn.disabled = true;
-            }
-            if (!hasErrors) {
-                const btn = document.querySelector('.filter-btn[data-cat="error"]');
-                if (btn) btn.disabled = true;
-            }
-            if (!hasClean) {
-                const btn = document.querySelector('.filter-btn[data-cat="clean"]');
-                if (btn) btn.disabled = true;
-            }
-        });
-
-        let activeCategories = ['all'];
-        
-        function selectOnly(event, value) {
-            event.preventDefault();
-            event.stopPropagation();
-            const dropdown = event.target.closest('.filter-dropdown');
-            if (dropdown) {
-                dropdown.querySelectorAll('input[type="checkbox"]').forEach(cb => {
-                    cb.checked = (cb.value === value);
-                });
-                filterPackages();
-            }
-        }
-        
-        function selectAll(event) {
-            event.preventDefault();
-            event.stopPropagation();
-            const dropdown = event.target.closest('.filter-dropdown');
-            if (dropdown) {
-                dropdown.querySelectorAll('input[type="checkbox"]').forEach(cb => {
-                    cb.checked = true;
-                });
-                filterPackages();
-            }
-        }
-        
-        function setCategory(cat, event) {
-            if (event) {
-                event.stopPropagation();
-            }
-            
-            if (cat === 'all') {
-                activeCategories = ['all'];
-                document.querySelectorAll('.filter-dropdown').forEach(dd => dd.classList.remove('show'));
-                document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('dropdown-open'));
-                document.querySelectorAll('.filter-dropdown input[type="checkbox"]').forEach(cb => {
-                    cb.checked = true;
-                });
-            } else if (cat === 'clean') {
-                activeCategories = ['clean'];
-                document.querySelectorAll('.filter-dropdown').forEach(dd => dd.classList.remove('show'));
-                document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('dropdown-open'));
-                document.querySelectorAll('.filter-dropdown input[type="checkbox"]').forEach(cb => {
-                    cb.checked = true;
-                });
-            } else {
-                activeCategories = activeCategories.filter(c => c !== 'all' && c !== 'clean');
-                
-                if (activeCategories.includes(cat)) {
-                    activeCategories = activeCategories.filter(c => c !== cat);
-                    const dd = document.getElementById(`dropdown-$${cat}`);
-                    if (dd) {
-                        dd.classList.remove('show');
-                        const group = dd.closest('.filter-group');
-                        if (group) {
-                            const btn = group.querySelector('.filter-btn');
-                            if (btn) btn.classList.remove('dropdown-open');
-                        }
-                    }
-                } else {
-                    activeCategories.push(cat);
-                    document.querySelectorAll('.filter-dropdown').forEach(dd => dd.classList.remove('show'));
-                    document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('dropdown-open'));
-                    
-                    const dd = document.getElementById(`dropdown-$${cat}`);
-                    if (dd) {
-                        dd.classList.add('show');
-                        const group = dd.closest('.filter-group');
-                        if (group) {
-                            const btn = group.querySelector('.filter-btn');
-                            if (btn) btn.classList.add('dropdown-open');
-                        }
-                    }
-                }
-                
-                if (activeCategories.length === 0) {
-                    activeCategories = ['all'];
-                }
-            }
-            
-            updateFilterButtonStates();
-            filterPackages();
-        }
-        
-        function updateFilterButtonStates() {
-            document.querySelectorAll('.filter-btn').forEach(btn => {
-                const cat = btn.getAttribute('data-cat');
-                if (activeCategories.includes(cat)) {
-                    btn.classList.add('active');
-                } else {
-                    btn.classList.remove('active');
-                }
-            });
-        }
-        
-        document.addEventListener('click', function(event) {
-            if (!event.target.closest('.filter-group')) {
-                document.querySelectorAll('.filter-dropdown').forEach(dd => dd.classList.remove('show'));
-                document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('dropdown-open'));
-            }
-        });
-        
-        document.addEventListener('keydown', function(e) {
-            if ((e.key === '/' || (e.ctrlKey && e.key.toLowerCase() === 'k')) && document.activeElement !== document.getElementById('searchInput')) {
-                e.preventDefault();
-                const input = document.getElementById('searchInput');
-                if (input) {
-                    input.focus();
-                    input.select();
-                }
-            }
-        });
-        
-        function resetAllFilters() {
-            clearSearchInput();
-            setCategory('all');
-        }
-
-        function onSearchInput() {
-            const input = document.getElementById('searchInput');
-            const clearBtn = document.getElementById('clearSearch');
-            const kbdHint = document.getElementById('searchKbd');
-            if (input.value) {
-                clearBtn.style.display = 'block';
-                if (kbdHint) kbdHint.style.display = 'none';
-            } else {
-                clearBtn.style.display = 'none';
-                if (kbdHint) kbdHint.style.display = 'block';
-            }
-            filterPackages();
-        }
-        
-        function clearSearchInput() {
-            const input = document.getElementById('searchInput');
-            const kbdHint = document.getElementById('searchKbd');
-            input.value = '';
-            document.getElementById('clearSearch').style.display = 'none';
-            if (kbdHint) kbdHint.style.display = 'block';
-            filterPackages();
-            input.focus();
-        }
-        
-        function filterPackages() {
-            const searchVal = document.getElementById('searchInput').value.toLowerCase();
-            const cards = document.querySelectorAll('.package-card');
-            
-            const checkedSeverities = Array.from(document.querySelectorAll('#dropdown-vulnerable input[type="checkbox"]:checked')).map(cb => cb.value);
-            const checkedOutdated = Array.from(document.querySelectorAll('#dropdown-outdated input[type="checkbox"]:checked')).map(cb => cb.value);
-            const checkedScopes = Array.from(document.querySelectorAll('#dropdown-scope input[type="checkbox"]:checked')).map(cb => cb.value);
-            const checkedTechs = Array.from(document.querySelectorAll('#dropdown-technology input[type="checkbox"]:checked')).map(cb => cb.value);
-            
-            cards.forEach(card => {
-                const name = card.getAttribute('data-name').toLowerCase();
-                const status = card.getAttribute('data-status');
-                const isVulnerable = card.getAttribute('data-vulnerable') === 'true';
-                const cardSeverities = (card.getAttribute('data-severities') || '').split(',').filter(s => s);
-                const isSuppressed = card.getAttribute('data-suppressed') === 'true';
-                const isDeprecated = card.getAttribute('data-deprecated') === 'true';
-                const depType = card.getAttribute('data-deptype');
-                const hasError = card.getAttribute('data-error') === 'true';
-                const cardTech = card.getAttribute('data-technology') || '';
-                
-                let matchesCategory = false;
-                if (activeCategories.includes('all')) {
-                    matchesCategory = true;
-                } else {
-                    let matchesAll = true;
-                    for (const cat of activeCategories) {
-                        if (cat === 'vulnerable') {
-                            const checkSeverities = cardSeverities.length > 0 ? cardSeverities : ['unknown'];
-                            if (!(isVulnerable && checkSeverities.some(s => checkedSeverities.includes(s)))) {
-                                matchesAll = false;
-                                break;
-                            }
-                        } else if (cat === 'outdated') {
-                            const statusParts = status.split('-');
-                            if (!statusParts.some(p => checkedOutdated.includes(p)) && !(checkedOutdated.includes('major') && isDeprecated)) {
-                                matchesAll = false;
-                                break;
-                            }
-                        } else if (cat === 'scope') {
-                            if (!checkedScopes.includes(depType)) {
-                                matchesAll = false;
-                                break;
-                            }
-                        } else if (cat === 'technology') {
-                            if (!checkedTechs.includes(cardTech)) {
-                                matchesAll = false;
-                                break;
-                            }
-                        } else if (cat === 'deprecated') {
-                            if (!isDeprecated) {
-                                matchesAll = false;
-                                break;
-                            }
-                        } else if (cat === 'suppressed') {
-                            if (!isSuppressed) {
-                                matchesAll = false;
-                                break;
-                            }
-                        } else if (cat === 'error') {
-                            if (!hasError) {
-                                matchesAll = false;
-                                break;
-                            }
-                        } else if (cat === 'clean') {
-                            if (!((status === 'up-to-date' || status === 'local') && !isVulnerable && !isDeprecated && !hasError)) {
-                                matchesAll = false;
-                                break;
-                            }
-                        }
-                    }
-                    matchesCategory = matchesAll;
-                }
-                
-                const matchesSearch = name.includes(searchVal);
-                
-                if (matchesCategory && matchesSearch) {
-                    card.style.display = 'block';
-                } else {
-                    card.style.display = 'none';
-                }
-            });
-        }
-        
-        function toggleDetails(idx) {
-            const detailEl = document.getElementById('detail-' + idx);
-            const chevronEl = document.getElementById('chevron-' + idx);
-            if (detailEl.style.display === 'none' || !detailEl.style.display) {
-                detailEl.style.display = 'block';
-                chevronEl.style.transform = 'rotate(180deg)';
-            } else {
-                detailEl.style.display = 'none';
-                chevronEl.style.transform = 'rotate(0deg)';
-            }
-        }
-
-        function escapeHtml(text) {
-            if (typeof text !== 'string') return '';
-            return text.replace(/&/g, '&amp;')
-                       .replace(/</g, '&lt;')
-                       .replace(/>/g, '&gt;')
-                       .replace(/"/g, '&quot;')
-                       .replace(/'/g, '&#039;');
-        }
-        
-        let activeRemediationInfo = null;
-        let activeStrategyIndex = 0;
-        let activeOptionIndex = 0;
-
-        function renderDiff(diff) {
-            if (!diff) return;
-            
-            const currentContainer = document.getElementById('modal-current-code');
-            currentContainer.innerHTML = '';
-            diff.current_code.forEach(line => {
-                const lineDiv = document.createElement('div');
-                lineDiv.className = 'diff-line' + (line.is_changed ? ' removed' : '');
-                
-                const numSpan = document.createElement('span');
-                numSpan.className = 'diff-line-num';
-                numSpan.textContent = line.line_num;
-                
-                const contentSpan = document.createElement('span');
-                contentSpan.className = 'diff-line-content';
-                contentSpan.innerHTML = line.html;
-                
-                lineDiv.appendChild(numSpan);
-                lineDiv.appendChild(contentSpan);
-                currentContainer.appendChild(lineDiv);
-            });
-            
-            const suggestedContainer = document.getElementById('modal-suggested-code');
-            suggestedContainer.innerHTML = '';
-            diff.suggested_code.forEach(line => {
-                const lineDiv = document.createElement('div');
-                lineDiv.className = 'diff-line' + (line.is_changed ? ' added' : '');
-                
-                const numSpan = document.createElement('span');
-                numSpan.className = 'diff-line-num';
-                numSpan.textContent = line.line_num;
-                
-                const contentSpan = document.createElement('span');
-                contentSpan.className = 'diff-line-content';
-                contentSpan.innerHTML = line.html;
-                
-                lineDiv.appendChild(numSpan);
-                lineDiv.appendChild(contentSpan);
-                suggestedContainer.appendChild(lineDiv);
-            });
-        }
-
-        function renderRemediationModalContent(info) {
-            if (!info) return;
-
-            const strategyContainer = document.getElementById('modal-strategy-tabs-container');
-            const levelContainer = document.getElementById('modal-level-tabs-container');
-            const legacyTabsContainer = document.getElementById('modal-tabs-container');
-
-            if (info.strategies && info.strategies.length > 0) {
-                legacyTabsContainer.style.display = 'none';
-                
-                if (activeStrategyIndex >= info.strategies.length) {
-                    activeStrategyIndex = 0;
-                }
-                const st = info.strategies[activeStrategyIndex];
-
-                // Render Strategy Tabs
-                if (info.strategies.length > 1) {
-                    strategyContainer.style.display = 'flex';
-                    strategyContainer.innerHTML = info.strategies.map((s, idx) => {
-                        const activeCls = (idx === activeStrategyIndex) ? ' active' : '';
-                        const star = s.is_recommended ? ' ★' : '';
-                        return '<button class="modal-strategy-tab' + activeCls + '" onclick="switchRemediationStrategy(' + idx + ')">' + escapeHtml(s.title) + star + '</button>';
-                    }).join('');
-                } else {
-                    strategyContainer.style.display = 'none';
-                }
-
-                // Render Level Options for active strategy
-                const options = st.options || [];
-                if (activeOptionIndex >= options.length) {
-                    activeOptionIndex = 0;
-                }
-
-                if (options.length > 0) {
-                    levelContainer.style.display = 'flex';
-                    levelContainer.innerHTML = options.map((opt, oIdx) => {
-                        const activeCls = (oIdx === activeOptionIndex) ? ' active' : '';
-                        const bCls = opt.badge_class || 'v-chip-safe';
-                        const badgeHtml = '<span class="v-chip ' + bCls + '" style="font-size: 10px; padding: 2px 6px; margin-right: 4px;">' + escapeHtml(opt.badge || opt.id) + '</span>';
-                        return '<button class="modal-level-tab' + activeCls + '" onclick="switchRemediationLevel(' + oIdx + ')">' + badgeHtml + ' ' + escapeHtml(opt.label) + '</button>';
-                    }).join('');
-
-                    const activeOpt = options[activeOptionIndex];
-                    if (activeOpt && activeOpt.diff) {
-                        const filepathEl = document.getElementById('modal-filepath');
-                        if (filepathEl) {
-                            filepathEl.textContent = activeOpt.diff.display_path || (activeOpt.diff.manifest_path + ':' + activeOpt.diff.line_number);
-                        }
-                        renderDiff(activeOpt.diff);
-                    }
-                } else {
-                    levelContainer.style.display = 'none';
-                }
-            } else if (info.options && info.options.length > 0) {
-                strategyContainer.style.display = 'none';
-                levelContainer.style.display = 'none';
-                legacyTabsContainer.style.display = 'flex';
-                
-                const firstValid = info.options[0].diff;
-                if (firstValid) {
-                    document.getElementById('modal-filepath').textContent = firstValid.display_path || (firstValid.manifest_path + ':' + firstValid.line_number);
-                }
-                
-                legacyTabsContainer.innerHTML = '';
-                info.options.forEach((opt, idx) => {
-                    const btn = document.createElement('button');
-                    btn.className = 'modal-tab' + (idx === 0 ? ' active' : '');
-                    btn.textContent = opt.label;
-                    btn.onclick = function() {
-                        const allTabs = legacyTabsContainer.querySelectorAll('.modal-tab');
-                        allTabs.forEach(t => t.classList.remove('active'));
-                        btn.classList.add('active');
-                        renderDiff(opt.diff);
-                    };
-                    legacyTabsContainer.appendChild(btn);
-                });
-                renderDiff(info.options[0].diff);
-            } else {
-                strategyContainer.style.display = 'none';
-                levelContainer.style.display = 'none';
-                
-                const firstValid = info.safe || info.major;
-                if (firstValid) {
-                    document.getElementById('modal-filepath').textContent = firstValid.display_path || (firstValid.manifest_path + ':' + firstValid.line_number);
-                }
-                
-                if (info.safe && info.major) {
-                    legacyTabsContainer.innerHTML = '<button id="tab-safe" class="modal-tab active" onclick="switchRemediationTab(&quot;safe&quot;)">Safe Update</button>' +
-                                              '<button id="tab-major" class="modal-tab" onclick="switchRemediationTab(&quot;major&quot;)">Major Upgrade</button>';
-                    legacyTabsContainer.style.display = 'flex';
-                    switchRemediationTab('safe');
-                } else {
-                    legacyTabsContainer.style.display = 'none';
-                    if (info.safe) {
-                        renderDiff(info.safe);
-                    } else if (info.major) {
-                        renderDiff(info.major);
-                    }
-                }
-            }
-        }
-
-        function switchRemediationStrategy(idx) {
-            activeStrategyIndex = idx;
-            activeOptionIndex = 0;
-            renderRemediationModalContent(activeRemediationInfo);
-        }
-
-        function switchRemediationLevel(idx) {
-            activeOptionIndex = idx;
-            renderRemediationModalContent(activeRemediationInfo);
-        }
-
-        function switchRemediationTab(type) {
-            if (!activeRemediationInfo) return;
-            
-            const safeTab = document.getElementById('tab-safe');
-            const majorTab = document.getElementById('tab-major');
-            
-            if (type === 'safe') {
-                if (safeTab) safeTab.classList.add('active');
-                if (majorTab) majorTab.classList.remove('active');
-                renderDiff(activeRemediationInfo.safe);
-            } else {
-                if (majorTab) majorTab.classList.add('active');
-                if (safeTab) safeTab.classList.remove('active');
-                renderDiff(activeRemediationInfo.major);
-            }
-        }
-
-        function openRemediationModal(info) {
-            if (!info) return;
-            activeRemediationInfo = info;
-            activeStrategyIndex = 0;
-            activeOptionIndex = 0;
-            
-            renderRemediationModalContent(info);
-            
-            // Synchronize scrolling between current and suggested code views
-            const leftScroll = document.getElementById('modal-current-code');
-            const rightScroll = document.getElementById('modal-suggested-code');
-            if (leftScroll && rightScroll) {
-                leftScroll.scrollLeft = 0;
-                leftScroll.scrollTop = 0;
-                rightScroll.scrollLeft = 0;
-                rightScroll.scrollTop = 0;
-                
-                leftScroll.onscroll = function() {
-                    rightScroll.scrollLeft = leftScroll.scrollLeft;
-                    rightScroll.scrollTop = leftScroll.scrollTop;
-                };
-                rightScroll.onscroll = function() {
-                    leftScroll.scrollLeft = rightScroll.scrollLeft;
-                    leftScroll.scrollTop = rightScroll.scrollTop;
-                };
-            }
-
-            document.getElementById('remediation-modal').style.display = 'flex';
-            document.getElementById('modal-backdrop').style.display = 'block';
-            
-            setTimeout(() => {
-                document.getElementById('remediation-modal').classList.add('active');
-                document.getElementById('modal-backdrop').classList.add('active');
-            }, 10);
-        }
-        
-        function closeRemediationModal() {
-            const modal = document.getElementById('remediation-modal');
-            const backdrop = document.getElementById('modal-backdrop');
-            
-            modal.classList.remove('active');
-            backdrop.classList.remove('active');
-            
-            setTimeout(() => {
-                modal.style.display = 'none';
-                backdrop.style.display = 'none';
-            }, 300);
-        }
-        
-        function copiarPromptRemediacion(pkgName, ecosystem, currentVer, latestSameMajor, latestAbsolute, alertType, details, projName, projDir, depType, requiredBy, manifestFile, manifestLine) {
-            if (window.event) {
-                window.event.stopPropagation();
-            }
-            
-            function cleanV(v) {
-                if (!v) return '';
-                v = String(v).trim().toLowerCase();
-                if (v.startsWith('v')) v = v.slice(1);
-                return v.replace(/^[~^>=<!\\s]+/, '');
-            }
-
-            const currClean = cleanV(currentVer);
-            const latestSmClean = cleanV(latestSameMajor);
-            const latestAbsClean = cleanV(latestAbsolute);
-
-            let hasNewerVersion = false;
-            let targetText = "";
-            let tasksIntro = "";
-            
-            if (latestAbsClean && latestAbsClean !== currClean) {
-                hasNewerVersion = true;
-                if (latestSmClean && latestAbsClean && latestSmClean !== latestAbsClean && latestSmClean !== currClean) {
-                    targetText = `${latestSameMajor} or ${latestAbsolute}`;
-                    tasksIntro = `I want to update this package to version "${targetText}". Please perform the following tasks in a detailed and professional manner (taking into account the minor update to "${latestSameMajor}" vs the major update to "${latestAbsolute}" in your analysis):`;
-                } else {
-                    targetText = latestAbsolute;
-                    tasksIntro = `I want to update this package to version "${targetText}". Please perform the following tasks in a detailed and professional manner:`;
-                }
-            } else if (latestSmClean && latestSmClean !== currClean) {
-                hasNewerVersion = true;
-                targetText = latestSameMajor;
-                tasksIntro = `I want to update this package to version "${targetText}". Please perform the following tasks in a detailed and professional manner:`;
-            } else {
-                hasNewerVersion = false;
-                targetText = currentVer;
-                tasksIntro = `The package "${pkgName}" is currently on version "${currentVer}", which is the latest available version under this artifact/package coordinate, but security vulnerabilities or deprecation issues have been identified. Please perform the following tasks in a detailed and professional manner:`;
-            }
-            
-            let pkgDesc = `the package "${pkgName}"`;
-            if (depType === 'Transitive' && requiredBy) {
-                pkgDesc = `the transitive dependency package "${pkgName}" (which is required by ${requiredBy})`;
-            }
-            
-            let projectContext = "";
-            if (projName && projDir) {
-                projectContext = ` (name: ${projName} directory: ${projDir})`;
-            }
-            
-            let manifestContext = "";
-            if (manifestFile) {
-                manifestContext = `\nThe version is declared/configured in manifest file: "${manifestFile}"` + (manifestLine ? ` at line ${manifestLine}` : "");
-            }
-            
-            let taskList = "";
-            if (hasNewerVersion) {
-                taskList = `1. Critically analyze any potential 'Breaking Changes' or destructive impacts when upgrading from version "${currentVer}" to "${targetText}".
-2. Verify if the target version "${targetText}" safely resolves the issues and vulnerabilities described in the details above, or if a package migration to an alternative library (e.g., new groupId/artifactId) is advised in the advisory text.
-3. Provide a step-by-step action plan with the exact console commands and code/manifest updates to perform the upgrade or migration.
-4. Check if any other libraries or transitive dependencies will become obsolete, unused, or orphaned as a result of this upgrade, and suggest how to safely clean them up (e.g., pruning unused packages).`;
-            } else {
-                taskList = `1. Investigate if this package coordinate ("${pkgName}") is End-Of-Life (EOL), unmaintained, or deprecated, and determine if a migration to a replacement package/library (e.g., a successor library, new groupId/artifactId such as org.apache.logging.log4j:log4j-core for log4j, or alternative framework) is required or recommended.
-2. If a package migration is recommended (or mentioned in the advisory details above), provide the exact code/manifest changes to replace "${pkgName}" with the recommended replacement library.
-3. If no package migration is needed or available, provide step-by-step mitigation workarounds, code patches, or configuration changes to neutralize the vulnerabilities in version "${currentVer}".
-4. Check if any other libraries or transitive dependencies will become obsolete, unused, or orphaned as a result, and suggest how to safely clean them up.`;
-            }
-            
-            const promptTexto = `Act as a Senior AppSec Expert and Principal Software Engineer specialized in the ${ecosystem} ecosystem.
-
-I have ${pkgDesc} in my project${projectContext}, which is currently on version "${currentVer}".${manifestContext}
-An alert of type "${alertType}" has been detected.
-Detailed information/Associated alerts:
-${details}
-
-${tasksIntro}
-
-${taskList}`;
-
-            navigator.clipboard.writeText(promptTexto).then(() => {
-                let btn = null;
-                if (window.event) {
-                    btn = window.event.currentTarget || window.event.target;
-                }
-                if (!btn || btn.tagName !== 'BUTTON') {
-                    btn = document.activeElement;
-                }
-                if (btn && btn.tagName !== 'BUTTON') {
-                    btn = btn.closest('button');
-                }
-                if (btn) {
-                    const originalText = btn.innerHTML;
-                    btn.innerHTML = "Copied!";
-                    setTimeout(() => {
-                        btn.innerHTML = originalText;
-                    }, 2000);
-                }
-            }).catch(err => {
-                console.error('Failed to copy text to clipboard: ', err);
-                alert('Failed to copy to clipboard. Please check browser permissions.');
-            });
-        }
-    </script>
-    
-    <!-- Remediation Modal -->
-    <div id="modal-backdrop" class="modal-backdrop" onclick="closeRemediationModal()"></div>
-    <div id="remediation-modal" class="remediation-modal">
-        <div class="modal-header">
-            <h3>Remediation Recommendation</h3>
-            <button class="modal-close" onclick="closeRemediationModal()">&times;</button>
-        </div>
-        <div class="modal-body">
-            <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 6px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">Declaration Location</div>
-            <div class="modal-info-bar">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--primary); flex-shrink: 0; margin-right: 4px;">
-                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                    <polyline points="14 2 14 8 20 8"></polyline>
-                </svg>
-                <span id="modal-filepath"></span>
-            </div>
-            
-            <!-- Strategy & Level Tabs containers -->
-            <div id="modal-strategy-tabs-container" style="display: none; gap: 8px; margin-top: 14px; margin-bottom: 12px; flex-wrap: wrap;"></div>
-            <div id="modal-level-tabs-container" style="display: none; gap: 8px; margin-bottom: 16px; flex-wrap: wrap;"></div>
-            <div id="modal-tabs-container" class="modal-tabs" style="display: none;"></div>
-            
-            <div class="modal-diff-container">
-                <div class="diff-box">
-                    <div class="diff-box-title current">Current Code</div>
-                    <pre class="diff-code" id="modal-current-code"></pre>
-                </div>
-                <div class="diff-box">
-                    <div class="diff-box-title suggested">Suggested Change</div>
-                    <pre class="diff-code" id="modal-suggested-code"></pre>
-                </div>
-            </div>
-        </div>
-    </div>
-</body>
-</html>
-"""
+        # 2. Standalone / CI/CD fallback: decompress from embedded binary constant
+        cls._cached_template = gzip.decompress(
+            base64.b64decode(_HTML_TEMPLATE_GZIP_B64)
+        ).decode("utf-8")
+        return cls._cached_template
 
 
 def export_html_report(results, pkg_data, filepath, vuls_enabled=False):

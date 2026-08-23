@@ -8,6 +8,7 @@ htmlcov/
 
 # Generated reports
 *report*.html
+!assets/report_template.html
 *report*.json
 *report*.md
 *report*.sarif

@@ -3602,6 +3602,27 @@ class TestKevlar(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_html_report_template_provider_standalone_and_dev(self):
+        """Test HTMLReportTemplateProvider loads from assets in dev mode and falls back to compressed binary in standalone."""
+        from unittest.mock import patch
+
+        # Reset cache
+        kevlar.HTMLReportTemplateProvider._cached_template = None
+
+        # 1. Dev mode: reads template
+        template = kevlar.HTMLReportTemplateProvider.get_template()
+        self.assertIsNotNone(template)
+        self.assertTrue(template.startswith("<!DOCTYPE html>"))
+        self.assertIn("Dependency Status & Security Report", template)
+
+        # 2. Standalone fallback: when asset file does not exist
+        kevlar.HTMLReportTemplateProvider._cached_template = None
+        with patch("os.path.exists", return_value=False):
+            fallback_template = kevlar.HTMLReportTemplateProvider.get_template()
+            self.assertIsNotNone(fallback_template)
+            self.assertTrue(fallback_template.startswith("<!DOCTYPE html>"))
+            self.assertIn("Dependency Status & Security Report", fallback_template)
+
 
 if __name__ == "__main__":
     unittest.main()
