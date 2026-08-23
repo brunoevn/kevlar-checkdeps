@@ -9135,15 +9135,14 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
     indent = "    "
     line_to_add = ""
 
-    clean_target = str(target_ver).strip()
-    if not RE_OPERATOR_START.match(clean_target):
-        clean_target = f"^{clean_target}"
+    raw_ver = str(target_ver).strip()
+    clean_numeric = raw_ver.lstrip("^~>=<! v")
 
-    if tech == "npm" or tech == "php":
+    if tech in {"npm", "pnpm", "yarn"}:
+        clean_target = f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
         deps_match_idx = None
         dev_deps_match_idx = None
         root_open_idx = None
-
         for idx, line in enumerate(lines):
             if re.search(r'"dependencies"\s*:\s*\{', line):
                 deps_match_idx = idx
@@ -9162,9 +9161,39 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
         elif root_open_idx is not None:
             insert_line_idx = root_open_idx + 1
             line_to_add = f'{indent}"dependencies": {{\n{indent}  "{package_name}": "{clean_target}"\n{indent}}},'
+    elif tech == "php":
+        clean_target = f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
+        deps_match_idx = None
+        for idx, line in enumerate(lines):
+            if re.search(r'"require"\s*:\s*\{', line):
+                deps_match_idx = idx
+                break
+        if deps_match_idx is not None:
+            insert_line_idx = deps_match_idx + 1
+            line_to_add = f'{indent}"{package_name}": "{clean_target}",'
+        else:
+            insert_line_idx = len(lines)
+            line_to_add = f'{indent}"require": {{\n{indent}  "{package_name}": "{clean_target}"\n{indent}}},'
+    elif tech == "go":
+        go_ver = f"v{clean_numeric}" if not raw_ver.startswith("v") else raw_ver
+        go_ver = RE_OPERATOR_PREFIX.sub("", go_ver)
+        req_open_idx = None
+        req_close_idx = None
+        for idx, line in enumerate(lines):
+            if re.match(r"^\s*require\s*\(", line):
+                req_open_idx = idx
+            elif req_open_idx is not None and re.match(r"^\s*\)", line):
+                req_close_idx = idx
+                break
+        if req_close_idx is not None:
+            insert_line_idx = req_close_idx
+            line_to_add = f"\t{package_name} {go_ver}"
+        else:
+            insert_line_idx = len(lines)
+            line_to_add = f"require {package_name} {go_ver}"
     elif tech == "pip":
         insert_line_idx = len(lines)
-        line_to_add = f"{package_name}=={clean_target.lstrip('^~>=<!')}"
+        line_to_add = f"{package_name}>={clean_numeric}"
     elif tech == "rust":
         dep_sec_idx = None
         for idx, line in enumerate(lines):
@@ -9173,16 +9202,22 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
                 break
         if dep_sec_idx is not None:
             insert_line_idx = dep_sec_idx + 1
-            line_to_add = f'{package_name} = "{clean_target.lstrip("^~>=<!")}"'
+            line_to_add = f'{package_name} = "{clean_numeric}"'
         else:
             insert_line_idx = len(lines)
-            line_to_add = (
-                f'\n[dependencies]\n{package_name} = "{clean_target.lstrip("^~>=<!")}"'
-            )
-
-    if insert_line_idx is None:
+            line_to_add = f'\n[dependencies]\n{package_name} = "{clean_numeric}"'
+    elif tech == "ruby":
         insert_line_idx = len(lines)
-        line_to_add = f"{package_name}: {clean_target}"
+        line_to_add = f"gem '{package_name}', '~> {clean_numeric}'"
+    elif tech == "nuget":
+        insert_line_idx = len(lines)
+        if "Directory.Packages.props" in manifest_path:
+            line_to_add = f'  <PackageVersion Include="{package_name}" Version="{clean_numeric}" />'
+        else:
+            line_to_add = f'  <PackageReference Include="{package_name}" Version="{clean_numeric}" />'
+    else:
+        insert_line_idx = len(lines)
+        line_to_add = f"{package_name}: {clean_numeric}"
 
     start_ctx = max(0, insert_line_idx - 2)
     end_ctx = min(len(lines), insert_line_idx + 3)
@@ -9242,15 +9277,14 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
     if not lines:
         return None
 
-    clean_target = str(target_ver).strip()
-    if not RE_OPERATOR_START.match(clean_target):
-        clean_target = f"^{clean_target}"
-
+    raw_ver = str(target_ver).strip()
+    clean_numeric = raw_ver.lstrip("^~>=<! v")
     indent = "    "
     insert_line_idx = None
     line_to_add = ""
 
     if tech in {"npm", "pnpm"}:
+        clean_target = f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
         overrides_line_idx = None
         for idx, line in enumerate(lines):
             if re.search(r'"overrides"\s*:\s*\{', line):
@@ -9269,6 +9303,7 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
             insert_line_idx = (root_open_idx + 1) if root_open_idx is not None else 1
             line_to_add = f'{indent}"overrides": {{\n{indent}  "{package_name}": "{clean_target}"\n{indent}}},'
     elif tech == "yarn":
+        clean_target = f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
         resolutions_line_idx = None
         for idx, line in enumerate(lines):
             if re.search(r'"resolutions"\s*:\s*\{', line):
@@ -9285,6 +9320,23 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
                     break
             insert_line_idx = (root_open_idx + 1) if root_open_idx is not None else 1
             line_to_add = f'{indent}"resolutions": {{\n{indent}  "{package_name}": "{clean_target}"\n{indent}}},'
+    elif tech == "go":
+        go_ver = f"v{clean_numeric}" if not raw_ver.startswith("v") else raw_ver
+        go_ver = RE_OPERATOR_PREFIX.sub("", go_ver)
+        insert_line_idx = len(lines)
+        line_to_add = f"replace {package_name} => {package_name} {go_ver}"
+    elif tech == "rust":
+        patch_sec_idx = None
+        for idx, line in enumerate(lines):
+            if re.search(r"^\[patch\.crates-io\]", line.strip()):
+                patch_sec_idx = idx
+                break
+        if patch_sec_idx is not None:
+            insert_line_idx = patch_sec_idx + 1
+            line_to_add = f'{package_name} = "{clean_numeric}"'
+        else:
+            insert_line_idx = len(lines)
+            line_to_add = f'\n[patch.crates-io]\n{package_name} = "{clean_numeric}"'
     else:
         return generate_addition_remediation_diff(
             manifest_path, package_name, target_ver, tech
@@ -9316,6 +9368,16 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
         )
         suggested_block.append(
             {"line_num": line_num, "html": escaped_orig, "is_changed": False}
+        )
+
+    if insert_line_idx >= len(lines):
+        escaped_add = escape_html(line_to_add)
+        suggested_block.append(
+            {
+                "line_num": "+",
+                "html": f'<span class="diff-add-chunk">{escaped_add}</span>',
+                "is_changed": True,
+            }
         )
 
     return {
@@ -9451,7 +9513,7 @@ def _populate_direct_strategies(r, manifest_path, found_line_idx, name, declared
     if direct_options:
         return [{
             "id": "direct_upgrade",
-            "title": f"Update Direct Dependency ({name})",
+            "title": f"Update Dependency ({name})" if r.get("dep_type") == "Transitive" else f"Update Direct Dependency ({name})",
             "description": f"Updates '{name}' in manifest file.",
             "is_recommended": True,
             "options": direct_options,
@@ -9729,7 +9791,7 @@ def populate_remediation_recommendations(results, default_project_path):
                 r, manifest_path, found_line_idx, name, declared, tech, latest_patch, latest_sm, latest_abs
             ))
 
-        if dep_type == "Transitive":
+        if dep_type == "Transitive" and found_line_idx is None:
             strategies.extend(_populate_parent_strategies(r, results, manifest_path, lines, tech, name, _find_line_idx))
             strategies.extend(_populate_override_strategies(
                 manifest_path, name, tech, latest_patch, latest_sm, latest_abs, clean_installed, bool(strategies)

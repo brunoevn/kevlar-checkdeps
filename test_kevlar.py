@@ -3623,6 +3623,66 @@ class TestKevlar(unittest.TestCase):
             self.assertTrue(fallback_template.startswith("<!DOCTYPE html>"))
             self.assertIn("Dependency Status & Security Report", fallback_template)
 
+    def test_go_indirect_and_transitive_remediation_diff(self):
+        """Test Go indirect dependency remediation does not generate invalid syntax or broken force override."""
+        import tempfile
+        import shutil
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            go_mod_content = """module myapp
+
+go 1.21
+
+require (
+\tgithub.com/gin-gonic/gin v1.9.0
+\tgithub.com/charmbracelet/colorprofile v0.4.1 // indirect
+\tgolang.org/x/text v0.37.0 // indirect
+)
+"""
+            go_mod_path = os.path.join(temp_dir, "go.mod")
+            with open(go_mod_path, "w", encoding="utf-8") as f:
+                f.write(go_mod_content)
+
+            # 1. Test indirect dependency found in go.mod
+            results = [{
+                "name": "github.com/charmbracelet/colorprofile",
+                "declared": "v0.4.1",
+                "installed": "v0.4.1",
+                "latest": "v0.4.3",
+                "latest_same_major": "v0.4.3",
+                "latest_absolute": "v0.4.3",
+                "status": "patch",
+                "vulnerabilities": [],
+                "technology": "go",
+                "dep_type": "Transitive",
+                "project_path": temp_dir,
+            }]
+
+            kevlar.populate_remediation_recommendations(results, temp_dir)
+            rem = results[0].get("remediation")
+            self.assertIsNotNone(rem)
+            strategies = rem.get("strategies", [])
+            self.assertEqual(len(strategies), 1)
+            self.assertEqual(strategies[0]["id"], "direct_upgrade")
+            self.assertIn("Update Dependency", strategies[0]["title"])
+            self.assertNotIn("Force Transitive Override", [s["id"] for s in strategies])
+
+            # Check that diff replaces the exact line properly
+            safe_diff = rem.get("safe")
+            self.assertIsNotNone(safe_diff)
+            self.assertTrue(any("v0.4.3" in item["html"] for item in safe_diff.get("suggested_code", [])))
+            self.assertFalse(any("^" in item["html"] for item in safe_diff.get("suggested_code", [])))
+
+            # 2. Test Go transitive override when not in go.mod
+            override_diff = kevlar.generate_override_remediation_diff(
+                go_mod_path, "github.com/unknown/transitive", "v1.2.3", "go"
+            )
+            self.assertIsNotNone(override_diff)
+            self.assertTrue(any("replace github.com/unknown/transitive =&gt; github.com/unknown/transitive v1.2.3" in item["html"] for item in override_diff["suggested_code"]))
+        finally:
+            shutil.rmtree(temp_dir)
+
 
 if __name__ == "__main__":
     unittest.main()
