@@ -207,6 +207,11 @@ RE_GRADLE_MAP2 = re.compile(
     r'group\s*=\s*[\'"]([^\'"]+)[\'"]\s*,\s*name\s*=\s*[\'"]([^\'"]+)[\'"]\s*,\s*version\s*=\s*[\'"]([^\'"]+)[\'"]'
 )
 
+RE_CVSS4_SEV = re.compile(r"(CVSS:4\.[0-9a-zA-Z/:.]+)")
+RE_CVSS3_SEV = re.compile(r"(CVSS:3\.[0-9a-zA-Z/:.]+)")
+RE_CVSS2_SEV = re.compile(r"(CVSS:2\.[0-9a-zA-Z/:.]+)")
+RE_AV_SEV = re.compile(r"(AV:[NAL]/AC:[HML]/Au:[MSN]/C:[NPC]/I:[NPC]/A:[NPC])")
+
 
 def init_colors_and_encoding():
     """Enable ANSI escape sequences and adjust icons for stdout encoding compatibility."""
@@ -474,7 +479,7 @@ def get_severity_level(vuln):
 
     # 2. CVSS score calculations
     if "CVSS" in sev_upper or "AV:" in sev_upper:
-        m4 = re.search(r"(CVSS:4\.[0-9a-zA-Z/:.]+)", sev_upper)
+        m4 = RE_CVSS4_SEV.search(sev_upper)
         if m4:
             vector = m4.group(1)
             score = calculate_cvss4_score_approx(vector)
@@ -488,7 +493,7 @@ def get_severity_level(vuln):
                 elif score >= 0.1:
                     return "low"
 
-        m3 = re.search(r"(CVSS:3\.[0-9a-zA-Z/:.]+)", sev_upper)
+        m3 = RE_CVSS3_SEV.search(sev_upper)
         if m3:
             vector = m3.group(1)
             score = calculate_cvss3_score(vector)
@@ -503,13 +508,11 @@ def get_severity_level(vuln):
                     return "low"
 
         vector2 = None
-        m2 = re.search(r"(CVSS:2\.[0-9a-zA-Z/:.]+)", sev_upper)
+        m2 = RE_CVSS2_SEV.search(sev_upper)
         if m2:
             vector2 = m2.group(1)
         elif "AV:" in sev_upper:
-            m_raw2 = re.search(
-                r"(AV:[NAL]/AC:[HML]/Au:[MSN]/C:[NPC]/I:[NPC]/A:[NPC])", sev_upper
-            )
+            m_raw2 = RE_AV_SEV.search(sev_upper)
             if m_raw2:
                 vector2 = m_raw2.group(1)
 
@@ -720,7 +723,7 @@ def _sanitize_error_message(exc, target_name):
     if isinstance(exc, urllib.error.HTTPError):
         if exc.code == 404:
             return "Registry returned not found (404)"
-        elif exc.code in (408, 504):
+        elif exc.code in {408, 504}:
             return "Registry communication timeout"
         elif exc.code >= 500:
             return "Internal server error on registry side"

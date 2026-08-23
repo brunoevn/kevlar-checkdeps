@@ -4,3 +4,6 @@
 ## 2026-08-15 - Optimize membership checks in tight loops
 **Learning:** Python tuple membership checks like `x in ("a", "b", "c")` have an O(N) lookup time. Using sets `x in {"a", "b", "c"}` optimizes this to O(1) hash map lookup, providing significant speedups especially for strings when run many times in parsing logic. However, care must be taken to not replace tuples in `for x in (...)` constructs, as sets are unordered and could break deterministic iteration.
 **Action:** Always prefer set membership checks `in {"...", "..."}` over tuple membership checks `in ("...", "...")` for static comparisons, but strictly avoid them in iteration constructs.
+## 2024-05-18 - re.compile module cache bypass
+**Learning:** In Python, `re.search()` with a string pattern requires a lookup in the `re` module's internal cache every time it's called. By using `re.compile()` at the module level and calling `.search()` directly on the compiled object, the code avoids this cache lookup, making execution slightly faster. This is a classic and highly effective micro-optimization for functions that are called repeatedly in a loop.
+**Action:** Move static regexes (using `re.compile()`) to the global module scope instead of caching them locally within frequently called functions or loops, as it bypasses cache lookup and function call overhead.
