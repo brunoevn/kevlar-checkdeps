@@ -113,9 +113,7 @@ def _get_cached_registry_metadata(tech: str, package_name: str) -> Optional[Any]
         return _REGISTRY_METADATA_CACHE.get(key)
 
 
-def _set_cached_registry_metadata(
-    tech: str, package_name: str, data: Any
-) -> None:
+def _set_cached_registry_metadata(tech: str, package_name: str, data: Any) -> None:
     """Caches package-level registry metadata."""
     key = (tech, package_name.lower())
     with _CACHE_LOCK:
@@ -2550,8 +2548,8 @@ def check_npm_package(target):
         if not ver_str:
             return False
         v = ver_str.strip()
-        return (
-            v.startswith(("file:", "link:", "portal:", "workspace:", "./", "../", "/"))
+        return v.startswith(
+            ("file:", "link:", "portal:", "workspace:", "./", "../", "/")
         )
 
     versions_to_check = installed_versions if installed_versions else [declared]
@@ -3284,9 +3282,12 @@ def find_direct_parents(name, parents_map, direct_packages):
     visited = set()
     direct_parents = set()
     queue = [name]
+    queue_idx = 0
 
-    while queue:
-        current = queue.pop(0)
+    # Optimization: Use a read pointer to achieve O(1) queue processing instead of O(n) queue.pop(0) in Python.
+    while queue_idx < len(queue):
+        current = queue[queue_idx]
+        queue_idx += 1
         if current in visited:
             continue
         visited.add(current)
@@ -5791,7 +5792,12 @@ def check_maven_package(target):
         else:
             use_google_maven = (
                 group_id.startswith(
-                    ("androidx.", "com.google.android.", "com.android.", "android.arch.")
+                    (
+                        "androidx.",
+                        "com.google.android.",
+                        "com.android.",
+                        "android.arch.",
+                    )
                 )
                 or "android" in group_id
             )
@@ -6325,7 +6331,8 @@ def parse_go_mod(filepath):
                 if left_pkg and right_parts:
                     target_path = right_parts[0]
                     is_local_path = (
-                        target_path.startswith((".", "/", "\\")) or len(right_parts) == 1
+                        target_path.startswith((".", "/", "\\"))
+                        or len(right_parts) == 1
                     )
                     if is_local_path:
                         local_replacements[left_pkg] = target_path
@@ -6480,12 +6487,8 @@ def check_go_package(target):
                 latest_same_major = latest_absolute
 
             clean_ver = ver_str.lstrip("v").split("+")[0] if ver_str else ""
-            (
-                latest_absolute.lstrip("v").split("+")[0] if latest_absolute else ""
-            )
-            (
-                latest_same_major.lstrip("v").split("+")[0] if latest_same_major else ""
-            )
+            (latest_absolute.lstrip("v").split("+")[0] if latest_absolute else "")
+            (latest_same_major.lstrip("v").split("+")[0] if latest_same_major else "")
             update_type = determine_update_type(
                 ver_str, latest_same_major, latest_absolute
             )
@@ -6987,7 +6990,9 @@ def parse_cargo_toml(filepath):
     curr = os.path.dirname(os.path.abspath(filepath))
     while curr and os.path.dirname(curr) != curr:
         ws_candidate = os.path.join(curr, "Cargo.toml")
-        if os.path.exists(ws_candidate) and os.path.abspath(ws_candidate) != os.path.abspath(filepath):
+        if os.path.exists(ws_candidate) and os.path.abspath(
+            ws_candidate
+        ) != os.path.abspath(filepath):
             try:
                 with open(ws_candidate, "rb") as wf:
                     ws_data = tomllib.load(wf)
@@ -7033,7 +7038,11 @@ def parse_cargo_toml(filepath):
         if "target" in data and isinstance(data["target"], dict):
             for _, t_val in data["target"].items():
                 if isinstance(t_val, dict):
-                    for sec in ("dependencies", "dev-dependencies", "build-dependencies"):
+                    for sec in (
+                        "dependencies",
+                        "dev-dependencies",
+                        "build-dependencies",
+                    ):
                         if sec in t_val and isinstance(t_val[sec], dict):
                             _add_deps_table(t_val[sec])
 
@@ -7091,7 +7100,9 @@ def parse_cargo_toml(filepath):
                             }:
                                 dependencies[dep_name] = dep_val or "*"
         except Exception as e:
-            print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Cargo.toml: {e}{COLOR_RESET}")
+            print(
+                f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Cargo.toml: {e}{COLOR_RESET}"
+            )
 
     return dependencies
 
@@ -7277,7 +7288,9 @@ def check_rust_package(target):
                 latest_version = crate_info.get("max_stable_version") or crate_info.get(
                     "max_version"
                 )
-                repo_url_raw = crate_info.get("repository") or crate_info.get("homepage")
+                repo_url_raw = crate_info.get("repository") or crate_info.get(
+                    "homepage"
+                )
 
                 versions_meta = data.get("versions", [])
                 for v_meta in versions_meta:
@@ -7414,7 +7427,9 @@ def run_rust_checker(args):
 
     print(f"{COLOR_GRAY}{ICON_INFO} Reading Cargo files...{COLOR_RESET}")
     direct_deps = parse_cargo_toml(toml_path)
-    direct = set(direct_deps.keys()) if isinstance(direct_deps, dict) else set(direct_deps)
+    direct = (
+        set(direct_deps.keys()) if isinstance(direct_deps, dict) else set(direct_deps)
+    )
     lock_result = parse_cargo_lock(lock_path)
     resolved, parents = lock_result[0], lock_result[1]
     local_packages = getattr(lock_result, "local_packages", set())
@@ -7422,19 +7437,23 @@ def run_rust_checker(args):
     if not resolved and direct_deps:
         resolved = {
             name: [
-                direct_deps.get(name)
-                if isinstance(direct_deps, dict)
-                and direct_deps.get(name)
-                and direct_deps.get(name) != "workspace"
-                and not str(direct_deps.get(name)).startswith(".")
-                else "0.0.0"
+                (
+                    direct_deps.get(name)
+                    if isinstance(direct_deps, dict)
+                    and direct_deps.get(name)
+                    and direct_deps.get(name) != "workspace"
+                    and not str(direct_deps.get(name)).startswith(".")
+                    else "0.0.0"
+                )
             ]
             for name in direct
         }
 
     pkg_data = {
         "all_direct": {
-            name: (direct_deps.get(name, name) if isinstance(direct_deps, dict) else name)
+            name: (
+                direct_deps.get(name, name) if isinstance(direct_deps, dict) else name
+            )
             for name in direct
         },
         "dependencies": resolved,
@@ -7444,7 +7463,11 @@ def run_rust_checker(args):
     for name, versions in resolved.items():
         if not args.all and name not in direct:
             continue
-        declared = direct_deps.get(name) if isinstance(direct_deps, dict) else (versions[0] if versions else None)
+        declared = (
+            direct_deps.get(name)
+            if isinstance(direct_deps, dict)
+            else (versions[0] if versions else None)
+        )
         is_local = (name in local_packages) or (
             declared and str(declared).startswith((".", "/", "path:", "workspace:"))
         )
@@ -7648,9 +7671,7 @@ def check_ruby_package(target):
         else:
             repo_url_raw = None
             try:
-                url_versions = (
-                    f"https://rubygems.org/api/v1/versions/{urllib.parse.quote(name)}.json"
-                )
+                url_versions = f"https://rubygems.org/api/v1/versions/{urllib.parse.quote(name)}.json"
                 req_v = urllib.request.Request(url_versions)
                 with safe_urlopen(req_v, timeout=10) as response:
                     versions_data = json.loads(response.read().decode("utf-8"))
@@ -7694,9 +7715,7 @@ def check_ruby_package(target):
                 except Exception:
                     valid_versions = []
 
-            _set_cached_registry_metadata(
-                "ruby", name, (valid_versions, repo_url_raw)
-            )
+            _set_cached_registry_metadata("ruby", name, (valid_versions, repo_url_raw))
 
         for ver_str in versions_to_check:
             clean_ver = RE_CLEAN_VER.sub("", ver_str) if ver_str else "0.0.0"
@@ -7730,13 +7749,9 @@ def check_ruby_package(target):
                         pass
                 repo_url = clean_repo_url(repo_url_raw)
                 if repo_url:
-                    compare_url = get_compare_url(
-                        repo_url, clean_ver, latest_absolute
-                    )
+                    compare_url = get_compare_url(repo_url, clean_ver, latest_absolute)
                     releases_url = (
-                        f"{repo_url}/releases"
-                        if is_github_url(repo_url)
-                        else repo_url
+                        f"{repo_url}/releases" if is_github_url(repo_url) else repo_url
                     )
 
             display_latest = format_latest_versions(latest_same_major, latest_absolute)
@@ -8184,7 +8199,25 @@ def validate_configuration_drift(results):
 
         # Skip checking if declared constraint is a git URL, local path, workspace, patch, catalog reference, etc.
         if (
-            decl_str.startswith(("@", "git+", "git:", "http:", "https:", "ssh:", "file:", "workspace:", "patch:", "portal:", "link:", "catalog:", ".", "/")) or "github:" in decl_str.lower()
+            decl_str.startswith(
+                (
+                    "@",
+                    "git+",
+                    "git:",
+                    "http:",
+                    "https:",
+                    "ssh:",
+                    "file:",
+                    "workspace:",
+                    "patch:",
+                    "portal:",
+                    "link:",
+                    "catalog:",
+                    ".",
+                    "/",
+                )
+            )
+            or "github:" in decl_str.lower()
         ):
             continue
 
@@ -8312,19 +8345,31 @@ def _format_status_badge(r):
 def _print_table_notes_and_diffs(filtered_results):
     notes_to_print = []
     for r in filtered_results:
-        parent_suffix = f" (via {', '.join(r['required_by'])})" if r.get("required_by") else ""
+        parent_suffix = (
+            f" (via {', '.join(r['required_by'])})" if r.get("required_by") else ""
+        )
         if r["deprecated"]:
-            notes_to_print.append(f"  {COLOR_MAGENTA}{ICON_DEPRECATED} {r['name']}@{r['installed']}{parent_suffix}: {r['deprecated']}{COLOR_RESET}")
+            notes_to_print.append(
+                f"  {COLOR_MAGENTA}{ICON_DEPRECATED} {r['name']}@{r['installed']}{parent_suffix}: {r['deprecated']}{COLOR_RESET}"
+            )
         elif r["status"] == "error" and r["error"]:
-            notes_to_print.append(f"  {COLOR_RED}{ICON_ERROR} {r['name']}{parent_suffix}: {r['error']}{COLOR_RESET}")
+            notes_to_print.append(
+                f"  {COLOR_RED}{ICON_ERROR} {r['name']}{parent_suffix}: {r['error']}{COLOR_RESET}"
+            )
 
         if r.get("missing_checksum"):
-            notes_to_print.append(f"  {COLOR_YELLOW}{ICON_WARN} {r['name']}@{r['installed']}{parent_suffix}: Missing integrity checksum in lockfile{COLOR_RESET}")
+            notes_to_print.append(
+                f"  {COLOR_YELLOW}{ICON_WARN} {r['name']}@{r['installed']}{parent_suffix}: Missing integrity checksum in lockfile{COLOR_RESET}"
+            )
         elif r.get("weak_checksum"):
-            notes_to_print.append(f"  {COLOR_YELLOW}{ICON_WARN} {r['name']}@{r['installed']}{parent_suffix}: Weak checksum (SHA-1) in lockfile{COLOR_RESET}")
+            notes_to_print.append(
+                f"  {COLOR_YELLOW}{ICON_WARN} {r['name']}@{r['installed']}{parent_suffix}: Weak checksum (SHA-1) in lockfile{COLOR_RESET}"
+            )
 
         if r.get("mismatch_checksum"):
-            notes_to_print.append(f"  {COLOR_RED}{ICON_ERROR} {r['name']}@{r['installed']}{parent_suffix}: INTEGRITY MISMATCH! Lockfile checksum does not match official registry checksum.{COLOR_RESET}")
+            notes_to_print.append(
+                f"  {COLOR_RED}{ICON_ERROR} {r['name']}@{r['installed']}{parent_suffix}: INTEGRITY MISMATCH! Lockfile checksum does not match official registry checksum.{COLOR_RESET}"
+            )
 
     if notes_to_print:
         print(f"\n{COLOR_BOLD}Notes & Warnings:{COLOR_RESET}")
@@ -8333,8 +8378,12 @@ def _print_table_notes_and_diffs(filtered_results):
 
     major_diffs_to_print = []
     for r in filtered_results:
-        if r["status"] in {"major", "minor-major", "patch-major"} and r.get("compare_url"):
-            major_diffs_to_print.append(f"  {COLOR_BOLD}{r['name']}{COLOR_RESET}: {COLOR_CYAN}{r['compare_url']}{COLOR_RESET}")
+        if r["status"] in {"major", "minor-major", "patch-major"} and r.get(
+            "compare_url"
+        ):
+            major_diffs_to_print.append(
+                f"  {COLOR_BOLD}{r['name']}{COLOR_RESET}: {COLOR_CYAN}{r['compare_url']}{COLOR_RESET}"
+            )
 
     if major_diffs_to_print:
         print(f"\n{COLOR_BOLD}Major Update Diffs:{COLOR_RESET}")
@@ -8345,44 +8394,101 @@ def _print_table_notes_and_diffs(filtered_results):
 def _print_table_vulnerabilities(filtered_results):
     vuls_to_print = []
     suppressed_to_print = []
-    severity_order = {"malicious": 5, "critical": 4, "high": 3, "medium": 2, "low": 1, "unknown": 0}
+    severity_order = {
+        "malicious": 5,
+        "critical": 4,
+        "high": 3,
+        "medium": 2,
+        "low": 1,
+        "unknown": 0,
+    }
 
     for r in filtered_results:
         vuls_list = r.get("vulnerabilities", [])
         if vuls_list:
-            sorted_v = sorted(vuls_list, key=lambda v: severity_order.get(get_severity_level(v), 0), reverse=True)
-            vuls_to_print.append((r["name"], r["installed"] if r["installed"] else r["declared"], sorted_v, r.get("required_by", [])))
+            sorted_v = sorted(
+                vuls_list,
+                key=lambda v: severity_order.get(get_severity_level(v), 0),
+                reverse=True,
+            )
+            vuls_to_print.append(
+                (
+                    r["name"],
+                    r["installed"] if r["installed"] else r["declared"],
+                    sorted_v,
+                    r.get("required_by", []),
+                )
+            )
 
         suppressed_list = r.get("suppressed_vulnerabilities", [])
         if suppressed_list:
-            suppressed_to_print.append((r["name"], r["installed"] if r["installed"] else r["declared"], suppressed_list, r.get("required_by", [])))
+            suppressed_to_print.append(
+                (
+                    r["name"],
+                    r["installed"] if r["installed"] else r["declared"],
+                    suppressed_list,
+                    r.get("required_by", []),
+                )
+            )
 
     if vuls_to_print:
-        vuls_to_print.sort(key=lambda x: (
-            -max(severity_order.get(get_severity_level(v), 0) for v in x[2]) if x[2] else 1,
-            x[0].lower()
-        ))
-        print(f"\n{COLOR_BOLD}{COLOR_RED}{ICON_SHIELD} Security Vulnerabilities Details:{COLOR_RESET}")
+        vuls_to_print.sort(
+            key=lambda x: (
+                (
+                    -max(severity_order.get(get_severity_level(v), 0) for v in x[2])
+                    if x[2]
+                    else 1
+                ),
+                x[0].lower(),
+            )
+        )
+        print(
+            f"\n{COLOR_BOLD}{COLOR_RED}{ICON_SHIELD} Security Vulnerabilities Details:{COLOR_RESET}"
+        )
         for name, ver, v_list, required_by in vuls_to_print:
             parent_suffix = f" (via {', '.join(required_by)})" if required_by else ""
-            print(f"  {COLOR_BOLD}{name}@{ver}{parent_suffix}{COLOR_RESET} ({len(v_list)} vulnerabilities found):")
+            print(
+                f"  {COLOR_BOLD}{name}@{ver}{parent_suffix}{COLOR_RESET} ({len(v_list)} vulnerabilities found):"
+            )
             for vuln in v_list:
                 vid, severity, summary = vuln["id"], vuln["severity"], vuln["summary"]
                 level = get_severity_level(vuln)
-                sev_color = COLOR_RED + COLOR_BOLD if level == "malicious" else COLOR_RED if level in {"critical", "high"} else COLOR_YELLOW if level == "medium" else COLOR_CYAN if level == "low" else COLOR_GRAY
-                display_severity = "MALICIOUS CODE" if level == "malicious" else severity
-                print(f"    - {COLOR_BOLD}{vid}{COLOR_RESET} [{sev_color}{display_severity}{COLOR_RESET}]: {summary}")
+                sev_color = (
+                    COLOR_RED + COLOR_BOLD
+                    if level == "malicious"
+                    else (
+                        COLOR_RED
+                        if level in {"critical", "high"}
+                        else (
+                            COLOR_YELLOW
+                            if level == "medium"
+                            else COLOR_CYAN if level == "low" else COLOR_GRAY
+                        )
+                    )
+                )
+                display_severity = (
+                    "MALICIOUS CODE" if level == "malicious" else severity
+                )
+                print(
+                    f"    - {COLOR_BOLD}{vid}{COLOR_RESET} [{sev_color}{display_severity}{COLOR_RESET}]: {summary}"
+                )
 
     if suppressed_to_print:
-        print(f"\n{COLOR_BOLD}{COLOR_GRAY}{ICON_INFO} Suppressed Vulnerabilities (Ignored):{COLOR_RESET}")
+        print(
+            f"\n{COLOR_BOLD}{COLOR_GRAY}{ICON_INFO} Suppressed Vulnerabilities (Ignored):{COLOR_RESET}"
+        )
         for name, ver, s_list, required_by in suppressed_to_print:
             parent_suffix = f" (via {', '.join(required_by)})" if required_by else ""
-            print(f"  {COLOR_BOLD}{COLOR_GRAY}{name}@{ver}{parent_suffix}{COLOR_RESET} ({len(s_list)} suppressed):")
+            print(
+                f"  {COLOR_BOLD}{COLOR_GRAY}{name}@{ver}{parent_suffix}{COLOR_RESET} ({len(s_list)} suppressed):"
+            )
             for vuln in s_list:
                 vid = vuln["id"]
                 reason = vuln.get("suppressed_reason", "No reason provided")
                 summary = vuln["summary"]
-                print(f"    - {COLOR_BOLD}{COLOR_GRAY}{vid}{COLOR_RESET}: {summary} {COLOR_GRAY}(Reason: {reason}){COLOR_RESET}")
+                print(
+                    f"    - {COLOR_BOLD}{COLOR_GRAY}{vid}{COLOR_RESET}: {summary} {COLOR_GRAY}(Reason: {reason}){COLOR_RESET}"
+                )
 
 
 def print_results_table(
@@ -8394,15 +8500,34 @@ def print_results_table(
 
     filtered_results = _filter_table_results(results, show_all, vuls_enabled)
     if not filtered_results:
-        print(f"\n{COLOR_GREEN}{ICON_OK} All dependencies are up-to-date and secure!{COLOR_RESET}\n")
+        print(
+            f"\n{COLOR_GREEN}{ICON_OK} All dependencies are up-to-date and secure!{COLOR_RESET}\n"
+        )
         return
 
-    col_name, col_type, col_dec, col_inst, col_latest, col_status, col_vuls = "Package", "Type", "Declared", "Installed", "Latest", "Status", "Vuls"
+    col_name, col_type, col_dec, col_inst, col_latest, col_status, col_vuls = (
+        "Package",
+        "Type",
+        "Declared",
+        "Installed",
+        "Latest",
+        "Status",
+        "Vuls",
+    )
     w_name = max(len(col_name), max(len(r["name"]) for r in filtered_results)) + 2
     w_type = 12
-    w_dec = max(len(col_dec), max(len(r["declared"] or "N/A") for r in filtered_results)) + 2
-    w_inst = max(len(col_inst), max(len(r["installed"] or "N/A") for r in filtered_results)) + 2
-    w_latest = max(len(col_latest), max(len(r["latest"] or "N/A") for r in filtered_results)) + 2
+    w_dec = (
+        max(len(col_dec), max(len(r["declared"] or "N/A") for r in filtered_results))
+        + 2
+    )
+    w_inst = (
+        max(len(col_inst), max(len(r["installed"] or "N/A") for r in filtered_results))
+        + 2
+    )
+    w_latest = (
+        max(len(col_latest), max(len(r["latest"] or "N/A") for r in filtered_results))
+        + 2
+    )
     w_status = 15
     w_vuls = 8
     t = BORDER_CHARS
@@ -8426,9 +8551,13 @@ def print_results_table(
     hdr_vuls = TerminalTextFormatter.pad_string(col_vuls, w_vuls, align="center")
 
     if vuls_enabled:
-        print(f"{t['vertical']}{hdr_name}{t['vertical']}{hdr_type}{t['vertical']}{hdr_dec}{t['vertical']}{hdr_inst}{t['vertical']}{hdr_latest}{t['vertical']}{hdr_status}{t['vertical']}{hdr_vuls}{t['vertical']}")
+        print(
+            f"{t['vertical']}{hdr_name}{t['vertical']}{hdr_type}{t['vertical']}{hdr_dec}{t['vertical']}{hdr_inst}{t['vertical']}{hdr_latest}{t['vertical']}{hdr_status}{t['vertical']}{hdr_vuls}{t['vertical']}"
+        )
     else:
-        print(f"{t['vertical']}{hdr_name}{t['vertical']}{hdr_type}{t['vertical']}{hdr_dec}{t['vertical']}{hdr_inst}{t['vertical']}{hdr_latest}{t['vertical']}{hdr_status}{t['vertical']}")
+        print(
+            f"{t['vertical']}{hdr_name}{t['vertical']}{hdr_type}{t['vertical']}{hdr_dec}{t['vertical']}{hdr_inst}{t['vertical']}{hdr_latest}{t['vertical']}{hdr_status}{t['vertical']}"
+        )
 
     print(border_mid)
 
@@ -8447,21 +8576,45 @@ def print_results_table(
                     dep_type = "Direct"
 
         styled_status = _format_status_badge(r)
-        name_cell = TerminalTextFormatter.pad_string(f" {r['name']}", w_name, align="left")
+        name_cell = TerminalTextFormatter.pad_string(
+            f" {r['name']}", w_name, align="left"
+        )
         type_cell = TerminalTextFormatter.pad_string(dep_type, w_type, align="center")
-        dec_cell = TerminalTextFormatter.pad_string(r["declared"] or "N/A", w_dec, align="center")
-        inst_cell = TerminalTextFormatter.pad_string(r["installed"] or "N/A", w_inst, align="center")
-        latest_cell = TerminalTextFormatter.pad_string(r["latest"] or "N/A", w_latest, align="center")
-        status_cell = TerminalTextFormatter.pad_string(styled_status, w_status, align="center")
+        dec_cell = TerminalTextFormatter.pad_string(
+            r["declared"] or "N/A", w_dec, align="center"
+        )
+        inst_cell = TerminalTextFormatter.pad_string(
+            r["installed"] or "N/A", w_inst, align="center"
+        )
+        latest_cell = TerminalTextFormatter.pad_string(
+            r["latest"] or "N/A", w_latest, align="center"
+        )
+        status_cell = TerminalTextFormatter.pad_string(
+            styled_status, w_status, align="center"
+        )
 
         if vuls_enabled:
             vuls_list = r.get("vulnerabilities", [])
             vuls_count = len(vuls_list)
-            styled_vuls = f"{COLOR_RED}{COLOR_BOLD}{vuls_count}{COLOR_RESET}" if vuls_count > 0 else (f"{COLOR_GREEN}{ICON_OK}{COLOR_RESET}" if ICON_OK == "✔" else f"{COLOR_GREEN}0{COLOR_RESET}")
-            vuls_cell = TerminalTextFormatter.pad_string(styled_vuls, w_vuls, align="center")
-            print(f"{t['vertical']}{name_cell}{t['vertical']}{type_cell}{t['vertical']}{dec_cell}{t['vertical']}{inst_cell}{t['vertical']}{latest_cell}{t['vertical']}{status_cell}{t['vertical']}{vuls_cell}{t['vertical']}")
+            styled_vuls = (
+                f"{COLOR_RED}{COLOR_BOLD}{vuls_count}{COLOR_RESET}"
+                if vuls_count > 0
+                else (
+                    f"{COLOR_GREEN}{ICON_OK}{COLOR_RESET}"
+                    if ICON_OK == "✔"
+                    else f"{COLOR_GREEN}0{COLOR_RESET}"
+                )
+            )
+            vuls_cell = TerminalTextFormatter.pad_string(
+                styled_vuls, w_vuls, align="center"
+            )
+            print(
+                f"{t['vertical']}{name_cell}{t['vertical']}{type_cell}{t['vertical']}{dec_cell}{t['vertical']}{inst_cell}{t['vertical']}{latest_cell}{t['vertical']}{status_cell}{t['vertical']}{vuls_cell}{t['vertical']}"
+            )
         else:
-            print(f"{t['vertical']}{name_cell}{t['vertical']}{type_cell}{t['vertical']}{dec_cell}{t['vertical']}{inst_cell}{t['vertical']}{latest_cell}{t['vertical']}{status_cell}{t['vertical']}")
+            print(
+                f"{t['vertical']}{name_cell}{t['vertical']}{type_cell}{t['vertical']}{dec_cell}{t['vertical']}{inst_cell}{t['vertical']}{latest_cell}{t['vertical']}{status_cell}{t['vertical']}"
+            )
 
     print(border_bot)
     _print_table_notes_and_diffs(filtered_results)
@@ -9245,7 +9398,9 @@ def find_manifest_files(project_path, technology):
     return manifest_files
 
 
-def _find_target_version_line(lines, search_range, declared_ver, tech, package_name, fallback_idx):
+def _find_target_version_line(
+    lines, search_range, declared_ver, tech, package_name, fallback_idx
+):
     """Finds the line index and target text to replace in the manifest lines."""
     if declared_ver:
         for i in search_range:
@@ -9301,17 +9456,30 @@ def _find_target_version_line(lines, search_range, declared_ver, tech, package_n
     return fallback_idx, target_text
 
 
-def _resolve_property_placeholder(manifest_path, target_text, tech, lines, line_idx_to_change, declared_ver):
+def _resolve_property_placeholder(
+    manifest_path, target_text, tech, lines, line_idx_to_change, declared_ver
+):
     """Resolves Maven/Gradle/NuGet property placeholders to concrete files and line numbers."""
+
     def _search_lines_for_property(lines_list, prop_name_val, tech_type):
         if tech_type in ("maven", "nuget"):
-            pattern = r"<\s*" + re.escape(prop_name_val) + r"\s*>\s*(.*?)\s*<\s*/\s*" + re.escape(prop_name_val) + r"\s*>"
+            pattern = (
+                r"<\s*"
+                + re.escape(prop_name_val)
+                + r"\s*>\s*(.*?)\s*<\s*/\s*"
+                + re.escape(prop_name_val)
+                + r"\s*>"
+            )
             for idx_p, line_p in enumerate(lines_list):
                 m_p = re.search(pattern, line_p, re.IGNORECASE)
                 if m_p:
                     return idx_p + 1, m_p.group(1)
         elif tech_type == "gradle":
-            pattern = r"^\s*([a-zA-Z0-9_.-]+)?\s*" + re.escape(prop_name_val) + r'\s*=\s*["\']([^"\']+)["\']'
+            pattern = (
+                r"^\s*([a-zA-Z0-9_.-]+)?\s*"
+                + re.escape(prop_name_val)
+                + r'\s*=\s*["\']([^"\']+)["\']'
+            )
             for idx_p, line_p in enumerate(lines_list):
                 m_p = re.search(pattern, line_p)
                 if m_p:
@@ -9325,7 +9493,9 @@ def _resolve_property_placeholder(manifest_path, target_text, tech, lines, line_
         except Exception:
             return None, None, None
 
-        line_idx_p, val_p = _search_lines_for_property(lines_list, prop_name_val, tech_type)
+        line_idx_p, val_p = _search_lines_for_property(
+            lines_list, prop_name_val, tech_type
+        )
         if line_idx_p is not None:
             return current_path, line_idx_p, val_p
 
@@ -9339,9 +9509,13 @@ def _resolve_property_placeholder(manifest_path, target_text, tech, lines, line_
                 parent_pom = os.path.join(parent_dir_p, "pom.xml")
                 if os.path.exists(parent_pom):
                     try:
-                        with open(parent_pom, "r", encoding="utf-8", errors="ignore") as f_p:
+                        with open(
+                            parent_pom, "r", encoding="utf-8", errors="ignore"
+                        ) as f_p:
                             parent_lines = f_p.readlines()
-                        line_idx_p, val_p = _search_lines_for_property(parent_lines, prop_name_val, tech_type)
+                        line_idx_p, val_p = _search_lines_for_property(
+                            parent_lines, prop_name_val, tech_type
+                        )
                         if line_idx_p is not None:
                             return parent_pom, line_idx_p, val_p
                     except (OSError, UnicodeDecodeError):
@@ -9354,7 +9528,11 @@ def _resolve_property_placeholder(manifest_path, target_text, tech, lines, line_
     is_placeholder = False
     prop_name = None
     if tech == "maven":
-        m = re.match(r"^\s*\$\SafeWriter?\{\s*(.*?)\s*\}\s*$", target_text) if hasattr(re, 'match') else None
+        m = (
+            re.match(r"^\s*\$\SafeWriter?\{\s*(.*?)\s*\}\s*$", target_text)
+            if hasattr(re, "match")
+            else None
+        )
         m = re.match(r"^\s*\$\{\s*(.*?)\s*\}\s*$", target_text)
         if m:
             is_placeholder = True
@@ -9379,7 +9557,9 @@ def _resolve_property_placeholder(manifest_path, target_text, tech, lines, line_
     new_lines = lines
 
     if is_placeholder and prop_name:
-        resolved_path, resolved_line_idx, current_val = find_property_definition(manifest_path, prop_name, tech)
+        resolved_path, resolved_line_idx, current_val = find_property_definition(
+            manifest_path, prop_name, tech
+        )
         if resolved_path and resolved_line_idx:
             new_path = resolved_path
             try:
@@ -9392,18 +9572,25 @@ def _resolve_property_placeholder(manifest_path, target_text, tech, lines, line_
 
     if declared_ver and resolved_ver:
         is_val_placeholder = (
-            (tech == "maven" and "${" in resolved_ver) or
-            (tech == "nuget" and "$(" in resolved_ver) or
-            (tech == "gradle" and "$" in resolved_ver)
+            (tech == "maven" and "${" in resolved_ver)
+            or (tech == "nuget" and "$(" in resolved_ver)
+            or (tech == "gradle" and "$" in resolved_ver)
         )
         if not is_val_placeholder:
+
             def clean_ver(v):
                 v = v.strip().lower().removeprefix("v")
                 return RE_OPERATOR_PREFIX.sub("", v)
 
             def is_version_compatible(v1, v2):
                 c1, c2 = clean_ver(v1), clean_ver(v2)
-                if not c1 or not c2 or c1 == c2 or c1.startswith(c2) or c2.startswith(c1):
+                if (
+                    not c1
+                    or not c2
+                    or c1 == c2
+                    or c1.startswith(c2)
+                    or c2.startswith(c1)
+                ):
                     return True
                 m1, m2 = RE_NUM_START.match(c1), RE_NUM_START.match(c2)
                 return bool(m1 and m2 and m1.group(1) == m2.group(1))
@@ -9414,7 +9601,9 @@ def _resolve_property_placeholder(manifest_path, target_text, tech, lines, line_
     return new_path, new_idx, resolved_ver, new_lines
 
 
-def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ver, tech, package_name=None):
+def generate_remediation_diff(
+    manifest_path, line_index, declared_ver, latest_ver, tech, package_name=None
+):
     """Generates remediation diff showing current vs suggested change."""
     try:
         with open(manifest_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -9427,7 +9616,9 @@ def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ve
         return None
 
     search_range = range(idx, min(idx + 4, len(lines)))
-    line_idx_to_change, target_text = _find_target_version_line(lines, search_range, declared_ver, tech, package_name, idx)
+    line_idx_to_change, target_text = _find_target_version_line(
+        lines, search_range, declared_ver, tech, package_name, idx
+    )
 
     if (
         target_text
@@ -9507,12 +9698,20 @@ def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ve
             else:
                 html_new = escaped_new
 
-            current_block.append({"line_num": line_num, "html": html_orig, "is_changed": True})
-            suggested_block.append({"line_num": line_num, "html": html_new, "is_changed": True})
+            current_block.append(
+                {"line_num": line_num, "html": html_orig, "is_changed": True}
+            )
+            suggested_block.append(
+                {"line_num": line_num, "html": html_new, "is_changed": True}
+            )
         else:
             escaped_orig = escape_html(orig_line)
-            current_block.append({"line_num": line_num, "html": escaped_orig, "is_changed": False})
-            suggested_block.append({"line_num": line_num, "html": escaped_orig, "is_changed": False})
+            current_block.append(
+                {"line_num": line_num, "html": escaped_orig, "is_changed": False}
+            )
+            suggested_block.append(
+                {"line_num": line_num, "html": escaped_orig, "is_changed": False}
+            )
 
     return {
         "manifest_path": manifest_path,
@@ -9541,7 +9740,9 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
     clean_numeric = raw_ver.lstrip("^~>=<! v")
 
     if tech in {"npm", "pnpm", "yarn"}:
-        clean_target = f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
+        clean_target = (
+            f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
+        )
         deps_match_idx = None
         dev_deps_match_idx = None
         root_open_idx = None
@@ -9564,7 +9765,9 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
             insert_line_idx = root_open_idx + 1
             line_to_add = f'{indent}"dependencies": {{\n{indent}  "{package_name}": "{clean_target}"\n{indent}}},'
     elif tech == "php":
-        clean_target = f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
+        clean_target = (
+            f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
+        )
         deps_match_idx = None
         for idx, line in enumerate(lines):
             if re.search(r'"require"\s*:\s*\{', line):
@@ -9686,7 +9889,9 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
     line_to_add = ""
 
     if tech in {"npm", "pnpm"}:
-        clean_target = f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
+        clean_target = (
+            f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
+        )
         overrides_line_idx = None
         for idx, line in enumerate(lines):
             if re.search(r'"overrides"\s*:\s*\{', line):
@@ -9705,7 +9910,9 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
             insert_line_idx = (root_open_idx + 1) if root_open_idx is not None else 1
             line_to_add = f'{indent}"overrides": {{\n{indent}  "{package_name}": "{clean_target}"\n{indent}}},'
     elif tech == "yarn":
-        clean_target = f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
+        clean_target = (
+            f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
+        )
         resolutions_line_idx = None
         for idx, line in enumerate(lines):
             if re.search(r'"resolutions"\s*:\s*\{', line):
@@ -9833,97 +10040,147 @@ def _clean_version_str(v):
     return RE_OPERATOR_PREFIX.sub("", v)
 
 
-def _populate_direct_strategies(r, manifest_path, found_line_idx, name, declared, tech, latest_patch, latest_sm, latest_abs):
+def _populate_direct_strategies(
+    r,
+    manifest_path,
+    found_line_idx,
+    name,
+    declared,
+    tech,
+    latest_patch,
+    latest_sm,
+    latest_abs,
+):
     direct_options = []
-    target_string = latest_abs or (r.get("latest") if r.get("name") == name else "") or ""
+    target_string = (
+        latest_abs or (r.get("latest") if r.get("name") == name else "") or ""
+    )
     if " or " in target_string:
         parts = [p.strip() for p in target_string.split(" or ") if p.strip()]
         if len(parts) >= 2:
             for p in parts:
                 diff_p = (
-                    generate_remediation_diff(manifest_path, found_line_idx, declared, p, tech, name)
+                    generate_remediation_diff(
+                        manifest_path, found_line_idx, declared, p, tech, name
+                    )
                     if found_line_idx
-                    else generate_addition_remediation_diff(manifest_path, name, p, tech)
+                    else generate_addition_remediation_diff(
+                        manifest_path, name, p, tech
+                    )
                 )
                 if diff_p:
-                    direct_options.append({
-                        "id": f"option_{p}",
-                        "label": format_remediation_option_label(p),
-                        "badge": "Option",
-                        "badge_class": "v-chip-safe",
-                        "diff": diff_p,
-                    })
+                    direct_options.append(
+                        {
+                            "id": f"option_{p}",
+                            "label": format_remediation_option_label(p),
+                            "badge": "Option",
+                            "badge_class": "v-chip-safe",
+                            "diff": diff_p,
+                        }
+                    )
             diff_comb = (
-                generate_remediation_diff(manifest_path, found_line_idx, declared, target_string, tech, name)
+                generate_remediation_diff(
+                    manifest_path, found_line_idx, declared, target_string, tech, name
+                )
                 if found_line_idx
-                else generate_addition_remediation_diff(manifest_path, name, target_string, tech)
+                else generate_addition_remediation_diff(
+                    manifest_path, name, target_string, tech
+                )
             )
             if diff_comb:
-                direct_options.append({
-                    "id": f"option_{target_string}",
-                    "label": format_remediation_option_label(target_string),
-                    "badge": "Option",
-                    "badge_class": "v-chip-major",
-                    "diff": diff_comb,
-                })
+                direct_options.append(
+                    {
+                        "id": f"option_{target_string}",
+                        "label": format_remediation_option_label(target_string),
+                        "badge": "Option",
+                        "badge_class": "v-chip-major",
+                        "diff": diff_comb,
+                    }
+                )
 
     if latest_patch:
         diff_patch = (
-            generate_remediation_diff(manifest_path, found_line_idx, declared, latest_patch, tech, name)
+            generate_remediation_diff(
+                manifest_path, found_line_idx, declared, latest_patch, tech, name
+            )
             if found_line_idx
-            else generate_addition_remediation_diff(manifest_path, name, latest_patch, tech)
+            else generate_addition_remediation_diff(
+                manifest_path, name, latest_patch, tech
+            )
         )
         if diff_patch:
-            direct_options.append({
-                "id": "patch",
-                "label": f"Patch: v{_clean_version_str(latest_patch)}",
-                "badge": "Patch / Bugfix",
-                "badge_class": "v-chip-ok",
-                "diff": diff_patch,
-            })
+            direct_options.append(
+                {
+                    "id": "patch",
+                    "label": f"Patch: v{_clean_version_str(latest_patch)}",
+                    "badge": "Patch / Bugfix",
+                    "badge_class": "v-chip-ok",
+                    "diff": diff_patch,
+                }
+            )
 
     if latest_sm:
         diff_sm = (
-            generate_remediation_diff(manifest_path, found_line_idx, declared, latest_sm, tech, name)
+            generate_remediation_diff(
+                manifest_path, found_line_idx, declared, latest_sm, tech, name
+            )
             if found_line_idx
-            else generate_addition_remediation_diff(manifest_path, name, latest_sm, tech)
+            else generate_addition_remediation_diff(
+                manifest_path, name, latest_sm, tech
+            )
         )
         if diff_sm:
-            direct_options.append({
-                "id": "minor",
-                "label": f"Minor: v{_clean_version_str(latest_sm)}",
-                "badge": "Minor / Feature",
-                "badge_class": "v-chip-safe",
-                "diff": diff_sm,
-            })
+            direct_options.append(
+                {
+                    "id": "minor",
+                    "label": f"Minor: v{_clean_version_str(latest_sm)}",
+                    "badge": "Minor / Feature",
+                    "badge_class": "v-chip-safe",
+                    "diff": diff_sm,
+                }
+            )
 
     if latest_abs and " or " not in str(latest_abs):
         diff_abs = (
-            generate_remediation_diff(manifest_path, found_line_idx, declared, latest_abs, tech, name)
+            generate_remediation_diff(
+                manifest_path, found_line_idx, declared, latest_abs, tech, name
+            )
             if found_line_idx
-            else generate_addition_remediation_diff(manifest_path, name, latest_abs, tech)
+            else generate_addition_remediation_diff(
+                manifest_path, name, latest_abs, tech
+            )
         )
         if diff_abs:
-            direct_options.append({
-                "id": "major",
-                "label": f"Major: v{_clean_version_str(latest_abs)}",
-                "badge": "Major / Breaking",
-                "badge_class": "v-chip-major",
-                "diff": diff_abs,
-            })
+            direct_options.append(
+                {
+                    "id": "major",
+                    "label": f"Major: v{_clean_version_str(latest_abs)}",
+                    "badge": "Major / Breaking",
+                    "badge_class": "v-chip-major",
+                    "diff": diff_abs,
+                }
+            )
 
     if direct_options:
-        return [{
-            "id": "direct_upgrade",
-            "title": f"Update Dependency ({name})" if r.get("dep_type") == "Transitive" else f"Update Direct Dependency ({name})",
-            "description": f"Updates '{name}' in manifest file.",
-            "is_recommended": True,
-            "options": direct_options,
-        }]
+        return [
+            {
+                "id": "direct_upgrade",
+                "title": (
+                    f"Update Dependency ({name})"
+                    if r.get("dep_type") == "Transitive"
+                    else f"Update Direct Dependency ({name})"
+                ),
+                "description": f"Updates '{name}' in manifest file.",
+                "is_recommended": True,
+                "options": direct_options,
+            }
+        ]
     return []
 
 
-def _populate_parent_strategies(r, results, manifest_path, lines, tech, name, get_line_idx_fn):
+def _populate_parent_strategies(
+    r, results, manifest_path, lines, tech, name, get_line_idx_fn
+):
     strategies = []
     if not r.get("required_by"):
         return strategies
@@ -9941,7 +10198,14 @@ def _populate_parent_strategies(r, results, manifest_path, lines, tech, name, ge
         if not parent_candidate:
             continue
 
-        parent_line_idx = get_line_idx_fn(manifest_path, lines, parent_name, tech, parent_candidate.get("declared"), False)
+        parent_line_idx = get_line_idx_fn(
+            manifest_path,
+            lines,
+            parent_name,
+            tech,
+            parent_candidate.get("declared"),
+            False,
+        )
         if parent_line_idx is None:
             continue
 
@@ -9951,7 +10215,9 @@ def _populate_parent_strategies(r, results, manifest_path, lines, tech, name, ge
         p_decl = parent_candidate.get("declared")
         p_patch = parent_candidate.get("latest_patch")
         p_sm = parent_candidate.get("latest_same_major")
-        p_abs = parent_candidate.get("latest_absolute") or parent_candidate.get("latest")
+        p_abs = parent_candidate.get("latest_absolute") or parent_candidate.get(
+            "latest"
+        )
 
         p_clean_inst_v = _clean_version_str(p_clean_inst)
         p_clean_decl_v = _clean_version_str(p_decl)
@@ -9972,74 +10238,111 @@ def _populate_parent_strategies(r, results, manifest_path, lines, tech, name, ge
 
         parent_options = []
         if p_patch:
-            p_diff = generate_remediation_diff(manifest_path, parent_line_idx, p_decl, p_patch, tech, p_name)
+            p_diff = generate_remediation_diff(
+                manifest_path, parent_line_idx, p_decl, p_patch, tech, p_name
+            )
             if p_diff:
-                parent_options.append({
-                    "id": "patch",
-                    "label": f"Patch {p_name}: v{_clean_version_str(p_patch)}",
-                    "badge": "Patch / Bugfix",
-                    "badge_class": "v-chip-ok",
-                    "diff": p_diff,
-                })
+                parent_options.append(
+                    {
+                        "id": "patch",
+                        "label": f"Patch {p_name}: v{_clean_version_str(p_patch)}",
+                        "badge": "Patch / Bugfix",
+                        "badge_class": "v-chip-ok",
+                        "diff": p_diff,
+                    }
+                )
         if p_sm:
-            p_diff = generate_remediation_diff(manifest_path, parent_line_idx, p_decl, p_sm, tech, p_name)
+            p_diff = generate_remediation_diff(
+                manifest_path, parent_line_idx, p_decl, p_sm, tech, p_name
+            )
             if p_diff:
-                parent_options.append({
-                    "id": "minor",
-                    "label": f"Minor {p_name}: v{_clean_version_str(p_sm)}",
-                    "badge": "Minor / Feature",
-                    "badge_class": "v-chip-safe",
-                    "diff": p_diff,
-                })
+                parent_options.append(
+                    {
+                        "id": "minor",
+                        "label": f"Minor {p_name}: v{_clean_version_str(p_sm)}",
+                        "badge": "Minor / Feature",
+                        "badge_class": "v-chip-safe",
+                        "diff": p_diff,
+                    }
+                )
         if p_abs:
-            p_diff = generate_remediation_diff(manifest_path, parent_line_idx, p_decl, p_abs, tech, p_name)
+            p_diff = generate_remediation_diff(
+                manifest_path, parent_line_idx, p_decl, p_abs, tech, p_name
+            )
             if p_diff:
-                parent_options.append({
-                    "id": "major",
-                    "label": f"Major {p_name}: v{_clean_version_str(p_abs)}",
-                    "badge": "Major / Breaking",
-                    "badge_class": "v-chip-major",
-                    "diff": p_diff,
-                })
+                parent_options.append(
+                    {
+                        "id": "major",
+                        "label": f"Major {p_name}: v{_clean_version_str(p_abs)}",
+                        "badge": "Major / Breaking",
+                        "badge_class": "v-chip-major",
+                        "diff": p_diff,
+                    }
+                )
 
         if parent_options:
-            strategies.append({
-                "id": "parent_upgrade",
-                "title": f"Upgrade Parent Package ({p_name})",
-                "description": f"Recommended. Upgrades parent package '{p_name}' which requires '{name}'.",
-                "is_recommended": True,
-                "options": parent_options,
-            })
+            strategies.append(
+                {
+                    "id": "parent_upgrade",
+                    "title": f"Upgrade Parent Package ({p_name})",
+                    "description": f"Recommended. Upgrades parent package '{p_name}' which requires '{name}'.",
+                    "is_recommended": True,
+                    "options": parent_options,
+                }
+            )
             break
 
     return strategies
 
 
-def _populate_override_strategies(manifest_path, name, tech, latest_patch, latest_sm, latest_abs, clean_installed, has_prior_strategies):
+def _populate_override_strategies(
+    manifest_path,
+    name,
+    tech,
+    latest_patch,
+    latest_sm,
+    latest_abs,
+    clean_installed,
+    has_prior_strategies,
+):
     target_ver_str = latest_patch or latest_sm or latest_abs or clean_installed
     if not target_ver_str:
         return []
 
-    ov_diff = generate_override_remediation_diff(manifest_path, name, target_ver_str, tech)
+    ov_diff = generate_override_remediation_diff(
+        manifest_path, name, target_ver_str, tech
+    )
     if not ov_diff:
         return []
 
-    ov_badge = "Patch" if target_ver_str == latest_patch else "Minor" if target_ver_str == latest_sm else "Major"
-    ov_badge_class = "v-chip-ok" if ov_badge == "Patch" else "v-chip-safe" if ov_badge == "Minor" else "v-chip-major"
+    ov_badge = (
+        "Patch"
+        if target_ver_str == latest_patch
+        else "Minor" if target_ver_str == latest_sm else "Major"
+    )
+    ov_badge_class = (
+        "v-chip-ok"
+        if ov_badge == "Patch"
+        else "v-chip-safe" if ov_badge == "Minor" else "v-chip-major"
+    )
 
-    return [{
-        "id": "override",
-        "title": f"Force Transitive Override ({name})",
-        "description": f"Adds explicit override / resolution for '{name}' in manifest.",
-        "is_recommended": not has_prior_strategies,
-        "options": [{
+    return [
+        {
             "id": "override",
-            "label": f"Override {name}: v{_clean_version_str(target_ver_str)}",
-            "badge": ov_badge,
-            "badge_class": ov_badge_class,
-            "diff": ov_diff,
-        }],
-    }]
+            "title": f"Force Transitive Override ({name})",
+            "description": f"Adds explicit override / resolution for '{name}' in manifest.",
+            "is_recommended": not has_prior_strategies,
+            "options": [
+                {
+                    "id": "override",
+                    "label": f"Override {name}: v{_clean_version_str(target_ver_str)}",
+                    "badge": ov_badge,
+                    "badge_class": ov_badge_class,
+                    "diff": ov_diff,
+                }
+            ],
+        }
+    ]
 
 
 def _build_final_remediation(strategies, manifest_missing):
@@ -10050,8 +10353,13 @@ def _build_final_remediation(strategies, manifest_missing):
     for st in strategies:
         all_flat_options.extend(st.get("options", []))
 
-    remediation_safe = next((opt["diff"] for opt in all_flat_options if opt["id"] in {"patch", "minor"}), None)
-    remediation_major = next((opt["diff"] for opt in all_flat_options if opt["id"] == "major"), None)
+    remediation_safe = next(
+        (opt["diff"] for opt in all_flat_options if opt["id"] in {"patch", "minor"}),
+        None,
+    )
+    remediation_major = next(
+        (opt["diff"] for opt in all_flat_options if opt["id"] == "major"), None
+    )
     remediation_options = (
         [{"label": opt["label"], "diff": opt["diff"]} for opt in all_flat_options]
         if all_flat_options
@@ -10093,12 +10401,20 @@ def populate_remediation_recommendations(results, default_project_path):
         found_line_idx = None
         best_score = -1
         for idx, line in enumerate(lines):
-            matched = (f'"{pkg_name}"' in line or '"engines"' in line) if is_engine else match_line_for_dependency(line, pkg_name, tech)
+            matched = (
+                (f'"{pkg_name}"' in line or '"engines"' in line)
+                if is_engine
+                else match_line_for_dependency(line, pkg_name, tech)
+            )
             if matched:
                 score = 1
                 if declared:
                     ver_digits = re.search(r"\d+\.\d+", str(declared))
-                    if ver_digits and ver_digits.group(0) in line or str(declared).strip() in line:
+                    if (
+                        ver_digits
+                        and ver_digits.group(0) in line
+                        or str(declared).strip() in line
+                    ):
                         score = 2
                 if score > best_score:
                     best_score = score
@@ -10115,7 +10431,9 @@ def populate_remediation_recommendations(results, default_project_path):
         if cache_key not in manifest_files_cache:
             if is_engine:
                 pkg_json = os.path.join(p_path, "package.json")
-                manifest_files_cache[cache_key] = [pkg_json] if os.path.exists(pkg_json) else []
+                manifest_files_cache[cache_key] = (
+                    [pkg_json] if os.path.exists(pkg_json) else []
+                )
             else:
                 manifest_files_cache[cache_key] = find_manifest_files(p_path, tech)
         return manifest_files_cache[cache_key]
@@ -10135,7 +10453,13 @@ def populate_remediation_recommendations(results, default_project_path):
 
         r["remediation"] = None
 
-        is_outdated = r.get("status") in {"major", "minor", "patch", "minor-major", "patch-major"}
+        is_outdated = r.get("status") in {
+            "major",
+            "minor",
+            "patch",
+            "minor-major",
+            "patch-major",
+        }
         has_vulns = bool(r.get("vulnerabilities"))
         is_depr = bool(r.get("deprecated"))
 
@@ -10152,7 +10476,9 @@ def populate_remediation_recommendations(results, default_project_path):
         installed = r.get("installed")
         dep_type = r.get("dep_type")
 
-        clean_installed = installed[0] if (isinstance(installed, list) and installed) else installed
+        clean_installed = (
+            installed[0] if (isinstance(installed, list) and installed) else installed
+        )
         latest_patch = r.get("latest_patch")
         latest_sm = r.get("latest_same_major")
         latest_abs = r.get("latest_absolute") or r.get("latest")
@@ -10160,21 +10486,30 @@ def populate_remediation_recommendations(results, default_project_path):
         clean_inst_v = _clean_version_str(clean_installed)
         clean_decl_v = _clean_version_str(declared)
 
-        if latest_patch and _clean_version_str(latest_patch) in (clean_inst_v, clean_decl_v):
+        if latest_patch and _clean_version_str(latest_patch) in (
+            clean_inst_v,
+            clean_decl_v,
+        ):
             latest_patch = None
         if latest_sm and (
             _clean_version_str(latest_sm) in (clean_inst_v, clean_decl_v)
             or _clean_version_str(latest_sm) == _clean_version_str(latest_patch)
         ):
             latest_sm = None
-        if latest_abs and " or " not in str(latest_abs) and (
-            _clean_version_str(latest_abs) in (clean_inst_v, clean_decl_v)
-            or _clean_version_str(latest_abs) == _clean_version_str(latest_sm)
-            or _clean_version_str(latest_abs) == _clean_version_str(latest_patch)
+        if (
+            latest_abs
+            and " or " not in str(latest_abs)
+            and (
+                _clean_version_str(latest_abs) in (clean_inst_v, clean_decl_v)
+                or _clean_version_str(latest_abs) == _clean_version_str(latest_sm)
+                or _clean_version_str(latest_abs) == _clean_version_str(latest_patch)
+            )
         ):
             latest_abs = None
 
-        manifest_files = _get_manifest_files(project_path, tech, r.get("is_engine", False))
+        manifest_files = _get_manifest_files(
+            project_path, tech, r.get("is_engine", False)
+        )
         if not manifest_files:
             continue
 
@@ -10183,21 +10518,50 @@ def populate_remediation_recommendations(results, default_project_path):
         if not lines:
             continue
 
-        found_line_idx = _find_line_idx(manifest_path, lines, name, tech, declared, r.get("is_engine", False))
-        manifest_missing = (found_line_idx is None and dep_type != "Transitive" and not r.get("required_by"))
+        found_line_idx = _find_line_idx(
+            manifest_path, lines, name, tech, declared, r.get("is_engine", False)
+        )
+        manifest_missing = (
+            found_line_idx is None
+            and dep_type != "Transitive"
+            and not r.get("required_by")
+        )
 
         strategies = []
 
         if dep_type != "Transitive" or found_line_idx is not None:
-            strategies.extend(_populate_direct_strategies(
-                r, manifest_path, found_line_idx, name, declared, tech, latest_patch, latest_sm, latest_abs
-            ))
+            strategies.extend(
+                _populate_direct_strategies(
+                    r,
+                    manifest_path,
+                    found_line_idx,
+                    name,
+                    declared,
+                    tech,
+                    latest_patch,
+                    latest_sm,
+                    latest_abs,
+                )
+            )
 
         if dep_type == "Transitive" and found_line_idx is None:
-            strategies.extend(_populate_parent_strategies(r, results, manifest_path, lines, tech, name, _find_line_idx))
-            strategies.extend(_populate_override_strategies(
-                manifest_path, name, tech, latest_patch, latest_sm, latest_abs, clean_installed, bool(strategies)
-            ))
+            strategies.extend(
+                _populate_parent_strategies(
+                    r, results, manifest_path, lines, tech, name, _find_line_idx
+                )
+            )
+            strategies.extend(
+                _populate_override_strategies(
+                    manifest_path,
+                    name,
+                    tech,
+                    latest_patch,
+                    latest_sm,
+                    latest_abs,
+                    clean_installed,
+                    bool(strategies),
+                )
+            )
 
         remed_dict = _build_final_remediation(strategies, manifest_missing)
         if remed_dict:
@@ -10735,10 +11099,10 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             single_path = unique_project_paths[0]
             techs = sorted(
                 {
-                        r.get("technology")
-                        for r in results
-                        if r.get("project_path") == single_path and r.get("technology")
-                    }
+                    r.get("technology")
+                    for r in results
+                    if r.get("project_path") == single_path and r.get("technology")
+                }
             )
             tech_suffix = f" [{', '.join(techs)}]" if techs else ""
             project_path_header_html = f"<div>Path: <strong>{escape_html(single_path)}{escape_html(tech_suffix)}</strong></div>"
@@ -11505,7 +11869,6 @@ def run_scan_all(args, parser):
             f"{COLOR_YELLOW}{ICON_WARN} No dependency check results collected from projects.{COLOR_RESET}"
         )
         sys.exit(0)
-
 
     combined_results = sorted(combined_results, key=lambda x: x["name"].lower())
 

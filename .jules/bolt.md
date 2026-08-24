@@ -12,3 +12,7 @@
 ## 2026-08-23 - re.compile module cache bypass for CVSS severity parsing
 **Learning:** In Python, `re.search()` with a string pattern requires a lookup in the `re` module's internal cache every time it's called. By using `re.compile()` at the module level and calling `.search()` directly on the compiled object, the code avoids this cache lookup, making execution slightly faster. This is a classic and highly effective micro-optimization for functions that are called repeatedly in a loop.
 **Action:** Move static regexes (using `re.compile()`) to the global module scope instead of caching them locally within frequently called functions or loops, as it bypasses cache lookup and function call overhead.
+
+## $(date +%Y-%m-%d) - [O(n) BFS Traversal in find_direct_parents]
+**Learning:** Using `queue.pop(0)` on a standard Python list inside a BFS `while` loop makes the traversal O(V²) instead of O(V+E) because popping from the start of a list requires shifting all subsequent elements, which is an O(n) operation.
+**Action:** Always use `collections.deque.popleft()` or a read pointer index (`queue_idx += 1`) when implementing queue-based processing in Python to ensure O(1) dequeue performance.
