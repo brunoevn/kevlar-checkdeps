@@ -11,6 +11,7 @@ import base64
 import codecs
 import ctypes
 import functools
+import gzip
 import json
 import os
 import random
@@ -28,6 +29,7 @@ import xml.etree.ElementTree as ET
 import xml.parsers.expat
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
+from typing import Any, Dict, List, Optional, Set, Tuple, TypedDict, Union
 
 import tomllib
 
@@ -59,7 +61,110 @@ sys.stderr = SafeWriter(sys.stderr)
 # Global lock to protect concurrent console writes (sys.stdout, sys.stderr, print)
 console_lock = threading.Lock()
 
-VERSION = "1.10.9"
+# Multi-project cross-run in-memory caches
+_CACHE_LOCK = threading.Lock()
+_REGISTRY_METADATA_CACHE: Dict[Tuple[str, str], Any] = {}
+_TARGET_RESULTS_CACHE: Dict[
+    Tuple[str, str, Optional[str], Tuple[str, ...]], List[Dict[str, Any]]
+] = {}
+_OSV_VULNS_CACHE: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = {}
+_OSV_HYDRATED_DETAILS_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def clear_kevlar_cache():
+    """Clears all in-memory registry and vulnerability caches."""
+    with _CACHE_LOCK:
+        _REGISTRY_METADATA_CACHE.clear()
+        _TARGET_RESULTS_CACHE.clear()
+        _OSV_VULNS_CACHE.clear()
+        _OSV_HYDRATED_DETAILS_CACHE.clear()
+
+
+def _get_cached_target_result(
+    tech: str, target: Dict[str, Any]
+) -> Optional[List[Dict[str, Any]]]:
+    """Retrieves cached evaluated target result if available."""
+    name = str(target.get("name", "")).lower()
+    declared = target.get("declared")
+    installed = tuple(sorted(target.get("installed", [])))
+    key = (tech, name, declared, installed)
+    with _CACHE_LOCK:
+        if key in _TARGET_RESULTS_CACHE:
+            return [dict(item) for item in _TARGET_RESULTS_CACHE[key]]
+    return None
+
+
+def _set_cached_target_result(
+    tech: str, target: Dict[str, Any], results: List[Dict[str, Any]]
+) -> None:
+    """Caches evaluated target result."""
+    name = str(target.get("name", "")).lower()
+    declared = target.get("declared")
+    installed = tuple(sorted(target.get("installed", [])))
+    key = (tech, name, declared, installed)
+    with _CACHE_LOCK:
+        _TARGET_RESULTS_CACHE[key] = [dict(item) for item in results]
+
+
+def _get_cached_registry_metadata(tech: str, package_name: str) -> Optional[Any]:
+    """Retrieves cached package-level registry metadata."""
+    key = (tech, package_name.lower())
+    with _CACHE_LOCK:
+        return _REGISTRY_METADATA_CACHE.get(key)
+
+
+def _set_cached_registry_metadata(
+    tech: str, package_name: str, data: Any
+) -> None:
+    """Caches package-level registry metadata."""
+    key = (tech, package_name.lower())
+    with _CACHE_LOCK:
+        _REGISTRY_METADATA_CACHE[key] = data
+
+
+class CheckTarget(TypedDict, total=False):
+    name: str
+    declared: Optional[str]
+    installed: List[str]
+
+
+class VulnerabilityItem(TypedDict, total=False):
+    id: str
+    aliases: List[str]
+    summary: str
+    details: str
+    severity: str
+    score: Optional[float]
+    fixed_version: Optional[str]
+    suppressed_reason: Optional[str]
+
+
+class RemediationOption(TypedDict, total=False):
+    id: str
+    label: str
+    badge: str
+    badge_class: str
+    diff: Dict[str, Any]
+
+
+class ScanResultRow(TypedDict, total=False):
+    name: str
+    declared: Optional[str]
+    installed: Optional[str]
+    latest: Optional[str]
+    latest_same_major: Optional[str]
+    latest_absolute: Optional[str]
+    status: str
+    deprecated: Union[bool, str, None]
+    error: Optional[str]
+    repo_url: Optional[str]
+    compare_url: Optional[str]
+    releases_url: Optional[str]
+    vulnerabilities: List[VulnerabilityItem]
+    remediation: Optional[Dict[str, Any]]
+
+
+VERSION = "1.10.10"
 
 # External APIs Configuration
 URL_NPM_REGISTRY = "https://registry.npmjs.org/"
@@ -177,6 +282,25 @@ RE_SEMVER_ALPHA = re.compile(r"([a-zA-Z]+.*)$")
 RE_SEMVER_DIGITS = re.compile(r"\d+")
 RE_CLEAN_VER = re.compile(r"^[^\d]*")
 
+# Optimization: Use global compiled regexes to avoid cache lookup and call overhead in hot loops
+RE_PEP508_REQ = re.compile(
+    r"^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)(?:\s*\[\s*([A-Za-z0-9_,.-]+)\s*\])?\s*(.*)$"
+)
+RE_PEP508_OP = re.compile(r"([><=^~!]+)\s+")
+RE_PEP508_NAME = re.compile(r"^([a-zA-Z0-9\-_\.]+)(.*)$")
+RE_PEP508_EXTRA = re.compile(r"^\[[^\]]*\](.*)$")
+RE_OPERATOR_PREFIX = re.compile(r"^[~^>=<!\s]+")
+RE_OPERATOR_PREFIX_MATCH = re.compile(r"^([~^>=<!\s]+)\s*(.*)$")
+RE_OPERATOR_START = re.compile(r"^[~^>=<!]")
+RE_NUM_START = re.compile(r"^(\d+)")
+RE_DECIMAL_VER = re.compile(r"\d+\.\d+(?:\.\d+)?(?:\.\d+)?")
+RE_DECIMAL_VER_STRICT = re.compile(r"^\d+\.\d+(?:\.\d+)?(?:\.\d+)?$")
+
+RE_CVSS4_SEV = re.compile(r"(CVSS:4\.[0-9a-zA-Z/:.]+)")
+RE_CVSS3_SEV = re.compile(r"(CVSS:3\.[0-9a-zA-Z/:.]+)")
+RE_CVSS2_SEV = re.compile(r"(CVSS:2\.[0-9a-zA-Z/:.]+)")
+RE_AV_SEV = re.compile(r"(AV:[NAL]/AC:[HML]/Au:[MSN]/C:[NPC]/I:[NPC]/A:[NPC])")
+
 SEMVER_REGEX = re.compile(
     r"^v?(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)"
     r"(?:-(?P<prerelease>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
@@ -220,7 +344,7 @@ def init_colors_and_encoding():
             if kernel32.GetConsoleMode(h_out, ctypes.byref(mode)):
                 # ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
                 kernel32.SetConsoleMode(h_out, mode.value | 0x0004)
-        except Exception:
+        except (AttributeError, OSError, ctypes.ArgumentError):
             pass
 
     # 2. Check encoding of stdout to fallback if Unicode is not supported
@@ -259,8 +383,8 @@ def _is_safe_path(base_dir, target_path):
     """
     if not base_dir or not target_path:
         return False
-    real_base = os.path.realpath(base_dir)
-    real_target = os.path.realpath(target_path)
+    real_base = os.path.normcase(os.path.realpath(base_dir))
+    real_target = os.path.normcase(os.path.realpath(target_path))
     if real_target == real_base:
         return True
     base_prefix = (
@@ -474,7 +598,7 @@ def get_severity_level(vuln):
 
     # 2. CVSS score calculations
     if "CVSS" in sev_upper or "AV:" in sev_upper:
-        m4 = re.search(r"(CVSS:4\.[0-9a-zA-Z/:.]+)", sev_upper)
+        m4 = RE_CVSS4_SEV.search(sev_upper)
         if m4:
             vector = m4.group(1)
             score = calculate_cvss4_score_approx(vector)
@@ -488,7 +612,7 @@ def get_severity_level(vuln):
                 elif score >= 0.1:
                     return "low"
 
-        m3 = re.search(r"(CVSS:3\.[0-9a-zA-Z/:.]+)", sev_upper)
+        m3 = RE_CVSS3_SEV.search(sev_upper)
         if m3:
             vector = m3.group(1)
             score = calculate_cvss3_score(vector)
@@ -503,13 +627,11 @@ def get_severity_level(vuln):
                     return "low"
 
         vector2 = None
-        m2 = re.search(r"(CVSS:2\.[0-9a-zA-Z/:.]+)", sev_upper)
+        m2 = RE_CVSS2_SEV.search(sev_upper)
         if m2:
             vector2 = m2.group(1)
         elif "AV:" in sev_upper:
-            m_raw2 = re.search(
-                r"(AV:[NAL]/AC:[HML]/Au:[MSN]/C:[NPC]/I:[NPC]/A:[NPC])", sev_upper
-            )
+            m_raw2 = RE_AV_SEV.search(sev_upper)
             if m_raw2:
                 vector2 = m_raw2.group(1)
 
@@ -637,7 +759,7 @@ def parse_secure_xml(content, max_depth=15, max_expanded_size=10 * 1024 * 1024):
             )
             if m:
                 encoding = m.group(1)
-        except Exception:
+        except (UnicodeError, IndexError, AttributeError):
             pass
         try:
             content_str = content.decode(encoding, errors="replace")
@@ -720,7 +842,7 @@ def _sanitize_error_message(exc, target_name):
     if isinstance(exc, urllib.error.HTTPError):
         if exc.code == 404:
             return "Registry returned not found (404)"
-        elif exc.code in (408, 504):
+        elif exc.code in {408, 504}:
             return "Registry communication timeout"
         elif exc.code >= 500:
             return "Internal server error on registry side"
@@ -792,7 +914,7 @@ def safe_urlopen(req, timeout=10, max_retries=5, backoff=0.5):
             return urllib.request.urlopen(req, timeout=timeout)
         except urllib.error.HTTPError as e:
             if e.code == 404:
-                raise e
+                raise
             if e.code == 429:
                 last_err = e
                 if attempt < max_retries - 1:
@@ -811,9 +933,9 @@ def safe_urlopen(req, timeout=10, max_retries=5, backoff=0.5):
                         wait_sec = backoff * (2**attempt) + random.uniform(0.5, 1.5)
                     time.sleep(wait_sec)
                     continue
-                raise e
+                raise
             if e.code < 500:
-                raise e
+                raise
             last_err = e
         except (
             urllib.error.URLError,
@@ -1101,7 +1223,7 @@ def satisfy_term(version_str, term):
 
         _, v_maj, v_min, v_pat, _, _ = parse_semver(version_str)
 
-        if (ver_part.endswith(".x") or ver_part.endswith(".*")) and op not in {
+        if (ver_part.endswith((".x", ".*"))) and op not in {
             "^",
             "~",
         }:
@@ -1326,7 +1448,7 @@ def analyze_node_constraint(constraint_str):
     today = date.today()
 
     # Sort and filter known major versions from the schedule keys
-    test_majors = sorted([k for k in schedule.keys() if k.isdigit()], key=int)
+    test_majors = sorted([k for k in schedule if k.isdigit()], key=int)
     test_majors.append(FUTURE_MAJOR_PLACEHOLDER)
 
     # Filter for active (non-EOL) even major versions
@@ -1450,7 +1572,7 @@ def find_node_constraint(base_path, pkg_data):
                         if re.match(r"^v?\d+", content):
                             return f"={content}", ".nvmrc"
                         return content, ".nvmrc"
-        except Exception:
+        except OSError:
             pass
 
     node_ver_path = os.path.join(base_path, ".node-version")
@@ -1464,7 +1586,7 @@ def find_node_constraint(base_path, pkg_data):
                         if re.match(r"^v?\d+", content):
                             return f"={content}", ".node-version"
                         return content, ".node-version"
-        except Exception:
+        except OSError:
             pass
 
     return None, None
@@ -1750,9 +1872,8 @@ def resolve_maven_repo(registry_url, group_path, artifact_id, version):
                     child_tag = child.tag.split("}")[-1]
                     if child_tag == "url":
                         scm_url = child.text
-            elif tag_local == "url":
-                if elem.text:
-                    proj_url = elem.text
+            elif tag_local == "url" and elem.text:
+                proj_url = elem.text
         return clean_repo_url(scm_url or proj_url)
     except Exception as e:
         if DEBUG_MODE:
@@ -1835,7 +1956,7 @@ def format_yarn_berry_checksum(checksum_val):
             raw_bytes = codecs.decode(hash_str.strip(), "hex")
             b64_bytes = base64.b64encode(raw_bytes)
             return f"{algo}-{b64_bytes.decode('utf-8')}"
-        except Exception:
+        except (ValueError, UnicodeError):
             pass
 
     # Fallback to replacing colon with hyphen if it's already in sha512: or sha1: form
@@ -1957,9 +2078,7 @@ def parse_yarn_lock(filepath):
                                 parents.setdefault(dep_name, set()).add(name)
                     else:
                         # Parsing properties of the current package
-                        if stripped.startswith("version ") or stripped.startswith(
-                            "version:"
-                        ):
+                        if stripped.startswith(("version ", "version:")):
                             ver_val = (
                                 stripped.split(" ", 1)[-1]
                                 if " " in stripped
@@ -1970,9 +2089,7 @@ def parse_yarn_lock(filepath):
                             for name in current_names:
                                 resolved.setdefault(name, set()).add(ver_val)
 
-                        elif stripped.startswith("integrity ") or stripped.startswith(
-                            "integrity:"
-                        ):
+                        elif stripped.startswith(("integrity ", "integrity:")):
                             integrity_val = (
                                 stripped.split(" ", 1)[-1]
                                 if " " in stripped
@@ -1983,9 +2100,7 @@ def parse_yarn_lock(filepath):
                             )
                             current_integrity = integrity_val
 
-                        elif stripped.startswith("checksum:") or stripped.startswith(
-                            "checksum "
-                        ):
+                        elif stripped.startswith(("checksum:", "checksum ")):
                             checksum_val = (
                                 stripped.split(" ", 1)[-1]
                                 if " " in stripped
@@ -2077,9 +2192,7 @@ def parse_pnpm_lock(filepath):
                 if stripped.startswith("importers:"):
                     stack.append((indent, "IMPORTERS", None))
                     continue
-                elif stripped.startswith("packages:") or stripped.startswith(
-                    "snapshots:"
-                ):
+                elif stripped.startswith(("packages:", "snapshots:")):
                     stack.append((indent, "PACKAGES", None))
                     continue
 
@@ -2207,7 +2320,7 @@ def parse_pnpm_lock(filepath):
                     # We are in a list of dependencies under a package.
                     # Each line is: dependency_name: version
                     if ":" in stripped:
-                        dep_name, dep_ver = stripped.split(":", 1)
+                        dep_name, _dep_ver = stripped.split(":", 1)
                         dep_name = dep_name.strip().strip("'\"")
                         if (
                             dep_name
@@ -2275,7 +2388,7 @@ def parse_package_lock(filepath):
         if "packages" in data and isinstance(data["packages"], dict):
             # Map path to package name
             path_to_name = {}
-            for pkg_path in data["packages"].keys():
+            for pkg_path in data["packages"]:
                 if pkg_path == "":
                     path_to_name[pkg_path] = "root"
                     continue
@@ -2412,18 +2525,22 @@ def find_direct_installed_version(
                 return satisfying[0]
             elif len(satisfying) > 1:
                 return max(satisfying, key=parse_semver)
-        except Exception:
+        except (ValueError, TypeError, KeyError):
             pass
 
     # Fallback 2: The highest installed version
     try:
         return max(installed_versions, key=parse_semver)
-    except Exception:
+    except (ValueError, TypeError):
         return installed_versions[-1]
 
 
 def check_npm_package(target):
     """Queries npm registry for package metadata and checks target version."""
+    cached_res = _get_cached_target_result("npm", target)
+    if cached_res is not None:
+        return cached_res
+
     name = target["name"]
     declared = target["declared"]
     installed_versions = target["installed"]
@@ -2434,40 +2551,43 @@ def check_npm_package(target):
             return False
         v = ver_str.strip()
         return (
-            v.startswith("file:")
-            or v.startswith("link:")
-            or v.startswith("portal:")
-            or v.startswith("workspace:")
-            or v.startswith("./")
-            or v.startswith("../")
-            or v.startswith("/")
+            v.startswith(("file:", "link:", "portal:", "workspace:", "./", "../", "/"))
         )
 
     versions_to_check = installed_versions if installed_versions else [declared]
     results = []
 
     try:
-        # Properly URL-encode scoped packages (e.g. @babel/core -> @babel%2Fcore)
-        if name.startswith("@"):
-            parts = name.split("/")
-            if len(parts) == 2:
-                encoded_name = f"{parts[0]}%2F{parts[1]}"
+        # Check package-level metadata cache
+        cached_meta = _get_cached_registry_metadata("npm", name)
+        if cached_meta is not None:
+            latest_version, all_versions_meta = cached_meta
+            all_versions = list(all_versions_meta.keys())
+        else:
+            # Properly URL-encode scoped packages (e.g. @babel/core -> @babel%2Fcore)
+            if name.startswith("@"):
+                parts = name.split("/")
+                if len(parts) == 2:
+                    encoded_name = f"{parts[0]}%2F{parts[1]}"
+                else:
+                    encoded_name = urllib.parse.quote(name)
             else:
                 encoded_name = urllib.parse.quote(name)
-        else:
-            encoded_name = urllib.parse.quote(name)
 
-        url = f"{URL_NPM_REGISTRY}{encoded_name}"
-        req = urllib.request.Request(url)
-        # Use abbreviated metadata format header
-        req.add_header("Accept", "application/vnd.npm.install-v1+json")
+            url = f"{URL_NPM_REGISTRY}{encoded_name}"
+            req = urllib.request.Request(url)
+            # Use abbreviated metadata format header
+            req.add_header("Accept", "application/vnd.npm.install-v1+json")
 
-        with safe_urlopen(req, timeout=10) as response:
-            data = json.loads(response.read().decode("utf-8"))
+            with safe_urlopen(req, timeout=10) as response:
+                data = json.loads(response.read().decode("utf-8"))
 
-        latest_version = data.get("dist-tags", {}).get("latest")
-        all_versions_meta = data.get("versions", {})
-        all_versions = list(all_versions_meta.keys())
+            latest_version = data.get("dist-tags", {}).get("latest")
+            all_versions_meta = data.get("versions", {})
+            all_versions = list(all_versions_meta.keys())
+            _set_cached_registry_metadata(
+                "npm", name, (latest_version, all_versions_meta)
+            )
 
         for ver_str in versions_to_check:
             # If the version itself is explicitly local, we treat it as Local/local
@@ -2625,6 +2745,7 @@ def check_npm_package(target):
                 }
             )
 
+    _set_cached_target_result("npm", target, results)
     return results
 
 
@@ -2646,10 +2767,7 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
     """Checks vulnerabilities for all targets using OSV querybatch API.
     Returns a dict mapping (package_name, version) -> list of hydrated vulnerability dicts.
     """
-    print(
-        f"{COLOR_BOLD}{COLOR_CYAN}Querying OSV vulnerability database...{COLOR_RESET}\n"
-    )
-
+    final_package_to_vulns = {}
     queries = []
     query_mapping = []
 
@@ -2665,6 +2783,16 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
             if not clean_ver:
                 clean_ver = "0.0.0"
 
+            cache_key = (ecosystem, name.lower(), clean_ver)
+            with _CACHE_LOCK:
+                if cache_key in _OSV_VULNS_CACHE:
+                    cached_vulns = _OSV_VULNS_CACHE[cache_key]
+                    if cached_vulns:
+                        cached_copies = [dict(v) for v in cached_vulns]
+                        final_package_to_vulns[(name, ver_str)] = cached_copies
+                        final_package_to_vulns[(name, clean_ver)] = cached_copies
+                    continue
+
             queries.append(
                 {
                     "package": {"name": name, "ecosystem": ecosystem},
@@ -2674,7 +2802,11 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
             query_mapping.append((name, ver_str, clean_ver))
 
     if not queries:
-        return {}
+        return final_package_to_vulns
+
+    print(
+        f"{COLOR_BOLD}{COLOR_CYAN}Querying OSV vulnerability database...{COLOR_RESET}\n"
+    )
 
     results_list = []
     chunk_size = 1000
@@ -2708,6 +2840,9 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
 
     # Process batch results and collect vulnerability details
     hydrated_details = {}
+    with _CACHE_LOCK:
+        hydrated_details.update(_OSV_HYDRATED_DETAILS_CACHE)
+
     package_to_vuln_ids = {}
 
     total_results = len(results_list)
@@ -2753,7 +2888,12 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
                     vuln_id = vuln["id"]
                     ids.append(vuln_id)
                     hydrated_details[vuln_id] = vuln
+                    with _CACHE_LOCK:
+                        _OSV_HYDRATED_DETAILS_CACHE[vuln_id] = vuln
             package_to_vuln_ids[(name, clean_ver)] = ids
+        else:
+            # Explicitly store empty vuln list for clean packages
+            package_to_vuln_ids[(name, clean_ver)] = []
 
     # Clean current line after in-memory hydration
     sys.stdout.write("\r\033[K")
@@ -2803,12 +2943,13 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
 
                 vid_res, detail = future.result()
                 hydrated_details[vid_res] = detail
+                with _CACHE_LOCK:
+                    _OSV_HYDRATED_DETAILS_CACHE[vid_res] = detail
 
         sys.stdout.write("\r\033[K")
         sys.stdout.flush()
 
     # Map back to packages
-    package_to_vulns = {}
     for (name, clean_ver), vids in package_to_vuln_ids.items():
         vuln_list = []
         for vid in vids:
@@ -2898,9 +3039,21 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
         vuln_list.sort(
             key=lambda v: severity_order.get(get_severity_level(v), 0), reverse=True
         )
-        package_to_vulns[(name, clean_ver)] = vuln_list
 
-    return package_to_vulns
+        cache_key = (ecosystem, name.lower(), clean_ver)
+        with _CACHE_LOCK:
+            _OSV_VULNS_CACHE[cache_key] = vuln_list
+
+        if vuln_list:
+            final_package_to_vulns[(name, clean_ver)] = [dict(v) for v in vuln_list]
+
+    for name, ver_str, clean_ver in query_mapping:
+        if (name, clean_ver) in final_package_to_vulns:
+            final_package_to_vulns[(name, ver_str)] = final_package_to_vulns[
+                (name, clean_ver)
+            ]
+
+    return final_package_to_vulns
 
 
 def validate_suppressions_schema(data):
@@ -3276,7 +3429,7 @@ def _resolve_npm_dependency_types(results, pkg_data, parents_data):
                 direct_parents = find_direct_parents(
                     r["name"], parents_data, direct_packages
                 )
-                r["required_by"] = sorted(list(direct_parents - {r["name"]}))
+                r["required_by"] = sorted(direct_parents - {r["name"]})
         else:
             r["dep_type"] = "Engine"
             r["required_by"] = []
@@ -3346,7 +3499,7 @@ def parse_version_to_tuple_marker(v_str):
     v_str = re.sub(r"^[^\d]+", "", v_str)
     parts = []
     for part in v_str.split("."):
-        m = re.match(r"^(\d+)", part)
+        m = RE_NUM_START.match(part)
         if m:
             parts.append(int(m.group(1)))
         else:
@@ -3692,15 +3845,12 @@ def parse_requirements_txt(filepath, seen_files=None, base_dir=None):
                 marker_part = None
 
             # Parse package name, optional extras, and specifier/URL (PEP 508 names must start with alphanumeric)
-            match = re.match(
-                r"^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)(?:\s*\[\s*([A-Za-z0-9_,.-]+)\s*\])?\s*(.*)$",
-                req_part,
-            )
+            match = RE_PEP508_REQ.match(req_part)
             if not match:
                 continue
 
             pkg_name = match.group(1)
-            extras = match.group(2)
+            match.group(2)
             rest = match.group(3).strip()
 
             # Evaluate markers if present
@@ -3719,7 +3869,7 @@ def parse_requirements_txt(filepath, seen_files=None, base_dir=None):
                 url_part = rest[1:].strip()
                 version_spec = f"@ {url_part}"
             elif rest:
-                version_spec = re.sub(r"([><=^~!]+)\s+", r"\1", rest)
+                version_spec = RE_PEP508_OP.sub(r"\1", rest)
             else:
                 version_spec = "*"
 
@@ -3743,6 +3893,10 @@ def parse_requirements_txt(filepath, seen_files=None, base_dir=None):
 
 def check_pypi_package(target):
     """Queries PyPI registry for package metadata and checks target version."""
+    cached_res = _get_cached_target_result("pip", target)
+    if cached_res is not None:
+        return cached_res
+
     name = target["name"]
     declared = target["declared"]
     installed_versions = target["installed"]
@@ -3751,17 +3905,51 @@ def check_pypi_package(target):
     results = []
 
     try:
-        encoded_name = urllib.parse.quote(name)
-        url = f"{URL_PYPI_REGISTRY}{encoded_name}/json"
+        cached_meta = _get_cached_registry_metadata("pip", name)
+        if cached_meta is not None:
+            latest_version, releases, repo_url_raw = cached_meta
+            all_versions = list(releases.keys())
+        else:
+            encoded_name = urllib.parse.quote(name)
+            url = f"{URL_PYPI_REGISTRY}{encoded_name}/json"
 
-        req = urllib.request.Request(url)
-        with safe_urlopen(req, timeout=10) as response:
-            data = json.loads(response.read().decode("utf-8"))
+            req = urllib.request.Request(url)
+            with safe_urlopen(req, timeout=10) as response:
+                data = json.loads(response.read().decode("utf-8"))
 
-        info = data.get("info", {})
-        latest_version = info.get("version")
-        releases = data.get("releases", {})
-        all_versions = list(releases.keys())
+            info = data.get("info", {})
+            latest_version = info.get("version")
+            releases = data.get("releases", {})
+            all_versions = list(releases.keys())
+
+            urls = info.get("project_urls") or {}
+            repo_url_raw = None
+            for key in ["Source", "Repository", "Code", "Homepage"]:
+                for k, v in urls.items():
+                    if (
+                        key.lower() in k.lower()
+                        and v
+                        and is_github_url(clean_repo_url(v))
+                    ):
+                        repo_url_raw = v
+                        break
+                if repo_url_raw:
+                    break
+            if not repo_url_raw:
+                hp = info.get("home_page")
+                if hp and is_github_url(clean_repo_url(hp)):
+                    repo_url_raw = hp
+            if not repo_url_raw:
+                for v in urls.values():
+                    if v and is_github_url(clean_repo_url(v)):
+                        repo_url_raw = v
+                        break
+            if not repo_url_raw:
+                repo_url_raw = info.get("home_page") or urls.get("Homepage")
+
+            _set_cached_registry_metadata(
+                "pip", name, (latest_version, releases, repo_url_raw)
+            )
 
         for ver_str in versions_to_check:
             # Clean version constraints prefixes
@@ -3797,31 +3985,7 @@ def check_pypi_package(target):
             compare_url = None
             releases_url = None
             if update_type in {"major", "minor-major", "patch-major"}:
-                urls = info.get("project_urls") or {}
-                raw_url = None
-                for key in ["Source", "Repository", "Code", "Homepage"]:
-                    for k, v in urls.items():
-                        if (
-                            key.lower() in k.lower()
-                            and v
-                            and is_github_url(clean_repo_url(v))
-                        ):
-                            raw_url = v
-                            break
-                    if raw_url:
-                        break
-                if not raw_url:
-                    hp = info.get("home_page")
-                    if hp and is_github_url(clean_repo_url(hp)):
-                        raw_url = hp
-                if not raw_url:
-                    for v in urls.values():
-                        if v and is_github_url(clean_repo_url(v)):
-                            raw_url = v
-                            break
-                if not raw_url:
-                    raw_url = info.get("home_page") or urls.get("Homepage")
-                repo_url = clean_repo_url(raw_url)
+                repo_url = clean_repo_url(repo_url_raw)
                 if repo_url:
                     compare_url = get_compare_url(repo_url, clean_ver, latest_absolute)
                     releases_url = (
@@ -3874,6 +4038,7 @@ def check_pypi_package(target):
                 }
             )
 
+    _set_cached_target_result("pip", target, results)
     return results
 
 
@@ -4078,18 +4243,18 @@ def parse_pep508(dep_string):
     req_part = dep_string.split(";", 1)[0].strip()
     if not req_part:
         return None, None
-    match = re.match(r"^([a-zA-Z0-9\-_\.]+)(.*)$", req_part)
+    match = RE_PEP508_NAME.match(req_part)
     if not match:
         return None, None
     name = match.group(1)
     rest = match.group(2).strip()
     if rest.startswith("["):
-        extra_match = re.match(r"^\[[^\]]*\](.*)$", rest)
+        extra_match = RE_PEP508_EXTRA.match(rest)
         if extra_match:
             rest = extra_match.group(1).strip()
     if rest.startswith("(") and rest.endswith(")"):
         rest = rest[1:-1].strip()
-    rest = re.sub(r"([><=^~!]+)\s+", r"\1", rest)
+    rest = RE_PEP508_OP.sub(r"\1", rest)
     version_spec = rest if rest else "*"
     return name, version_spec
 
@@ -4242,7 +4407,7 @@ def run_pip_checker(args):
     elif tech_type == "pipenv":
         print(f"{COLOR_GRAY}{ICON_INFO} Reading Pipfile.lock...{COLOR_RESET}")
         lock_deps, parents_data = parse_pipfile_lock(lock_file)
-        direct_deps = {k: "*" for k in lock_deps.keys()}
+        direct_deps = {k: "*" for k in lock_deps}
     elif tech_type == "pyproject":
         print(f"{COLOR_GRAY}{ICON_INFO} Reading pyproject.toml...{COLOR_RESET}")
         direct_deps = parse_pyproject_toml(manifest_file)
@@ -4438,9 +4603,7 @@ def find_nuget_files(path):
     if os.path.isfile(abs_path):
         if abs_path.lower().endswith((".sln", ".slnx")):
             sln_file = abs_path
-        elif abs_path.endswith((".csproj", ".vbproj", ".fsproj")) or abs_path.endswith(
-            "packages.config"
-        ):
+        elif abs_path.endswith((".csproj", ".vbproj", ".fsproj", "packages.config")):
             manifests = [abs_path]
     elif os.path.isdir(abs_path):
         sln_candidates = [
@@ -4549,7 +4712,7 @@ def parse_project_assets(filepath):
                     resolved.setdefault(name, set()).add(version)
 
         targets = data.get("targets", {})
-        for _target_name, target_libs in targets.items():
+        for target_libs in targets.values():
             for lib_key, lib_info in target_libs.items():
                 parts = lib_key.split("/")
                 if len(parts) != 2:
@@ -4557,14 +4720,14 @@ def parse_project_assets(filepath):
                 parent_name = parts[0]
 
                 deps = lib_info.get("dependencies", {})
-                for child_name in deps.keys():
+                for child_name in deps:
                     parents.setdefault(child_name, set()).add(parent_name)
 
         project_info = data.get("project", {})
         frameworks = project_info.get("frameworks", {})
-        for _fw_name, fw_info in frameworks.items():
+        for fw_info in frameworks.values():
             deps = fw_info.get("dependencies", {})
-            for child_name in deps.keys():
+            for child_name in deps:
                 parents.setdefault(child_name, set()).add("root")
 
         resolved_clean = {k: list(v) for k, v in resolved.items()}
@@ -4579,6 +4742,10 @@ def parse_project_assets(filepath):
 
 def check_nuget_package(target):
     """Queries NuGet registry for package metadata and checks target version."""
+    cached_res = _get_cached_target_result("nuget", target)
+    if cached_res is not None:
+        return cached_res
+
     name = target["name"]
     declared = target["declared"]
     installed_versions = target["installed"]
@@ -4587,21 +4754,26 @@ def check_nuget_package(target):
     results = []
 
     try:
-        encoded_name = urllib.parse.quote(name.lower())
-        url = f"{URL_NUGET_REGISTRY}{encoded_name}/index.json"
+        cached_meta = _get_cached_registry_metadata("nuget", name)
+        if cached_meta is not None:
+            valid_versions = cached_meta
+        else:
+            encoded_name = urllib.parse.quote(name.lower())
+            url = f"{URL_NUGET_REGISTRY}{encoded_name}/index.json"
 
-        req = urllib.request.Request(url)
-        with safe_urlopen(req, timeout=10) as response:
-            data = json.loads(response.read().decode("utf-8"))
+            req = urllib.request.Request(url)
+            with safe_urlopen(req, timeout=10) as response:
+                data = json.loads(response.read().decode("utf-8"))
 
-        versions_list = data.get("versions", [])
+            versions_list = data.get("versions", [])
 
-        stable_versions = []
-        for v in versions_list:
-            if "-" not in v:
-                stable_versions.append(v)
+            stable_versions = []
+            for v in versions_list:
+                if "-" not in v:
+                    stable_versions.append(v)
 
-        valid_versions = stable_versions if stable_versions else versions_list
+            valid_versions = stable_versions if stable_versions else versions_list
+            _set_cached_registry_metadata("nuget", name, valid_versions)
 
         for ver_str in versions_to_check:
             clean_ver = RE_CLEAN_VER.sub("", ver_str) if ver_str else "0.0.0"
@@ -4675,6 +4847,7 @@ def check_nuget_package(target):
                 }
             )
 
+    _set_cached_target_result("nuget", target, results)
     return results
 
 
@@ -4758,7 +4931,7 @@ def run_nuget_checker(args):
     direct_packages = set(pkg_data.keys()) if pkg_data else set()
     for r in results:
         direct_parents = find_direct_parents(r["name"], parents_data, direct_packages)
-        r["required_by"] = sorted(list(direct_parents - {r["name"]}))
+        r["required_by"] = sorted(direct_parents - {r["name"]})
 
     elapsed = time.time() - start_time
 
@@ -4852,7 +5025,7 @@ def parse_composer_lock(filepath):
                 resolved.setdefault(name, set()).add(clean_ver)
 
                 reqs = pkg.get("require", {})
-                for child_name in reqs.keys():
+                for child_name in reqs:
                     if "/" in child_name:
                         parents.setdefault(child_name, set()).add(name)
 
@@ -4868,6 +5041,10 @@ def parse_composer_lock(filepath):
 
 def check_composer_package(target):
     """Queries Packagist registry for composer package metadata."""
+    cached_res = _get_cached_target_result("php", target)
+    if cached_res is not None:
+        return cached_res
+
     name = target["name"]
     declared = target["declared"]
     installed_versions = target["installed"]
@@ -4876,32 +5053,36 @@ def check_composer_package(target):
     results = []
 
     try:
-        name_lower = name.lower()
-        url = f"{URL_PACKAGIST_REGISTRY}{name_lower}.json"
+        cached_meta = _get_cached_registry_metadata("php", name)
+        if cached_meta is not None:
+            valid_versions, pkg_data = cached_meta
+        else:
+            name_lower = name.lower()
+            url = f"{URL_PACKAGIST_REGISTRY}{name_lower}.json"
 
-        req = urllib.request.Request(url)
-        with safe_urlopen(req, timeout=10) as response:
-            data = json.loads(response.read().decode("utf-8"))
+            req = urllib.request.Request(url)
+            with safe_urlopen(req, timeout=10) as response:
+                data = json.loads(response.read().decode("utf-8"))
 
-        packages = data.get("packages", {})
-        pkg_data = packages.get(name_lower, [])
+            packages = data.get("packages", {})
+            pkg_data = packages.get(name_lower, [])
 
-        versions_list = []
-        for item in pkg_data:
-            v_str = item.get("version")
-            if v_str:
-                versions_list.append(v_str.lstrip("v"))
+            versions_list = []
+            for item in pkg_data:
+                v_str = item.get("version")
+                if v_str:
+                    versions_list.append(v_str.lstrip("v"))
 
-        stable_versions = []
-        for v in versions_list:
-            v_lower = v.lower()
-            if not any(
-                x in v_lower for x in ("-", "dev", "alpha", "beta", "rc", "patch")
-            ):
-                if re.match(r"^\d+\.\d+(?:\.\d+)?(?:\.\d+)?$", v):
+            stable_versions = []
+            for v in versions_list:
+                v_lower = v.lower()
+                if not any(
+                    x in v_lower for x in ("-", "dev", "alpha", "beta", "rc", "patch")
+                ) and RE_DECIMAL_VER_STRICT.match(v):
                     stable_versions.append(v)
 
-        valid_versions = stable_versions if stable_versions else versions_list
+            valid_versions = stable_versions if stable_versions else versions_list
+            _set_cached_registry_metadata("php", name, (valid_versions, pkg_data))
 
         for ver_str in versions_to_check:
             clean_ver = ver_str.lstrip("v") if ver_str else "0.0.0"
@@ -4987,6 +5168,7 @@ def check_composer_package(target):
                 }
             )
 
+    _set_cached_target_result("php", target, results)
     return results
 
 
@@ -5065,7 +5247,7 @@ def run_composer_checker(args):
     direct_packages = set(all_direct.keys())
     for r in results:
         direct_parents = find_direct_parents(r["name"], parents_data, direct_packages)
-        r["required_by"] = sorted(list(direct_parents - {r["name"]}))
+        r["required_by"] = sorted(direct_parents - {r["name"]})
 
     elapsed = time.time() - start_time
 
@@ -5195,7 +5377,7 @@ def find_all_maven_poms(root_pom_path, base_dir=None, visited=None):
                                     module_pom, base_dir=base_dir, visited=visited
                                 )
                             )
-    except Exception:
+    except (OSError, ET.ParseError, ValueError):
         pass
 
     seen = set()
@@ -5407,7 +5589,7 @@ def fetch_remote_maven_pom(group_id, artifact_id, version, custom_registries=Non
             root = _fetch_registry_json_or_xml(url, format="xml")
             if root is not None:
                 break
-        except Exception:
+        except (urllib.error.URLError, OSError, ET.ParseError, TimeoutError):
             continue
 
     _MAVEN_REMOTE_POM_CACHE[cache_key] = root
@@ -5584,6 +5766,10 @@ def resolve_maven_transitive_dependencies(
 
 def check_maven_package(target):
     """Queries Maven Central Repository for package metadata."""
+    cached_res = _get_cached_target_result("maven", target)
+    if cached_res is not None:
+        return cached_res
+
     name = target["name"]
     declared = target["declared"]
     installed_versions = target["installed"]
@@ -5598,88 +5784,98 @@ def check_maven_package(target):
 
         group_id, artifact_id = name.split(":", 1)
         group_path = group_id.replace(".", "/")
-        use_google_maven = (
-            group_id.startswith(
-                ("androidx.", "com.google.android.", "com.android.", "android.arch.")
-            )
-            or "android" in group_id
-        )
 
-        xml_data = None
-        base_registries = (
-            [URL_GOOGLE_MAVEN, URL_MAVEN_REGISTRY]
-            if use_google_maven
-            else [URL_MAVEN_REGISTRY, URL_GOOGLE_MAVEN]
-        )
-        registries = []
-        if custom_registries:
-            for r in custom_registries:
+        cached_meta = _get_cached_registry_metadata("maven", name)
+        if cached_meta is not None:
+            valid_versions, successful_registry, group_path, artifact_id = cached_meta
+        else:
+            use_google_maven = (
+                group_id.startswith(
+                    ("androidx.", "com.google.android.", "com.android.", "android.arch.")
+                )
+                or "android" in group_id
+            )
+
+            xml_data = None
+            base_registries = (
+                [URL_GOOGLE_MAVEN, URL_MAVEN_REGISTRY]
+                if use_google_maven
+                else [URL_MAVEN_REGISTRY, URL_GOOGLE_MAVEN]
+            )
+            registries = []
+            if custom_registries:
+                for r in custom_registries:
+                    if r not in registries:
+                        registries.append(r)
+            for r in base_registries:
                 if r not in registries:
                     registries.append(r)
-        for r in base_registries:
-            if r not in registries:
-                registries.append(r)
 
-        last_error = None
-        successful_registry = URL_MAVEN_REGISTRY
-        for registry_url in registries:
-            url = f"{registry_url}{group_path}/{artifact_id}/maven-metadata.xml"
-            try:
-                req = urllib.request.Request(url)
-                req.add_header("User-Agent", f"Kevlar-CheckDeps/{VERSION}")
-                with safe_urlopen(req, timeout=10) as response:
-                    xml_data = response.read()
-                successful_registry = registry_url
-                break
-            except Exception as e:
-                last_error = e
-                continue
+            last_error = None
+            successful_registry = URL_MAVEN_REGISTRY
+            for registry_url in registries:
+                url = f"{registry_url}{group_path}/{artifact_id}/maven-metadata.xml"
+                try:
+                    req = urllib.request.Request(url)
+                    req.add_header("User-Agent", f"Kevlar-CheckDeps/{VERSION}")
+                    with safe_urlopen(req, timeout=10) as response:
+                        xml_data = response.read()
+                    successful_registry = registry_url
+                    break
+                except Exception as e:
+                    last_error = e
+                    continue
 
-        versions_list = []
-        if xml_data is not None:
-            root = safe_et_fromstring(xml_data)
-            versioning_elem = root.find("versioning")
-            if versioning_elem is not None:
-                versions_elem = versioning_elem.find("versions")
-                if versions_elem is not None:
-                    for v in versions_elem.findall("version"):
-                        if v.text:
-                            versions_list.append(v.text.strip())
-        else:
-            # Fallback to search.maven.org API for legacy packages lacking maven-metadata.xml
-            try:
-                solr_url = f"https://search.maven.org/solrsearch/select?q=g:%22{group_id}%22+AND+a:%22{artifact_id}%22&wt=json"
-                req = urllib.request.Request(solr_url)
-                req.add_header("User-Agent", f"Kevlar-CheckDeps/{VERSION}")
-                with safe_urlopen(req, timeout=10) as response:
-                    solr_data = json.loads(response.read().decode("utf-8"))
-                docs = solr_data.get("response", {}).get("docs", [])
-                for doc in docs:
-                    v_val = doc.get("v") or doc.get("latestVersion")
-                    if v_val:
-                        versions_list.append(str(v_val))
-            except Exception as solr_err:
-                last_error = solr_err
-
-        if not versions_list:
-            raise ValueError(
-                f"Failed to fetch metadata from Maven or Google registries: {last_error or 'Not found'}"
-            )
-
-        stable_versions = []
-        for v in versions_list:
-            v_lower = v.lower()
-            is_prerelease = False
-            if "snapshot" in v_lower:
-                is_prerelease = True
+            versions_list = []
+            if xml_data is not None:
+                root = safe_et_fromstring(xml_data)
+                versioning_elem = root.find("versioning")
+                if versioning_elem is not None:
+                    versions_elem = versioning_elem.find("versions")
+                    if versions_elem is not None:
+                        for v in versions_elem.findall("version"):
+                            if v.text:
+                                versions_list.append(v.text.strip())
             else:
-                m = RE_MAVEN_PRERELEASE.search(v_lower)
-                if m:
-                    is_prerelease = True
-            if not is_prerelease:
-                stable_versions.append(v)
+                # Fallback to search.maven.org API for legacy packages lacking maven-metadata.xml
+                try:
+                    solr_url = f"https://search.maven.org/solrsearch/select?q=g:%22{group_id}%22+AND+a:%22{artifact_id}%22&wt=json"
+                    req = urllib.request.Request(solr_url)
+                    req.add_header("User-Agent", f"Kevlar-CheckDeps/{VERSION}")
+                    with safe_urlopen(req, timeout=10) as response:
+                        solr_data = json.loads(response.read().decode("utf-8"))
+                    docs = solr_data.get("response", {}).get("docs", [])
+                    for doc in docs:
+                        v_val = doc.get("v") or doc.get("latestVersion")
+                        if v_val:
+                            versions_list.append(str(v_val))
+                except Exception as solr_err:
+                    last_error = solr_err
 
-        valid_versions = stable_versions if stable_versions else versions_list
+            if not versions_list:
+                raise ValueError(
+                    f"Failed to fetch metadata from Maven or Google registries: {last_error or 'Not found'}"
+                )
+
+            stable_versions = []
+            for v in versions_list:
+                v_lower = v.lower()
+                is_prerelease = False
+                if "snapshot" in v_lower:
+                    is_prerelease = True
+                else:
+                    m = RE_MAVEN_PRERELEASE.search(v_lower)
+                    if m:
+                        is_prerelease = True
+                if not is_prerelease:
+                    stable_versions.append(v)
+
+            valid_versions = stable_versions if stable_versions else versions_list
+            _set_cached_registry_metadata(
+                "maven",
+                name,
+                (valid_versions, successful_registry, group_path, artifact_id),
+            )
 
         for ver_str in versions_to_check:
             clean_ver = RE_CLEAN_VER.sub("", ver_str) if ver_str else "0.0.0"
@@ -5755,6 +5951,7 @@ def check_maven_package(target):
                 }
             )
 
+    _set_cached_target_result("maven", target, results)
     return results
 
 
@@ -5871,7 +6068,7 @@ def run_maven_checker(args):
                             and u not in custom_registries
                         ):
                             custom_registries.append(u)
-        except Exception:
+        except (OSError, ET.ParseError, ValueError):
             pass
 
     # 3. Parse all module poms and merge active dependencies
@@ -5969,7 +6166,7 @@ def run_maven_checker(args):
 
     for r in results:
         name = r["name"]
-        parents = sorted(list(required_by_map.get(name, set())))
+        parents = sorted(required_by_map.get(name, set()))
         r["required_by"] = parents
         r["dep_type"] = dep_types.get(name, "Transitive" if parents else "Direct")
 
@@ -6128,10 +6325,7 @@ def parse_go_mod(filepath):
                 if left_pkg and right_parts:
                     target_path = right_parts[0]
                     is_local_path = (
-                        target_path.startswith(".")
-                        or target_path.startswith("/")
-                        or target_path.startswith("\\")
-                        or len(right_parts) == 1
+                        target_path.startswith((".", "/", "\\")) or len(right_parts) == 1
                     )
                     if is_local_path:
                         local_replacements[left_pkg] = target_path
@@ -6215,6 +6409,10 @@ def parse_go_mod(filepath):
 
 def check_go_package(target):
     """Queries proxy.golang.org for Go module versions list."""
+    cached_res = _get_cached_target_result("go", target)
+    if cached_res is not None:
+        return cached_res
+
     name = target["name"]
     declared = target["declared"]
     installed_versions = target["installed"]
@@ -6225,24 +6423,29 @@ def check_go_package(target):
     results = []
 
     try:
-        candidate_name = name
-        resp_data = None
+        cached_meta = _get_cached_registry_metadata("go", name)
+        if cached_meta is not None:
+            versions_list = cached_meta
+        else:
+            candidate_name = name
+            resp_data = None
 
-        while True:
-            try:
-                escaped_name = escape_go_module(candidate_name)
-                url = f"{URL_GO_PROXY}{escaped_name}/@v/list"
-                req = urllib.request.Request(url)
-                with safe_urlopen(req, timeout=10) as response:
-                    resp_data = response.read().decode("utf-8")
-                break
-            except urllib.error.HTTPError as err:
-                if err.code == 404 and "/" in candidate_name:
-                    candidate_name = candidate_name.rsplit("/", 1)[0]
-                else:
-                    raise err
+            while True:
+                try:
+                    escaped_name = escape_go_module(candidate_name)
+                    url = f"{URL_GO_PROXY}{escaped_name}/@v/list"
+                    req = urllib.request.Request(url)
+                    with safe_urlopen(req, timeout=10) as response:
+                        resp_data = response.read().decode("utf-8")
+                    break
+                except urllib.error.HTTPError as err:
+                    if err.code == 404 and "/" in candidate_name:
+                        candidate_name = candidate_name.rsplit("/", 1)[0]
+                    else:
+                        raise
 
-        versions_list = [v.strip() for v in resp_data.split("\n") if v.strip()]
+            versions_list = [v.strip() for v in resp_data.split("\n") if v.strip()]
+            _set_cached_registry_metadata("go", name, versions_list)
 
         stable_versions = []
         for v in versions_list:
@@ -6277,10 +6480,10 @@ def check_go_package(target):
                 latest_same_major = latest_absolute
 
             clean_ver = ver_str.lstrip("v").split("+")[0] if ver_str else ""
-            clean_latest_absolute = (
+            (
                 latest_absolute.lstrip("v").split("+")[0] if latest_absolute else ""
             )
-            clean_latest_same = (
+            (
                 latest_same_major.lstrip("v").split("+")[0] if latest_same_major else ""
             )
             update_type = determine_update_type(
@@ -6347,6 +6550,7 @@ def check_go_package(target):
                 }
             )
 
+    _set_cached_target_result("go", target, results)
     return results
 
 
@@ -6415,7 +6619,7 @@ def resolve_go_parent_graph(direct_deps, max_workers=10):
                     ):
                         child_pkg = parts[1]
                         parents.setdefault(child_pkg, set()).add(name)
-            except Exception:
+            except (OSError, UnicodeDecodeError, IndexError):
                 pass
 
         with lock:
@@ -6525,7 +6729,7 @@ def verify_go_checksums(results, go_sum_path, max_workers=10):
                 r["mismatch_checksum"] = True
             elif official_hash:
                 r["checksum_verified"] = True
-        except Exception:
+        except (urllib.error.URLError, OSError, ValueError, TimeoutError):
             pass
 
         with lock:
@@ -6693,7 +6897,7 @@ def run_go_checker(args):
             r["dep_type"] = "Transitive"
             pkg_parents = parent_map.get(r["name"])
             if pkg_parents:
-                r["required_by"] = sorted(list(pkg_parents))
+                r["required_by"] = sorted(pkg_parents)
             else:
                 r["required_by"] = ["indirect"]
         elif r["name"] in direct_keys:
@@ -6728,95 +6932,180 @@ def run_go_checker(args):
 
 
 def find_rust_files(path):
-    """Finds Cargo.toml and Cargo.lock files."""
+    """Finds Cargo.toml and Cargo.lock files, traversing parent directories for workspace Cargo.lock if needed."""
     toml_path = None
     lock_path = None
 
-    if os.path.exists(path):
-        if os.path.isdir(path):
-            t = os.path.join(path, "Cargo.toml")
-            l = os.path.join(path, "Cargo.lock")
+    abs_path = os.path.abspath(path)
+    search_dir = abs_path
+    if os.path.exists(abs_path):
+        if os.path.isdir(abs_path):
+            t = os.path.join(abs_path, "Cargo.toml")
+            l = os.path.join(abs_path, "Cargo.lock")
             if os.path.exists(t):
                 toml_path = t
             if os.path.exists(l):
                 lock_path = l
-        elif os.path.isfile(path):
-            if path.endswith("Cargo.toml"):
-                toml_path = path
-                l = os.path.join(os.path.dirname(path), "Cargo.lock")
+            search_dir = abs_path
+        elif os.path.isfile(abs_path):
+            if abs_path.endswith("Cargo.toml"):
+                toml_path = abs_path
+                l = os.path.join(os.path.dirname(abs_path), "Cargo.lock")
                 if os.path.exists(l):
                     lock_path = l
-            elif path.endswith("Cargo.lock"):
-                lock_path = path
-                t = os.path.join(os.path.dirname(path), "Cargo.toml")
+            elif abs_path.endswith("Cargo.lock"):
+                lock_path = abs_path
+                t = os.path.join(os.path.dirname(abs_path), "Cargo.toml")
                 if os.path.exists(t):
                     toml_path = t
+            search_dir = os.path.dirname(abs_path)
+
+        # If lock_path is not found in immediate directory, search upwards for workspace Cargo.lock
+        if not lock_path and search_dir:
+            curr = os.path.dirname(search_dir)
+            while curr and os.path.dirname(curr) != curr:
+                candidate = os.path.join(curr, "Cargo.lock")
+                if os.path.exists(candidate):
+                    lock_path = candidate
+                    break
+                curr = os.path.dirname(curr)
 
     return toml_path, lock_path
 
 
 def parse_cargo_toml(filepath):
-    """Parses Cargo.toml to extract direct dependency names."""
-    dependencies = set()
+    """Parses Cargo.toml to extract direct dependency names and declared version constraints.
+    Returns a dict {dep_name: version_spec} that supports membership checks ('name' in deps) and key iteration.
+    Supports Cargo workspaces and [workspace.dependencies].
+    """
+    dependencies = {}
     if not filepath or not os.path.exists(filepath):
         return dependencies
 
-    current_section = None
-    is_specific_pkg_section = False
+    # Look for workspace root Cargo.toml if this toml references workspace dependencies
+    workspace_deps = {}
+    curr = os.path.dirname(os.path.abspath(filepath))
+    while curr and os.path.dirname(curr) != curr:
+        ws_candidate = os.path.join(curr, "Cargo.toml")
+        if os.path.exists(ws_candidate) and os.path.abspath(ws_candidate) != os.path.abspath(filepath):
+            try:
+                with open(ws_candidate, "rb") as wf:
+                    ws_data = tomllib.load(wf)
+                if "workspace" in ws_data and isinstance(ws_data["workspace"], dict):
+                    raw_ws_deps = ws_data["workspace"].get("dependencies", {})
+                    if isinstance(raw_ws_deps, dict):
+                        for k, v in raw_ws_deps.items():
+                            if isinstance(v, str):
+                                workspace_deps[k] = v
+                            elif isinstance(v, dict) and "version" in v:
+                                workspace_deps[k] = str(v["version"])
+                    break
+            except Exception:
+                pass
+        curr = os.path.dirname(curr)
+
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
+        with open(filepath, "rb") as f:
+            data = tomllib.load(f)
 
-                # Detect sections, e.g. [dependencies], [dependencies.tokio], [target.'...'.dependencies.plist]
-                m_sec = re.match(r"^\[([^\]]+)\]", line)
-                if m_sec:
-                    current_section = m_sec.group(1).strip()
-                    is_specific_pkg_section = False
+        def _add_deps_table(table):
+            if not isinstance(table, dict):
+                return
+            for name, spec in table.items():
+                if isinstance(spec, str):
+                    dependencies[name] = spec
+                elif isinstance(spec, dict):
+                    if spec.get("workspace"):
+                        dependencies[name] = workspace_deps.get(name, "workspace")
+                    elif "version" in spec:
+                        dependencies[name] = str(spec["version"])
+                    elif "path" in spec:
+                        dependencies[name] = spec["path"]
+                    else:
+                        dependencies[name] = "*"
+                else:
+                    dependencies[name] = str(spec)
 
-                    # Extract package name from section header like [dependencies.clap] or [target.'...'.dependencies.clap]
-                    m_sub = re.search(
-                        r"(?:dependencies|dev-dependencies|build-dependencies)\.([a-zA-Z0-9_-]+)$",
-                        current_section,
+        for sec in ("dependencies", "dev-dependencies", "build-dependencies"):
+            if sec in data and isinstance(data[sec], dict):
+                _add_deps_table(data[sec])
+
+        if "target" in data and isinstance(data["target"], dict):
+            for _, t_val in data["target"].items():
+                if isinstance(t_val, dict):
+                    for sec in ("dependencies", "dev-dependencies", "build-dependencies"):
+                        if sec in t_val and isinstance(t_val[sec], dict):
+                            _add_deps_table(t_val[sec])
+
+        if "workspace" in data and isinstance(data["workspace"], dict):
+            ws_d = data["workspace"].get("dependencies")
+            if isinstance(ws_d, dict):
+                _add_deps_table(ws_d)
+
+    except Exception:
+        # Fallback to line-by-line regex parsing if tomllib fails
+        try:
+            current_section = None
+            is_specific_pkg_section = False
+            with open(filepath, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    m_sec = re.match(r"^\[([^\]]+)\]", line)
+                    if m_sec:
+                        current_section = m_sec.group(1).strip()
+                        is_specific_pkg_section = False
+                        m_sub = re.search(
+                            r"(?:dependencies|dev-dependencies|build-dependencies)\.([a-zA-Z0-9_-]+)$",
+                            current_section,
+                        )
+                        if m_sub:
+                            dependencies[m_sub.group(1)] = "*"
+                            is_specific_pkg_section = True
+                        continue
+
+                    is_dep_section = current_section in {
+                        "dependencies",
+                        "dev-dependencies",
+                        "build-dependencies",
+                    } or (
+                        current_section
+                        and (
+                            "dependencies" in current_section
+                            or "dev-dependencies" in current_section
+                            or "build-dependencies" in current_section
+                        )
                     )
-                    if m_sub:
-                        dependencies.add(m_sub.group(1))
-                        is_specific_pkg_section = True
-                    continue
-
-                # Check dependency sections
-                is_dep_section = current_section in {
-                    "dependencies",
-                    "dev-dependencies",
-                    "build-dependencies",
-                } or (
-                    current_section
-                    and (
-                        "dependencies" in current_section
-                        or "dev-dependencies" in current_section
-                        or "build-dependencies" in current_section
-                    )
-                )
-
-                if is_dep_section and not is_specific_pkg_section:
-                    # Match name = "version" or name = { ... }
-                    m_dep = re.match(r"^([a-zA-Z0-9_-]+)\s*=", line)
-                    if m_dep:
-                        dep_name = m_dep.group(1).strip()
-                        if dep_name not in {
-                            "version",
-                            "optional",
-                            "features",
-                            "default-features",
-                            "path",
-                        }:
-                            dependencies.add(dep_name)
-    except Exception as e:
-        print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Cargo.toml: {e}{COLOR_RESET}")
+                    if is_dep_section and not is_specific_pkg_section:
+                        m_dep = re.match(r"^([a-zA-Z0-9_-]+)\s*=\s*(.*)$", line)
+                        if m_dep:
+                            dep_name = m_dep.group(1).strip()
+                            dep_val = m_dep.group(2).strip().strip('"').strip("'")
+                            if dep_name not in {
+                                "version",
+                                "optional",
+                                "features",
+                                "default-features",
+                                "path",
+                            }:
+                                dependencies[dep_name] = dep_val or "*"
+        except Exception as e:
+            print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Cargo.toml: {e}{COLOR_RESET}")
 
     return dependencies
+
+
+class CargoLockResult(tuple):
+    """Subclass of tuple (resolved, parents) that also carries local_packages set for Cargo workspaces."""
+
+    def __new__(cls, resolved, parents, local_packages=None):
+        return super().__new__(cls, (resolved, parents))
+
+    def __init__(self, resolved, parents, local_packages=None):
+        self.resolved = resolved
+        self.parents = parents
+        self.local_packages = set(local_packages) if local_packages else set()
 
 
 def parse_cargo_lock(filepath):
@@ -6825,8 +7114,9 @@ def parse_cargo_lock(filepath):
     """
     resolved = {}
     parents = {}
+    local_packages = set()
     if not filepath or not os.path.exists(filepath):
-        return resolved, parents
+        return CargoLockResult(resolved, parents, local_packages)
 
     try:
         with open(filepath, "rb") as f:
@@ -6839,10 +7129,13 @@ def parse_cargo_lock(filepath):
                     continue
                 name = pkg.get("name")
                 version = pkg.get("version")
+                source = pkg.get("source")
                 if not name or not version:
                     continue
 
                 resolved.setdefault(name, set()).add(version)
+                if not source:
+                    local_packages.add(name)
 
                 deps = pkg.get("dependencies", [])
                 if isinstance(deps, list):
@@ -6858,7 +7151,7 @@ def parse_cargo_lock(filepath):
 
     resolved_clean = {k: list(v) for k, v in resolved.items()}
     parents_clean = {k: list(v) for k, v in parents.items()}
-    return resolved_clean, parents_clean
+    return CargoLockResult(resolved_clean, parents_clean, local_packages)
 
 
 def get_crates_index_url(crate_name):
@@ -6878,64 +7171,126 @@ def get_crates_index_url(crate_name):
 
 def check_rust_package(target):
     """Queries crates.io index/API for crate metadata and checks target version."""
+    cached_res = _get_cached_target_result("rust", target)
+    if cached_res is not None:
+        return cached_res
+
     name = target["name"]
     declared = target["declared"]
     installed_versions = target["installed"]
+    is_local = target.get("is_local", False) or (
+        declared
+        and str(declared).startswith((".", "/", "path:", "workspace:", "file:"))
+    )
 
     versions_to_check = installed_versions if installed_versions else [declared]
     results = []
 
-    try:
-        all_versions = []
-        yanked_versions = set()
-        repo_url_raw = None
-        latest_version = None
-
-        # 1. Primary: Fast official CDN Cargo sparse index (no rate limits)
-        url_index = get_crates_index_url(name)
-        req_index = urllib.request.Request(url_index)
-        fetched_index = False
-        try:
-            with safe_urlopen(req_index, timeout=10) as response:
-                content = response.read().decode("utf-8", errors="ignore")
-                for line in content.strip().split("\n"):
-                    if not line.strip():
-                        continue
-                    try:
-                        v_data = json.loads(line)
-                        v_num = v_data.get("vers")
-                        if v_num:
-                            all_versions.append(v_num)
-                            if v_data.get("yanked"):
-                                yanked_versions.add(v_num)
-                    except Exception:
-                        pass
-                if all_versions:
-                    fetched_index = True
-        except Exception:
-            pass
-
-        # 2. Fallback: REST API if sparse index call failed or returned no versions
-        if not fetched_index:
-            url = f"{URL_RUST_REGISTRY}{urllib.parse.quote(name)}"
-            req = urllib.request.Request(url)
-            req.add_header("User-Agent", f"Kevlar-CheckDeps/{VERSION}")
-
-            with safe_urlopen(req, timeout=10) as response:
-                data = json.loads(response.read().decode("utf-8"))
-
-            crate_info = data.get("crate", {})
-            latest_version = crate_info.get("max_stable_version") or crate_info.get(
-                "max_version"
+    # Handle local / path / internal workspace member crates without querying external registry
+    if is_local:
+        for ver_str in versions_to_check:
+            results.append(
+                {
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": "Local",
+                    "latest_same_major": None,
+                    "latest_absolute": None,
+                    "status": "local",
+                    "deprecated": None,
+                    "error": None,
+                    "repo_url": None,
+                    "compare_url": None,
+                    "releases_url": None,
+                }
             )
-            repo_url_raw = crate_info.get("repository") or crate_info.get("homepage")
+        _set_cached_target_result("rust", target, results)
+        return results
 
-            versions_meta = data.get("versions", [])
-            for v_meta in versions_meta:
-                if v_meta.get("yanked"):
-                    yanked_versions.add(v_meta.get("num"))
+    try:
+        cached_meta = _get_cached_registry_metadata("rust", name)
+        if cached_meta is not None:
+            all_versions, yanked_versions, latest_version, repo_url_raw = cached_meta
+        else:
+            all_versions = []
+            yanked_versions = set()
+            repo_url_raw = None
+            latest_version = None
 
-            all_versions = [v.get("num") for v in versions_meta if v.get("num")]
+            # 1. Primary: Fast official CDN Cargo sparse index (no rate limits)
+            url_index = get_crates_index_url(name)
+            req_index = urllib.request.Request(url_index)
+            fetched_index = False
+            try:
+                with safe_urlopen(req_index, timeout=10) as response:
+                    content = response.read().decode("utf-8", errors="ignore")
+                    for line in content.strip().split("\n"):
+                        if not line.strip():
+                            continue
+                        try:
+                            v_data = json.loads(line)
+                            v_num = v_data.get("vers")
+                            if v_num:
+                                all_versions.append(v_num)
+                                if v_data.get("yanked"):
+                                    yanked_versions.add(v_num)
+                        except (json.JSONDecodeError, KeyError, ValueError):
+                            pass
+                    if all_versions:
+                        fetched_index = True
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    # Private/internal crate not in public crates.io index
+                    for ver_str in versions_to_check:
+                        results.append(
+                            {
+                                "name": name,
+                                "declared": declared,
+                                "installed": ver_str,
+                                "latest": "Local",
+                                "latest_same_major": None,
+                                "latest_absolute": None,
+                                "status": "local",
+                                "deprecated": None,
+                                "error": None,
+                                "repo_url": None,
+                                "compare_url": None,
+                                "releases_url": None,
+                            }
+                        )
+                    _set_cached_target_result("rust", target, results)
+                    return results
+            except (urllib.error.URLError, OSError, TimeoutError):
+                pass
+
+            # 2. Fallback: REST API if sparse index call failed or returned no versions
+            if not fetched_index:
+                url = f"{URL_RUST_REGISTRY}{urllib.parse.quote(name)}"
+                req = urllib.request.Request(url)
+                req.add_header("User-Agent", f"Kevlar-CheckDeps/{VERSION}")
+
+                with safe_urlopen(req, timeout=10) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+
+                crate_info = data.get("crate", {})
+                latest_version = crate_info.get("max_stable_version") or crate_info.get(
+                    "max_version"
+                )
+                repo_url_raw = crate_info.get("repository") or crate_info.get("homepage")
+
+                versions_meta = data.get("versions", [])
+                for v_meta in versions_meta:
+                    if v_meta.get("yanked"):
+                        yanked_versions.add(v_meta.get("num"))
+
+                all_versions = [v.get("num") for v in versions_meta if v.get("num")]
+
+            _set_cached_registry_metadata(
+                "rust",
+                name,
+                (all_versions, yanked_versions, latest_version, repo_url_raw),
+            )
 
         for ver_str in versions_to_check:
             clean_ver = RE_CLEAN_VER.sub("", ver_str) if ver_str else "0.0.0"
@@ -6990,6 +7345,38 @@ def check_rust_package(target):
                     "releases_url": releases_url,
                 }
             )
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            for ver_str in versions_to_check:
+                results.append(
+                    {
+                        "name": name,
+                        "declared": declared,
+                        "installed": ver_str,
+                        "latest": "Local",
+                        "latest_same_major": None,
+                        "latest_absolute": None,
+                        "status": "local",
+                        "deprecated": None,
+                        "error": None,
+                        "repo_url": None,
+                        "compare_url": None,
+                        "releases_url": None,
+                    }
+                )
+        else:
+            for ver_str in versions_to_check:
+                results.append(
+                    {
+                        "name": name,
+                        "declared": ver_str,
+                        "installed": ver_str,
+                        "latest": "unknown",
+                        "status": "error",
+                        "deprecated": False,
+                        "error": _sanitize_error_message(e, name),
+                    }
+                )
     except Exception as e:
         for ver_str in versions_to_check:
             results.append(
@@ -7000,10 +7387,11 @@ def check_rust_package(target):
                     "latest": "unknown",
                     "status": "error",
                     "deprecated": False,
-                    "error": str(e),
+                    "error": _sanitize_error_message(e, name),
                 }
             )
 
+    _set_cached_target_result("rust", target, results)
     return results
 
 
@@ -7025,24 +7413,49 @@ def run_rust_checker(args):
         return None, None, 0
 
     print(f"{COLOR_GRAY}{ICON_INFO} Reading Cargo files...{COLOR_RESET}")
-    direct = parse_cargo_toml(toml_path)
-    resolved, parents = parse_cargo_lock(lock_path)
+    direct_deps = parse_cargo_toml(toml_path)
+    direct = set(direct_deps.keys()) if isinstance(direct_deps, dict) else set(direct_deps)
+    lock_result = parse_cargo_lock(lock_path)
+    resolved, parents = lock_result[0], lock_result[1]
+    local_packages = getattr(lock_result, "local_packages", set())
 
-    if not resolved and direct:
-        resolved = {name: ["0.0.0"] for name in direct}
+    if not resolved and direct_deps:
+        resolved = {
+            name: [
+                direct_deps.get(name)
+                if isinstance(direct_deps, dict)
+                and direct_deps.get(name)
+                and direct_deps.get(name) != "workspace"
+                and not str(direct_deps.get(name)).startswith(".")
+                else "0.0.0"
+            ]
+            for name in direct
+        }
 
-    pkg_data = {"all_direct": {name: name for name in direct}, "dependencies": resolved}
+    pkg_data = {
+        "all_direct": {
+            name: (direct_deps.get(name, name) if isinstance(direct_deps, dict) else name)
+            for name in direct
+        },
+        "dependencies": resolved,
+    }
 
     targets = []
     for name, versions in resolved.items():
         if not args.all and name not in direct:
             continue
-        declared = versions[0] if versions else None
+        declared = direct_deps.get(name) if isinstance(direct_deps, dict) else (versions[0] if versions else None)
+        is_local = (name in local_packages) or (
+            declared and str(declared).startswith((".", "/", "path:", "workspace:"))
+        )
+        if not declared or declared == "workspace" or str(declared).startswith("."):
+            declared = versions[0] if versions else "0.0.0"
         targets.append(
             {
                 "name": name,
                 "declared": declared,
                 "installed": versions if versions != ["0.0.0"] else [],
+                "is_local": is_local,
             }
         )
 
@@ -7073,11 +7486,15 @@ def run_rust_checker(args):
     for r in results:
         if r["name"] in direct:
             r["dep_type"] = "Direct"
+            if isinstance(direct_deps, dict) and direct_deps.get(r["name"]):
+                dec_val = direct_deps[r["name"]]
+                if dec_val != "workspace" and not str(dec_val).startswith("."):
+                    r["declared"] = dec_val
         else:
             r["dep_type"] = "Transitive"
             r["declared"] = None
         direct_parents = find_direct_parents(r["name"], parents, direct)
-        r["required_by"] = sorted(list(direct_parents - {r["name"]}))
+        r["required_by"] = sorted(direct_parents - {r["name"]})
 
     elapsed = time.time() - start_time
 
@@ -7213,6 +7630,10 @@ def parse_gemfile_lock(filepath):
 
 def check_ruby_package(target):
     """Queries rubygems.org API for package metadata and checks target version."""
+    cached_res = _get_cached_target_result("ruby", target)
+    if cached_res is not None:
+        return cached_res
+
     name = target["name"]
     declared = target["declared"]
     installed_versions = target["installed"]
@@ -7221,46 +7642,61 @@ def check_ruby_package(target):
     results = []
 
     try:
-        try:
-            url_versions = (
-                f"https://rubygems.org/api/v1/versions/{urllib.parse.quote(name)}.json"
-            )
-            req_v = urllib.request.Request(url_versions)
-            with safe_urlopen(req_v, timeout=10) as response:
-                versions_data = json.loads(response.read().decode("utf-8"))
+        cached_meta = _get_cached_registry_metadata("ruby", name)
+        if cached_meta is not None:
+            valid_versions, repo_url_raw = cached_meta
+        else:
+            repo_url_raw = None
+            try:
+                url_versions = (
+                    f"https://rubygems.org/api/v1/versions/{urllib.parse.quote(name)}.json"
+                )
+                req_v = urllib.request.Request(url_versions)
+                with safe_urlopen(req_v, timeout=10) as response:
+                    versions_data = json.loads(response.read().decode("utf-8"))
 
-            stable_versions = []
-            all_versions = []
-            for item in versions_data:
-                v_num = item.get("number")
-                if v_num:
-                    all_versions.append(v_num)
-                    if not item.get("prerelease"):
-                        stable_versions.append(v_num)
-            valid_versions = stable_versions if stable_versions else all_versions
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                raise
-            try:
-                url_fallback = f"{URL_RUBY_REGISTRY}{urllib.parse.quote(name)}.json"
-                req_fb = urllib.request.Request(url_fallback)
-                with safe_urlopen(req_fb, timeout=10) as response:
-                    data_fb = json.loads(response.read().decode("utf-8"))
-                latest_version = data_fb.get("version")
-                valid_versions = [latest_version] if latest_version else []
+                stable_versions = []
+                all_versions = []
+                for item in versions_data:
+                    v_num = item.get("number")
+                    if v_num:
+                        all_versions.append(v_num)
+                        if not item.get("prerelease"):
+                            stable_versions.append(v_num)
+                valid_versions = stable_versions if stable_versions else all_versions
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    raise
+                try:
+                    url_fallback = f"{URL_RUBY_REGISTRY}{urllib.parse.quote(name)}.json"
+                    req_fb = urllib.request.Request(url_fallback)
+                    with safe_urlopen(req_fb, timeout=10) as response:
+                        data_fb = json.loads(response.read().decode("utf-8"))
+                    latest_version = data_fb.get("version")
+                    valid_versions = [latest_version] if latest_version else []
+                    repo_url_raw = data_fb.get("source_code_uri") or data_fb.get(
+                        "homepage_uri"
+                    )
+                except Exception:
+                    valid_versions = []
             except Exception:
-                valid_versions = []
-        except Exception:
-            # Fallback to single latest version endpoint
-            try:
-                url_fallback = f"{URL_RUBY_REGISTRY}{urllib.parse.quote(name)}.json"
-                req_fb = urllib.request.Request(url_fallback)
-                with safe_urlopen(req_fb, timeout=10) as response:
-                    data_fb = json.loads(response.read().decode("utf-8"))
-                latest_version = data_fb.get("version")
-                valid_versions = [latest_version] if latest_version else []
-            except Exception:
-                valid_versions = []
+                # Fallback to single latest version endpoint
+                try:
+                    url_fallback = f"{URL_RUBY_REGISTRY}{urllib.parse.quote(name)}.json"
+                    req_fb = urllib.request.Request(url_fallback)
+                    with safe_urlopen(req_fb, timeout=10) as response:
+                        data_fb = json.loads(response.read().decode("utf-8"))
+                    latest_version = data_fb.get("version")
+                    valid_versions = [latest_version] if latest_version else []
+                    repo_url_raw = data_fb.get("source_code_uri") or data_fb.get(
+                        "homepage_uri"
+                    )
+                except Exception:
+                    valid_versions = []
+
+            _set_cached_registry_metadata(
+                "ruby", name, (valid_versions, repo_url_raw)
+            )
 
         for ver_str in versions_to_check:
             clean_ver = RE_CLEAN_VER.sub("", ver_str) if ver_str else "0.0.0"
@@ -7281,26 +7717,27 @@ def check_ruby_package(target):
             compare_url = None
             releases_url = None
             if status in {"major", "minor-major", "patch-major"}:
-                try:
-                    url_gem = f"https://rubygems.org/api/v1/gems/{urllib.parse.quote(name)}.json"
-                    req_g = urllib.request.Request(url_gem)
-                    with safe_urlopen(req_g, timeout=5) as response:
-                        data_g = json.loads(response.read().decode("utf-8"))
-                    raw_url = data_g.get("source_code_uri") or data_g.get(
-                        "homepage_uri"
+                if not repo_url_raw:
+                    try:
+                        url_gem = f"https://rubygems.org/api/v1/gems/{urllib.parse.quote(name)}.json"
+                        req_g = urllib.request.Request(url_gem)
+                        with safe_urlopen(req_g, timeout=5) as response:
+                            data_g = json.loads(response.read().decode("utf-8"))
+                        repo_url_raw = data_g.get("source_code_uri") or data_g.get(
+                            "homepage_uri"
+                        )
+                    except (KeyError, ValueError, TypeError):
+                        pass
+                repo_url = clean_repo_url(repo_url_raw)
+                if repo_url:
+                    compare_url = get_compare_url(
+                        repo_url, clean_ver, latest_absolute
                     )
-                    repo_url = clean_repo_url(raw_url)
-                    if repo_url:
-                        compare_url = get_compare_url(
-                            repo_url, clean_ver, latest_absolute
-                        )
-                        releases_url = (
-                            f"{repo_url}/releases"
-                            if is_github_url(repo_url)
-                            else repo_url
-                        )
-                except Exception:
-                    pass
+                    releases_url = (
+                        f"{repo_url}/releases"
+                        if is_github_url(repo_url)
+                        else repo_url
+                    )
 
             display_latest = format_latest_versions(latest_same_major, latest_absolute)
             results.append(
@@ -7369,6 +7806,7 @@ def check_ruby_package(target):
                 }
             )
 
+    _set_cached_target_result("ruby", target, results)
     return results
 
 
@@ -7435,7 +7873,7 @@ def run_ruby_checker(args):
     # Resolve transitive dependency parents
     for r in results:
         direct_parents = find_direct_parents(r["name"], parents, direct)
-        r["required_by"] = sorted(list(direct_parents - {r["name"]}))
+        r["required_by"] = sorted(direct_parents - {r["name"]})
 
     elapsed = time.time() - start_time
 
@@ -7464,13 +7902,13 @@ def find_gradle_files(path):
                     for f in os.listdir(lock_dir):
                         if f.endswith(".lockfile"):
                             lock_files.append(os.path.join(lock_dir, f))
-                except Exception:
+                except OSError:
                     pass
             gl = os.path.join(path, "gradle.lockfile")
             if os.path.exists(gl):
                 lock_files.append(gl)
         elif os.path.isfile(path):
-            if path.endswith(".gradle") or path.endswith(".gradle.kts"):
+            if path.endswith((".gradle", ".gradle.kts")):
                 gradle_files.append(path)
             elif path.endswith(".lockfile"):
                 lock_files.append(path)
@@ -7507,7 +7945,7 @@ def parse_libs_versions_toml(filepath):
 
         libraries = data.get("libraries", {})
         if isinstance(libraries, dict):
-            for alias, val in libraries.items():
+            for val in libraries.values():
                 group = ""
                 name = ""
                 ver = "*"
@@ -7746,24 +8184,7 @@ def validate_configuration_drift(results):
 
         # Skip checking if declared constraint is a git URL, local path, workspace, patch, catalog reference, etc.
         if (
-            decl_str.startswith(
-                (
-                    "@",
-                    "git+",
-                    "git:",
-                    "http:",
-                    "https:",
-                    "ssh:",
-                    "file:",
-                    "workspace:",
-                    "patch:",
-                    "portal:",
-                    "link:",
-                    "catalog:",
-                )
-            )
-            or "github:" in decl_str.lower()
-            or decl_str.startswith((".", "/"))
+            decl_str.startswith(("@", "git+", "git:", "http:", "https:", "ssh:", "file:", "workspace:", "patch:", "portal:", "link:", "catalog:", ".", "/")) or "github:" in decl_str.lower()
         ):
             continue
 
@@ -7839,14 +8260,8 @@ class TerminalTextFormatter:
             return (" " * left) + text + (" " * right)
 
 
-def print_results_table(
-    results, pkg_data, show_all, vuls_enabled=False, no_show_console=False
-):
-    """Draws a beautiful styled console report table with precise alignment."""
-    if no_show_console:
-        return
-
-    filtered_results = []
+def _filter_table_results(results, show_all, vuls_enabled):
+    filtered = []
     for r in results:
         is_issue = (
             r["status"] in {"major", "minor", "patch"}
@@ -7858,39 +8273,138 @@ def print_results_table(
             or r.get("mismatch_checksum")
         )
         if show_all or is_issue:
-            filtered_results.append(r)
+            filtered.append(r)
+    return filtered
 
-    if not filtered_results:
-        print(
-            f"\n{COLOR_GREEN}{ICON_OK} All dependencies are up-to-date and secure!{COLOR_RESET}\n"
-        )
+
+def _format_status_badge(r):
+    status_str = r["status"]
+    color = COLOR_RESET
+    icon = ""
+
+    if status_str == "up-to-date":
+        color, status_display, icon = COLOR_GREEN, "Up-to-date", ICON_OK
+    elif status_str == "patch":
+        color, status_display, icon = COLOR_CYAN, "Patch Update", ICON_WARN
+    elif status_str == "minor":
+        color, status_display, icon = COLOR_YELLOW, "Minor Update", ICON_WARN
+    elif status_str == "major":
+        color, status_display, icon = COLOR_RED, "Major Update", ICON_ERROR
+    elif status_str == "error":
+        color, status_display, icon = COLOR_GRAY, "Error", ICON_ERROR
+    elif status_str == "local":
+        color, status_display, icon = COLOR_CYAN, "Verify Local", "🔍"
+    elif status_str == "minor-major":
+        color, status_display, icon = COLOR_RED, "Minor/Major", ICON_ERROR
+    elif status_str == "patch-major":
+        color, status_display, icon = COLOR_RED, "Patch/Major", ICON_ERROR
+    else:
+        status_display = status_str
+
+    if r["deprecated"]:
+        status_display = "Deprecated"
+        color = COLOR_MAGENTA
+        icon = ICON_DEPRECATED
+
+    return f"{color}{icon} {status_display}{COLOR_RESET}"
+
+
+def _print_table_notes_and_diffs(filtered_results):
+    notes_to_print = []
+    for r in filtered_results:
+        parent_suffix = f" (via {', '.join(r['required_by'])})" if r.get("required_by") else ""
+        if r["deprecated"]:
+            notes_to_print.append(f"  {COLOR_MAGENTA}{ICON_DEPRECATED} {r['name']}@{r['installed']}{parent_suffix}: {r['deprecated']}{COLOR_RESET}")
+        elif r["status"] == "error" and r["error"]:
+            notes_to_print.append(f"  {COLOR_RED}{ICON_ERROR} {r['name']}{parent_suffix}: {r['error']}{COLOR_RESET}")
+
+        if r.get("missing_checksum"):
+            notes_to_print.append(f"  {COLOR_YELLOW}{ICON_WARN} {r['name']}@{r['installed']}{parent_suffix}: Missing integrity checksum in lockfile{COLOR_RESET}")
+        elif r.get("weak_checksum"):
+            notes_to_print.append(f"  {COLOR_YELLOW}{ICON_WARN} {r['name']}@{r['installed']}{parent_suffix}: Weak checksum (SHA-1) in lockfile{COLOR_RESET}")
+
+        if r.get("mismatch_checksum"):
+            notes_to_print.append(f"  {COLOR_RED}{ICON_ERROR} {r['name']}@{r['installed']}{parent_suffix}: INTEGRITY MISMATCH! Lockfile checksum does not match official registry checksum.{COLOR_RESET}")
+
+    if notes_to_print:
+        print(f"\n{COLOR_BOLD}Notes & Warnings:{COLOR_RESET}")
+        for note in notes_to_print:
+            print(note)
+
+    major_diffs_to_print = []
+    for r in filtered_results:
+        if r["status"] in {"major", "minor-major", "patch-major"} and r.get("compare_url"):
+            major_diffs_to_print.append(f"  {COLOR_BOLD}{r['name']}{COLOR_RESET}: {COLOR_CYAN}{r['compare_url']}{COLOR_RESET}")
+
+    if major_diffs_to_print:
+        print(f"\n{COLOR_BOLD}Major Update Diffs:{COLOR_RESET}")
+        for diff_note in major_diffs_to_print:
+            print(diff_note)
+
+
+def _print_table_vulnerabilities(filtered_results):
+    vuls_to_print = []
+    suppressed_to_print = []
+    severity_order = {"malicious": 5, "critical": 4, "high": 3, "medium": 2, "low": 1, "unknown": 0}
+
+    for r in filtered_results:
+        vuls_list = r.get("vulnerabilities", [])
+        if vuls_list:
+            sorted_v = sorted(vuls_list, key=lambda v: severity_order.get(get_severity_level(v), 0), reverse=True)
+            vuls_to_print.append((r["name"], r["installed"] if r["installed"] else r["declared"], sorted_v, r.get("required_by", [])))
+
+        suppressed_list = r.get("suppressed_vulnerabilities", [])
+        if suppressed_list:
+            suppressed_to_print.append((r["name"], r["installed"] if r["installed"] else r["declared"], suppressed_list, r.get("required_by", [])))
+
+    if vuls_to_print:
+        vuls_to_print.sort(key=lambda x: (
+            -max(severity_order.get(get_severity_level(v), 0) for v in x[2]) if x[2] else 1,
+            x[0].lower()
+        ))
+        print(f"\n{COLOR_BOLD}{COLOR_RED}{ICON_SHIELD} Security Vulnerabilities Details:{COLOR_RESET}")
+        for name, ver, v_list, required_by in vuls_to_print:
+            parent_suffix = f" (via {', '.join(required_by)})" if required_by else ""
+            print(f"  {COLOR_BOLD}{name}@{ver}{parent_suffix}{COLOR_RESET} ({len(v_list)} vulnerabilities found):")
+            for vuln in v_list:
+                vid, severity, summary = vuln["id"], vuln["severity"], vuln["summary"]
+                level = get_severity_level(vuln)
+                sev_color = COLOR_RED + COLOR_BOLD if level == "malicious" else COLOR_RED if level in {"critical", "high"} else COLOR_YELLOW if level == "medium" else COLOR_CYAN if level == "low" else COLOR_GRAY
+                display_severity = "MALICIOUS CODE" if level == "malicious" else severity
+                print(f"    - {COLOR_BOLD}{vid}{COLOR_RESET} [{sev_color}{display_severity}{COLOR_RESET}]: {summary}")
+
+    if suppressed_to_print:
+        print(f"\n{COLOR_BOLD}{COLOR_GRAY}{ICON_INFO} Suppressed Vulnerabilities (Ignored):{COLOR_RESET}")
+        for name, ver, s_list, required_by in suppressed_to_print:
+            parent_suffix = f" (via {', '.join(required_by)})" if required_by else ""
+            print(f"  {COLOR_BOLD}{COLOR_GRAY}{name}@{ver}{parent_suffix}{COLOR_RESET} ({len(s_list)} suppressed):")
+            for vuln in s_list:
+                vid = vuln["id"]
+                reason = vuln.get("suppressed_reason", "No reason provided")
+                summary = vuln["summary"]
+                print(f"    - {COLOR_BOLD}{COLOR_GRAY}{vid}{COLOR_RESET}: {summary} {COLOR_GRAY}(Reason: {reason}){COLOR_RESET}")
+
+
+def print_results_table(
+    results, pkg_data, show_all, vuls_enabled=False, no_show_console=False
+):
+    """Draws a beautiful styled console report table with precise alignment."""
+    if no_show_console:
         return
 
-    col_name = "Package"
-    col_type = "Type"
-    col_dec = "Declared"
-    col_inst = "Installed"
-    col_latest = "Latest"
-    col_status = "Status"
-    col_vuls = "Vuls"
+    filtered_results = _filter_table_results(results, show_all, vuls_enabled)
+    if not filtered_results:
+        print(f"\n{COLOR_GREEN}{ICON_OK} All dependencies are up-to-date and secure!{COLOR_RESET}\n")
+        return
 
+    col_name, col_type, col_dec, col_inst, col_latest, col_status, col_vuls = "Package", "Type", "Declared", "Installed", "Latest", "Status", "Vuls"
     w_name = max(len(col_name), max(len(r["name"]) for r in filtered_results)) + 2
     w_type = 12
-    w_dec = (
-        max(len(col_dec), max(len(r["declared"] or "N/A") for r in filtered_results))
-        + 2
-    )
-    w_inst = (
-        max(len(col_inst), max(len(r["installed"] or "N/A") for r in filtered_results))
-        + 2
-    )
-    w_latest = (
-        max(len(col_latest), max(len(r["latest"] or "N/A") for r in filtered_results))
-        + 2
-    )
+    w_dec = max(len(col_dec), max(len(r["declared"] or "N/A") for r in filtered_results)) + 2
+    w_inst = max(len(col_inst), max(len(r["installed"] or "N/A") for r in filtered_results)) + 2
+    w_latest = max(len(col_latest), max(len(r["latest"] or "N/A") for r in filtered_results)) + 2
     w_status = 15
     w_vuls = 8
-
     t = BORDER_CHARS
 
     if vuls_enabled:
@@ -7903,7 +8417,6 @@ def print_results_table(
         border_bot = f"{t['bot_left']}{t['horizontal'] * w_name}{t['bot_join']}{t['horizontal'] * w_type}{t['bot_join']}{t['horizontal'] * w_dec}{t['bot_join']}{t['horizontal'] * w_inst}{t['bot_join']}{t['horizontal'] * w_latest}{t['bot_join']}{t['horizontal'] * w_status}{t['bot_right']}"
 
     print(border_top)
-
     hdr_name = TerminalTextFormatter.pad_string(f" {col_name}", w_name, align="left")
     hdr_type = TerminalTextFormatter.pad_string(col_type, w_type, align="center")
     hdr_dec = TerminalTextFormatter.pad_string(col_dec, w_dec, align="center")
@@ -7913,13 +8426,9 @@ def print_results_table(
     hdr_vuls = TerminalTextFormatter.pad_string(col_vuls, w_vuls, align="center")
 
     if vuls_enabled:
-        print(
-            f"{t['vertical']}{hdr_name}{t['vertical']}{hdr_type}{t['vertical']}{hdr_dec}{t['vertical']}{hdr_inst}{t['vertical']}{hdr_latest}{t['vertical']}{hdr_status}{t['vertical']}{hdr_vuls}{t['vertical']}"
-        )
+        print(f"{t['vertical']}{hdr_name}{t['vertical']}{hdr_type}{t['vertical']}{hdr_dec}{t['vertical']}{hdr_inst}{t['vertical']}{hdr_latest}{t['vertical']}{hdr_status}{t['vertical']}{hdr_vuls}{t['vertical']}")
     else:
-        print(
-            f"{t['vertical']}{hdr_name}{t['vertical']}{hdr_type}{t['vertical']}{hdr_dec}{t['vertical']}{hdr_inst}{t['vertical']}{hdr_latest}{t['vertical']}{hdr_status}{t['vertical']}"
-        )
+        print(f"{t['vertical']}{hdr_name}{t['vertical']}{hdr_type}{t['vertical']}{hdr_dec}{t['vertical']}{hdr_inst}{t['vertical']}{hdr_latest}{t['vertical']}{hdr_status}{t['vertical']}")
 
     print(border_mid)
 
@@ -7937,244 +8446,27 @@ def print_results_table(
                 elif r["name"] in pkg_data.get("dependencies", {}):
                     dep_type = "Direct"
 
-        status_str = r["status"]
-        color = COLOR_RESET
-        icon = ""
-
-        if status_str == "up-to-date":
-            color = COLOR_GREEN
-            status_display = "Up-to-date"
-            icon = ICON_OK
-        elif status_str == "patch":
-            color = COLOR_CYAN
-            status_display = "Patch Update"
-            icon = ICON_WARN
-        elif status_str == "minor":
-            color = COLOR_YELLOW
-            status_display = "Minor Update"
-            icon = ICON_WARN
-        elif status_str == "major":
-            color = COLOR_RED
-            status_display = "Major Update"
-            icon = ICON_ERROR
-        elif status_str == "error":
-            color = COLOR_GRAY
-            status_display = "Error"
-            icon = ICON_ERROR
-        elif status_str == "local":
-            color = COLOR_CYAN
-            status_display = "Verify Local"
-            icon = "🔍"
-        elif status_str == "minor-major":
-            color = COLOR_RED
-            status_display = "Minor/Major"
-            icon = ICON_ERROR
-        elif status_str == "patch-major":
-            color = COLOR_RED
-            status_display = "Patch/Major"
-            icon = ICON_ERROR
-
-        if r["deprecated"]:
-            status_display = "Deprecated"
-            color = COLOR_MAGENTA
-            icon = ICON_DEPRECATED
-
-        styled_status = f"{color}{icon} {status_display}{COLOR_RESET}"
-
-        name_cell = TerminalTextFormatter.pad_string(
-            f" {r['name']}", w_name, align="left"
-        )
+        styled_status = _format_status_badge(r)
+        name_cell = TerminalTextFormatter.pad_string(f" {r['name']}", w_name, align="left")
         type_cell = TerminalTextFormatter.pad_string(dep_type, w_type, align="center")
-        dec_cell = TerminalTextFormatter.pad_string(
-            r["declared"] or "N/A", w_dec, align="center"
-        )
-        inst_cell = TerminalTextFormatter.pad_string(
-            r["installed"] or "N/A", w_inst, align="center"
-        )
-        latest_cell = TerminalTextFormatter.pad_string(
-            r["latest"] or "N/A", w_latest, align="center"
-        )
-        status_cell = TerminalTextFormatter.pad_string(
-            styled_status, w_status, align="center"
-        )
+        dec_cell = TerminalTextFormatter.pad_string(r["declared"] or "N/A", w_dec, align="center")
+        inst_cell = TerminalTextFormatter.pad_string(r["installed"] or "N/A", w_inst, align="center")
+        latest_cell = TerminalTextFormatter.pad_string(r["latest"] or "N/A", w_latest, align="center")
+        status_cell = TerminalTextFormatter.pad_string(styled_status, w_status, align="center")
 
         if vuls_enabled:
             vuls_list = r.get("vulnerabilities", [])
             vuls_count = len(vuls_list)
-            if vuls_count > 0:
-                styled_vuls = f"{COLOR_RED}{COLOR_BOLD}{vuls_count}{COLOR_RESET}"
-            else:
-                styled_vuls = (
-                    f"{COLOR_GREEN}{ICON_OK}{COLOR_RESET}"
-                    if ICON_OK == "✔"
-                    else f"{COLOR_GREEN}0{COLOR_RESET}"
-                )
-            vuls_cell = TerminalTextFormatter.pad_string(
-                styled_vuls, w_vuls, align="center"
-            )
-
-            print(
-                f"{t['vertical']}{name_cell}{t['vertical']}{type_cell}{t['vertical']}{dec_cell}{t['vertical']}{inst_cell}{t['vertical']}{latest_cell}{t['vertical']}{status_cell}{t['vertical']}{vuls_cell}{t['vertical']}"
-            )
+            styled_vuls = f"{COLOR_RED}{COLOR_BOLD}{vuls_count}{COLOR_RESET}" if vuls_count > 0 else (f"{COLOR_GREEN}{ICON_OK}{COLOR_RESET}" if ICON_OK == "✔" else f"{COLOR_GREEN}0{COLOR_RESET}")
+            vuls_cell = TerminalTextFormatter.pad_string(styled_vuls, w_vuls, align="center")
+            print(f"{t['vertical']}{name_cell}{t['vertical']}{type_cell}{t['vertical']}{dec_cell}{t['vertical']}{inst_cell}{t['vertical']}{latest_cell}{t['vertical']}{status_cell}{t['vertical']}{vuls_cell}{t['vertical']}")
         else:
-            print(
-                f"{t['vertical']}{name_cell}{t['vertical']}{type_cell}{t['vertical']}{dec_cell}{t['vertical']}{inst_cell}{t['vertical']}{latest_cell}{t['vertical']}{status_cell}{t['vertical']}"
-            )
+            print(f"{t['vertical']}{name_cell}{t['vertical']}{type_cell}{t['vertical']}{dec_cell}{t['vertical']}{inst_cell}{t['vertical']}{latest_cell}{t['vertical']}{status_cell}{t['vertical']}")
 
     print(border_bot)
-
-    # Print warnings & errors section
-    notes_to_print = []
-    for r in filtered_results:
-        parent_suffix = (
-            f" (via {', '.join(r['required_by'])})" if r.get("required_by") else ""
-        )
-        if r["deprecated"]:
-            notes_to_print.append(
-                f"  {COLOR_MAGENTA}{ICON_DEPRECATED} {r['name']}@{r['installed']}{parent_suffix}: {r['deprecated']}{COLOR_RESET}"
-            )
-        elif r["status"] == "error" and r["error"]:
-            notes_to_print.append(
-                f"  {COLOR_RED}{ICON_ERROR} {r['name']}{parent_suffix}: {r['error']}{COLOR_RESET}"
-            )
-
-        if r.get("missing_checksum"):
-            notes_to_print.append(
-                f"  {COLOR_YELLOW}{ICON_WARN} {r['name']}@{r['installed']}{parent_suffix}: Missing integrity checksum in lockfile{COLOR_RESET}"
-            )
-        elif r.get("weak_checksum"):
-            notes_to_print.append(
-                f"  {COLOR_YELLOW}{ICON_WARN} {r['name']}@{r['installed']}{parent_suffix}: Weak checksum (SHA-1) in lockfile{COLOR_RESET}"
-            )
-
-        if r.get("mismatch_checksum"):
-            notes_to_print.append(
-                f"  {COLOR_RED}{ICON_ERROR} {r['name']}@{r['installed']}{parent_suffix}: INTEGRITY MISMATCH! Lockfile checksum does not match official registry checksum.{COLOR_RESET}"
-            )
-
-    if notes_to_print:
-        print(f"\n{COLOR_BOLD}Notes & Warnings:{COLOR_RESET}")
-        for note in notes_to_print:
-            print(note)
-
-    # Print Major Update Diffs section
-    major_diffs_to_print = []
-    for r in filtered_results:
-        if r["status"] in {"major", "minor-major", "patch-major"} and r.get(
-            "compare_url"
-        ):
-            major_diffs_to_print.append(
-                f"  {COLOR_BOLD}{r['name']}{COLOR_RESET}: {COLOR_CYAN}{r['compare_url']}{COLOR_RESET}"
-            )
-
-    if major_diffs_to_print:
-        print(f"\n{COLOR_BOLD}Major Update Diffs:{COLOR_RESET}")
-        for diff_note in major_diffs_to_print:
-            print(diff_note)
-
-    # Print security vulnerabilities details section
+    _print_table_notes_and_diffs(filtered_results)
     if vuls_enabled:
-        vuls_to_print = []
-        suppressed_to_print = []
-        severity_order = {
-            "malicious": 5,
-            "critical": 4,
-            "high": 3,
-            "medium": 2,
-            "low": 1,
-            "unknown": 0,
-        }
-        for r in filtered_results:
-            vuls_list = r.get("vulnerabilities", [])
-            if vuls_list:
-                sorted_v = sorted(
-                    vuls_list,
-                    key=lambda v: severity_order.get(get_severity_level(v), 0),
-                    reverse=True,
-                )
-                vuls_to_print.append(
-                    (
-                        r["name"],
-                        r["installed"] if r["installed"] else r["declared"],
-                        sorted_v,
-                        r.get("required_by", []),
-                    )
-                )
-            suppressed_list = r.get("suppressed_vulnerabilities", [])
-            if suppressed_list:
-                suppressed_to_print.append(
-                    (
-                        r["name"],
-                        r["installed"] if r["installed"] else r["declared"],
-                        suppressed_list,
-                        r.get("required_by", []),
-                    )
-                )
-
-        if vuls_to_print:
-            # Sort package groups by their maximum vulnerability severity descending, and alphabetically by package name ascending
-            vuls_to_print.sort(
-                key=lambda x: (
-                    (
-                        -max(severity_order.get(get_severity_level(v), 0) for v in x[2])
-                        if x[2]
-                        else 1
-                    ),
-                    x[0].lower(),
-                )
-            )
-            print(
-                f"\n{COLOR_BOLD}{COLOR_RED}{ICON_SHIELD} Security Vulnerabilities Details:{COLOR_RESET}"
-            )
-            for name, ver, v_list, required_by in vuls_to_print:
-                parent_suffix = (
-                    f" (via {', '.join(required_by)})" if required_by else ""
-                )
-                print(
-                    f"  {COLOR_BOLD}{name}@{ver}{parent_suffix}{COLOR_RESET} ({len(v_list)} vulnerabilities found):"
-                )
-                for vuln in v_list:
-                    vid = vuln["id"]
-                    severity = vuln["severity"]
-                    summary = vuln["summary"]
-
-                    # Highlight severity
-                    sev_color = COLOR_GRAY
-                    level = get_severity_level(vuln)
-                    if level == "malicious":
-                        sev_color = COLOR_RED + COLOR_BOLD
-                    elif level == "critical" or level == "high":
-                        sev_color = COLOR_RED
-                    elif level == "medium":
-                        sev_color = COLOR_YELLOW
-                    elif level == "low":
-                        sev_color = COLOR_CYAN
-
-                    display_severity = (
-                        "MALICIOUS CODE" if level == "malicious" else severity
-                    )
-                    print(
-                        f"    - {COLOR_BOLD}{vid}{COLOR_RESET} [{sev_color}{display_severity}{COLOR_RESET}]: {summary}"
-                    )
-
-        if suppressed_to_print:
-            print(
-                f"\n{COLOR_BOLD}{COLOR_GRAY}{ICON_INFO} Suppressed Vulnerabilities (Ignored):{COLOR_RESET}"
-            )
-            for name, ver, s_list, required_by in suppressed_to_print:
-                parent_suffix = (
-                    f" (via {', '.join(required_by)})" if required_by else ""
-                )
-                print(
-                    f"  {COLOR_BOLD}{COLOR_GRAY}{name}@{ver}{parent_suffix}{COLOR_RESET} ({len(s_list)} suppressed):"
-                )
-                for vuln in s_list:
-                    vid = vuln["id"]
-                    reason = vuln.get("suppressed_reason", "No reason provided")
-                    summary = vuln["summary"]
-                    print(
-                        f"    - {COLOR_BOLD}{COLOR_GRAY}{vid}{COLOR_RESET}: {summary} {COLOR_GRAY}(Reason: {reason}){COLOR_RESET}"
-                    )
+        _print_table_vulnerabilities(filtered_results)
 
 
 def print_summary(results, elapsed_time, vuls_enabled=False, projects_count=None):
@@ -8796,7 +9088,7 @@ def get_upgraded_constraint(declared_ver, latest_ver):
         return latest_ver
 
     # Extract prefix, e.g., ^, ~, >=, ==, ~>
-    match = re.match(r"^([~^>=<!\s]+)\s*(.*)$", declared_ver.strip())
+    match = RE_OPERATOR_PREFIX_MATCH.match(declared_ver.strip())
     if match:
         prefix = match.group(1)
         return prefix + latest_ver
@@ -8953,131 +9245,73 @@ def find_manifest_files(project_path, technology):
     return manifest_files
 
 
-def generate_remediation_diff(
-    manifest_path, line_index, declared_ver, latest_ver, tech, package_name=None
-):
-    """Generates remediation diff showing current vs suggested change."""
-    try:
-        with open(manifest_path, "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()
-    except Exception:
-        return None
-
-    idx = line_index - 1
-    if idx < 0 or idx >= len(lines):
-        return None
-
-    line_idx_to_change = None
-    target_text = None
-
-    search_range = range(idx, min(idx + 4, len(lines)))
-
+def _find_target_version_line(lines, search_range, declared_ver, tech, package_name, fallback_idx):
+    """Finds the line index and target text to replace in the manifest lines."""
     if declared_ver:
         for i in search_range:
             if declared_ver in lines[i]:
-                line_idx_to_change = i
-                target_text = declared_ver
-                break
+                return i, declared_ver
 
-    if line_idx_to_change is None:
-        if tech == "maven":
-            for i in search_range:
-                m = re.search(
-                    r"<version>\s*(.*?)\s*</version>", lines[i], re.IGNORECASE
-                )
-                if m:
-                    line_idx_to_change = i
-                    target_text = m.group(1)
-                    break
-        elif tech == "gradle":
-            for i in search_range:
-                m_ref = re.search(r'version\.ref\s*=\s*["\']([^"\']+)["\']', lines[i])
-                if m_ref:
-                    line_idx_to_change = i
-                    target_text = m_ref.group(1)
-                    break
-                m_eq = re.search(r'version\s*=\s*["\']([^"\']+)["\']', lines[i])
-                if m_eq:
-                    line_idx_to_change = i
-                    target_text = m_eq.group(1)
-                    break
-                m_colon = re.search(r'version:\s*["\']([^"\']+)["\']', lines[i])
-                if m_colon:
-                    line_idx_to_change = i
-                    target_text = m_colon.group(1)
-                    break
-                if package_name:
-                    pattern = re.escape(package_name) + r':([^\'"]+)'
-                    m_str = re.search(pattern, lines[i])
-                    if m_str:
-                        line_idx_to_change = i
-                        target_text = m_str.group(1)
-                        break
-        elif tech == "nuget":
-            for i in search_range:
-                m = re.search(
-                    r'Version\s*=\s*["\']([^"\']+)["\']', lines[i], re.IGNORECASE
-                )
-                if m:
-                    line_idx_to_change = i
-                    target_text = m.group(1)
-                    break
+    if tech == "maven":
+        for i in search_range:
+            m = re.search(r"<version>\s*(.*?)\s*</version>", lines[i], re.IGNORECASE)
+            if m:
+                return i, m.group(1)
+    elif tech == "gradle":
+        for i in search_range:
+            m_ref = re.search(r'version\.ref\s*=\s*["\']([^"\']+)["\']', lines[i])
+            if m_ref:
+                return i, m_ref.group(1)
+            m_eq = re.search(r'version\s*=\s*["\']([^"\']+)["\']', lines[i])
+            if m_eq:
+                return i, m_eq.group(1)
+            m_colon = re.search(r'version:\s*["\']([^"\']+)["\']', lines[i])
+            if m_colon:
+                return i, m_colon.group(1)
+            if package_name:
+                pattern = re.escape(package_name) + r':([^\'"]+)'
+                m_str = re.search(pattern, lines[i])
+                if m_str:
+                    return i, m_str.group(1)
+    elif tech == "nuget":
+        for i in search_range:
+            m = re.search(r'Version\s*=\s*["\']([^"\']+)["\']', lines[i], re.IGNORECASE)
+            if m:
+                return i, m.group(1)
 
-    if line_idx_to_change is None and declared_ver:
-        ver_digits = re.search(r"\d+\.\d+(?:\.\d+)?(?:\.\d+)?", declared_ver)
+    if declared_ver:
+        ver_digits = RE_DECIMAL_VER.search(declared_ver)
         if ver_digits:
             ver_clean = ver_digits.group(0)
             for i in search_range:
                 if ver_clean in lines[i]:
-                    line_idx_to_change = i
-                    target_text = ver_clean
-                    break
+                    return i, ver_clean
 
-    if line_idx_to_change is None:
-        line_idx_to_change = idx
-        ver_pattern = re.search(r"\d+\.\d+(?:\.\d+)?(?:\.\d+)?", lines[idx])
-        if ver_pattern:
-            target_text = ver_pattern.group(0)
-        else:
-            quotes_match = re.search(r'["\']([^"\']+)["\']', lines[idx])
-            if quotes_match:
-                quoted_vals = re.findall(r'["\']([^"\']+)["\']', lines[idx])
-                if quoted_vals:
-                    target_text = quoted_vals[-1]
+    target_text = None
+    ver_pattern = RE_DECIMAL_VER.search(lines[fallback_idx])
+    if ver_pattern:
+        target_text = ver_pattern.group(0)
+    else:
+        quotes_match = re.search(r'["\']([^"\']+)["\']', lines[fallback_idx])
+        if quotes_match:
+            quoted_vals = re.findall(r'["\']([^"\']+)["\']', lines[fallback_idx])
+            if quoted_vals:
+                target_text = quoted_vals[-1]
 
-    if line_idx_to_change is None:
-        return None
+    return fallback_idx, target_text
 
-    if (
-        target_text
-        and package_name
-        and target_text.lower().strip() == package_name.lower().strip()
-    ):
-        target_text = None
 
-    if not target_text:
-        return None
-
-    # --- Property placeholder resolution nested helpers & logic ---
+def _resolve_property_placeholder(manifest_path, target_text, tech, lines, line_idx_to_change, declared_ver):
+    """Resolves Maven/Gradle/NuGet property placeholders to concrete files and line numbers."""
     def _search_lines_for_property(lines_list, prop_name_val, tech_type):
-        if tech_type == "maven" or tech_type == "nuget":
-            pattern = (
-                r"<\s*"
-                + re.escape(prop_name_val)
-                + r"\s*>\s*(.*?)\s*<\s*/\s*"
-                + re.escape(prop_name_val)
-                + r"\s*>"
-            )
+        if tech_type in ("maven", "nuget"):
+            pattern = r"<\s*" + re.escape(prop_name_val) + r"\s*>\s*(.*?)\s*<\s*/\s*" + re.escape(prop_name_val) + r"\s*>"
             for idx_p, line_p in enumerate(lines_list):
                 m_p = re.search(pattern, line_p, re.IGNORECASE)
                 if m_p:
                     return idx_p + 1, m_p.group(1)
         elif tech_type == "gradle":
-            pattern = (
-                r"^\s*([a-zA-Z0-9_.-]+)?\s*"
-                + re.escape(prop_name_val)
-                + r'\s*=\s*["\']([^"\']+)["\']'
-            )
+            pattern = r"^\s*([a-zA-Z0-9_.-]+)?\s*" + re.escape(prop_name_val) + r'\s*=\s*["\']([^"\']+)["\']'
             for idx_p, line_p in enumerate(lines_list):
                 m_p = re.search(pattern, line_p)
                 if m_p:
@@ -9091,9 +9325,7 @@ def generate_remediation_diff(
         except Exception:
             return None, None, None
 
-        line_idx_p, val_p = _search_lines_for_property(
-            lines_list, prop_name_val, tech_type
-        )
+        line_idx_p, val_p = _search_lines_for_property(lines_list, prop_name_val, tech_type)
         if line_idx_p is not None:
             return current_path, line_idx_p, val_p
 
@@ -9107,27 +9339,22 @@ def generate_remediation_diff(
                 parent_pom = os.path.join(parent_dir_p, "pom.xml")
                 if os.path.exists(parent_pom):
                     try:
-                        with open(
-                            parent_pom, "r", encoding="utf-8", errors="ignore"
-                        ) as f_p:
+                        with open(parent_pom, "r", encoding="utf-8", errors="ignore") as f_p:
                             parent_lines = f_p.readlines()
-                        line_idx_p, val_p = _search_lines_for_property(
-                            parent_lines, prop_name_val, tech_type
-                        )
+                        line_idx_p, val_p = _search_lines_for_property(parent_lines, prop_name_val, tech_type)
                         if line_idx_p is not None:
                             return parent_pom, line_idx_p, val_p
-                    except Exception:
+                    except (OSError, UnicodeDecodeError):
                         pass
                     curr_dir_p = parent_pom
                 else:
                     break
-
         return None, None, None
 
     is_placeholder = False
     prop_name = None
-
     if tech == "maven":
+        m = re.match(r"^\s*\$\SafeWriter?\{\s*(.*?)\s*\}\s*$", target_text) if hasattr(re, 'match') else None
         m = re.match(r"^\s*\$\{\s*(.*?)\s*\}\s*$", target_text)
         if m:
             is_placeholder = True
@@ -9146,83 +9373,102 @@ def generate_remediation_diff(
             is_placeholder = True
             prop_name = target_text[1:]
 
-    resolved_version = None
+    new_path = manifest_path
+    new_idx = line_idx_to_change
+    resolved_ver = target_text
+    new_lines = lines
+
     if is_placeholder and prop_name:
-        resolved_path, resolved_line_idx, current_val = find_property_definition(
-            manifest_path, prop_name, tech
-        )
+        resolved_path, resolved_line_idx, current_val = find_property_definition(manifest_path, prop_name, tech)
         if resolved_path and resolved_line_idx:
-            manifest_path = resolved_path
+            new_path = resolved_path
             try:
-                with open(manifest_path, "r", encoding="utf-8", errors="ignore") as f:
-                    lines = f.readlines()
-                line_idx_to_change = resolved_line_idx - 1
-                target_text = current_val
-                resolved_version = current_val
-            except Exception:
+                with open(new_path, "r", encoding="utf-8", errors="ignore") as f:
+                    new_lines = f.readlines()
+                new_idx = resolved_line_idx - 1
+                resolved_ver = current_val
+            except (OSError, UnicodeDecodeError):
                 pass
-    else:
-        resolved_version = target_text
 
-    # Verify that the resolved version matches the row's declared version to avoid cross-module mismatches
-    if declared_ver and resolved_version:
-        is_val_placeholder = False
-        if (
-            tech == "maven"
-            and "${" in resolved_version
-            or tech == "nuget"
-            and "$(" in resolved_version
-            or tech == "gradle"
-            and "$" in resolved_version
-        ):
-            is_val_placeholder = True
-
+    if declared_ver and resolved_ver:
+        is_val_placeholder = (
+            (tech == "maven" and "${" in resolved_ver) or
+            (tech == "nuget" and "$(" in resolved_ver) or
+            (tech == "gradle" and "$" in resolved_ver)
+        )
         if not is_val_placeholder:
-
             def clean_ver(v):
-                v = v.strip().lower()
-                v = v.removeprefix("v")
-                v = re.sub(r"^[~^>=<!\s]+", "", v)
-                return v
+                v = v.strip().lower().removeprefix("v")
+                return RE_OPERATOR_PREFIX.sub("", v)
 
             def is_version_compatible(v1, v2):
-                c1 = clean_ver(v1)
-                c2 = clean_ver(v2)
-                if not c1 or not c2:
+                c1, c2 = clean_ver(v1), clean_ver(v2)
+                if not c1 or not c2 or c1 == c2 or c1.startswith(c2) or c2.startswith(c1):
                     return True
-                if c1 == c2 or c1.startswith(c2) or c2.startswith(c1):
-                    return True
-                m1 = re.match(r"^(\d+)", c1)
-                m2 = re.match(r"^(\d+)", c2)
-                if m1 and m2 and m1.group(1) == m2.group(1):
-                    return True
-                return False
+                m1, m2 = RE_NUM_START.match(c1), RE_NUM_START.match(c2)
+                return bool(m1 and m2 and m1.group(1) == m2.group(1))
 
-            if not is_version_compatible(declared_ver, resolved_version):
-                return None
-    # --- End of property placeholder logic ---
+            if not is_version_compatible(declared_ver, resolved_ver):
+                return None, None, None, None
+
+    return new_path, new_idx, resolved_ver, new_lines
+
+
+def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ver, tech, package_name=None):
+    """Generates remediation diff showing current vs suggested change."""
+    try:
+        with open(manifest_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+    except Exception:
+        return None
+
+    idx = line_index - 1
+    if idx < 0 or idx >= len(lines):
+        return None
+
+    search_range = range(idx, min(idx + 4, len(lines)))
+    line_idx_to_change, target_text = _find_target_version_line(lines, search_range, declared_ver, tech, package_name, idx)
+
+    if (
+        target_text
+        and package_name
+        and target_text.lower().strip() == package_name.lower().strip()
+    ):
+        target_text = None
+
+    if not target_text:
+        return None
+
+    res_path, res_idx, res_text, res_lines = _resolve_property_placeholder(
+        manifest_path, target_text, tech, lines, line_idx_to_change, declared_ver
+    )
+    if res_path is None:
+        return None
+
+    manifest_path = res_path
+    line_idx_to_change = res_idx
+    target_text = res_text
+    lines = res_lines
 
     match_prefix = ""
     match_version = target_text or ""
     if target_text:
-        match_opt = re.match(r"^([~^>=<!\s]+)\s*(.*)$", target_text.strip())
+        match_opt = RE_OPERATOR_PREFIX_MATCH.match(target_text.strip())
         if match_opt:
             match_prefix = match_opt.group(1)
             match_version = match_opt.group(2)
 
     effective_prefix = match_prefix
-    if re.match(r"^[~^>=<!]", latest_ver.strip()):
+    if RE_OPERATOR_START.match(latest_ver.strip()):
         effective_prefix = ""
 
     upgraded_str = effective_prefix + latest_ver
 
-    # Do not generate a diff if target version is identical to current version
     def _clean_v(v):
         if not v:
             return ""
-        v = v.strip().lower()
-        v = v.removeprefix("v")
-        return re.sub(r"^[~^>=<!\s]+", "", v)
+        v = str(v).strip().lower().removeprefix("v")
+        return RE_OPERATOR_PREFIX.sub("", v)
 
     if target_text and latest_ver and _clean_v(target_text) == _clean_v(latest_ver):
         return None
@@ -9241,9 +9487,6 @@ def generate_remediation_diff(
             escaped_orig = escape_html(orig_line)
             if target_text and target_text in orig_line:
                 escaped_target = escape_html(target_text)
-                escaped_prefix = escape_html(effective_prefix)
-                escaped_version = escape_html(match_version)
-
                 html_orig = escaped_orig.replace(
                     escaped_target,
                     f'<span class="diff-remove-chunk">{escaped_target}</span>',
@@ -9264,20 +9507,12 @@ def generate_remediation_diff(
             else:
                 html_new = escaped_new
 
-            current_block.append(
-                {"line_num": line_num, "html": html_orig, "is_changed": True}
-            )
-            suggested_block.append(
-                {"line_num": line_num, "html": html_new, "is_changed": True}
-            )
+            current_block.append({"line_num": line_num, "html": html_orig, "is_changed": True})
+            suggested_block.append({"line_num": line_num, "html": html_new, "is_changed": True})
         else:
             escaped_orig = escape_html(orig_line)
-            current_block.append(
-                {"line_num": line_num, "html": escaped_orig, "is_changed": False}
-            )
-            suggested_block.append(
-                {"line_num": line_num, "html": escaped_orig, "is_changed": False}
-            )
+            current_block.append({"line_num": line_num, "html": escaped_orig, "is_changed": False})
+            suggested_block.append({"line_num": line_num, "html": escaped_orig, "is_changed": False})
 
     return {
         "manifest_path": manifest_path,
@@ -9302,15 +9537,14 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
     indent = "    "
     line_to_add = ""
 
-    clean_target = str(target_ver).strip()
-    if not re.match(r"^[~^>=<!]", clean_target):
-        clean_target = f"^{clean_target}"
+    raw_ver = str(target_ver).strip()
+    clean_numeric = raw_ver.lstrip("^~>=<! v")
 
-    if tech == "npm" or tech == "php":
+    if tech in {"npm", "pnpm", "yarn"}:
+        clean_target = f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
         deps_match_idx = None
         dev_deps_match_idx = None
         root_open_idx = None
-
         for idx, line in enumerate(lines):
             if re.search(r'"dependencies"\s*:\s*\{', line):
                 deps_match_idx = idx
@@ -9329,9 +9563,39 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
         elif root_open_idx is not None:
             insert_line_idx = root_open_idx + 1
             line_to_add = f'{indent}"dependencies": {{\n{indent}  "{package_name}": "{clean_target}"\n{indent}}},'
+    elif tech == "php":
+        clean_target = f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
+        deps_match_idx = None
+        for idx, line in enumerate(lines):
+            if re.search(r'"require"\s*:\s*\{', line):
+                deps_match_idx = idx
+                break
+        if deps_match_idx is not None:
+            insert_line_idx = deps_match_idx + 1
+            line_to_add = f'{indent}"{package_name}": "{clean_target}",'
+        else:
+            insert_line_idx = len(lines)
+            line_to_add = f'{indent}"require": {{\n{indent}  "{package_name}": "{clean_target}"\n{indent}}},'
+    elif tech == "go":
+        go_ver = f"v{clean_numeric}" if not raw_ver.startswith("v") else raw_ver
+        go_ver = RE_OPERATOR_PREFIX.sub("", go_ver)
+        req_open_idx = None
+        req_close_idx = None
+        for idx, line in enumerate(lines):
+            if re.match(r"^\s*require\s*\(", line):
+                req_open_idx = idx
+            elif req_open_idx is not None and re.match(r"^\s*\)", line):
+                req_close_idx = idx
+                break
+        if req_close_idx is not None:
+            insert_line_idx = req_close_idx
+            line_to_add = f"\t{package_name} {go_ver}"
+        else:
+            insert_line_idx = len(lines)
+            line_to_add = f"require {package_name} {go_ver}"
     elif tech == "pip":
         insert_line_idx = len(lines)
-        line_to_add = f"{package_name}=={clean_target.lstrip('^~>=<!')}"
+        line_to_add = f"{package_name}>={clean_numeric}"
     elif tech == "rust":
         dep_sec_idx = None
         for idx, line in enumerate(lines):
@@ -9340,16 +9604,22 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
                 break
         if dep_sec_idx is not None:
             insert_line_idx = dep_sec_idx + 1
-            line_to_add = f'{package_name} = "{clean_target.lstrip("^~>=<!")}"'
+            line_to_add = f'{package_name} = "{clean_numeric}"'
         else:
             insert_line_idx = len(lines)
-            line_to_add = (
-                f'\n[dependencies]\n{package_name} = "{clean_target.lstrip("^~>=<!")}"'
-            )
-
-    if insert_line_idx is None:
+            line_to_add = f'\n[dependencies]\n{package_name} = "{clean_numeric}"'
+    elif tech == "ruby":
         insert_line_idx = len(lines)
-        line_to_add = f"{package_name}: {clean_target}"
+        line_to_add = f"gem '{package_name}', '~> {clean_numeric}'"
+    elif tech == "nuget":
+        insert_line_idx = len(lines)
+        if "Directory.Packages.props" in manifest_path:
+            line_to_add = f'  <PackageVersion Include="{package_name}" Version="{clean_numeric}" />'
+        else:
+            line_to_add = f'  <PackageReference Include="{package_name}" Version="{clean_numeric}" />'
+    else:
+        insert_line_idx = len(lines)
+        line_to_add = f"{package_name}: {clean_numeric}"
 
     start_ctx = max(0, insert_line_idx - 2)
     end_ctx = min(len(lines), insert_line_idx + 3)
@@ -9409,15 +9679,14 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
     if not lines:
         return None
 
-    clean_target = str(target_ver).strip()
-    if not re.match(r"^[~^>=<!]", clean_target):
-        clean_target = f"^{clean_target}"
-
+    raw_ver = str(target_ver).strip()
+    clean_numeric = raw_ver.lstrip("^~>=<! v")
     indent = "    "
     insert_line_idx = None
     line_to_add = ""
 
     if tech in {"npm", "pnpm"}:
+        clean_target = f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
         overrides_line_idx = None
         for idx, line in enumerate(lines):
             if re.search(r'"overrides"\s*:\s*\{', line):
@@ -9436,6 +9705,7 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
             insert_line_idx = (root_open_idx + 1) if root_open_idx is not None else 1
             line_to_add = f'{indent}"overrides": {{\n{indent}  "{package_name}": "{clean_target}"\n{indent}}},'
     elif tech == "yarn":
+        clean_target = f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
         resolutions_line_idx = None
         for idx, line in enumerate(lines):
             if re.search(r'"resolutions"\s*:\s*\{', line):
@@ -9452,6 +9722,23 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
                     break
             insert_line_idx = (root_open_idx + 1) if root_open_idx is not None else 1
             line_to_add = f'{indent}"resolutions": {{\n{indent}  "{package_name}": "{clean_target}"\n{indent}}},'
+    elif tech == "go":
+        go_ver = f"v{clean_numeric}" if not raw_ver.startswith("v") else raw_ver
+        go_ver = RE_OPERATOR_PREFIX.sub("", go_ver)
+        insert_line_idx = len(lines)
+        line_to_add = f"replace {package_name} => {package_name} {go_ver}"
+    elif tech == "rust":
+        patch_sec_idx = None
+        for idx, line in enumerate(lines):
+            if re.search(r"^\[patch\.crates-io\]", line.strip()):
+                patch_sec_idx = idx
+                break
+        if patch_sec_idx is not None:
+            insert_line_idx = patch_sec_idx + 1
+            line_to_add = f'{package_name} = "{clean_numeric}"'
+        else:
+            insert_line_idx = len(lines)
+            line_to_add = f'\n[patch.crates-io]\n{package_name} = "{clean_numeric}"'
     else:
         return generate_addition_remediation_diff(
             manifest_path, package_name, target_ver, tech
@@ -9483,6 +9770,16 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
         )
         suggested_block.append(
             {"line_num": line_num, "html": escaped_orig, "is_changed": False}
+        )
+
+    if insert_line_idx >= len(lines):
+        escaped_add = escape_html(line_to_add)
+        suggested_block.append(
+            {
+                "line_num": "+",
+                "html": f'<span class="diff-add-chunk">{escaped_add}</span>',
+                "is_changed": True,
+            }
         )
 
     return {
@@ -9529,16 +9826,252 @@ def format_remediation_option_label(ver_str: str) -> str:
         return f"Version {clean_v}"
 
 
+def _clean_version_str(v):
+    if not v:
+        return ""
+    v = str(v).strip().lower().removeprefix("v")
+    return RE_OPERATOR_PREFIX.sub("", v)
+
+
+def _populate_direct_strategies(r, manifest_path, found_line_idx, name, declared, tech, latest_patch, latest_sm, latest_abs):
+    direct_options = []
+    target_string = latest_abs or (r.get("latest") if r.get("name") == name else "") or ""
+    if " or " in target_string:
+        parts = [p.strip() for p in target_string.split(" or ") if p.strip()]
+        if len(parts) >= 2:
+            for p in parts:
+                diff_p = (
+                    generate_remediation_diff(manifest_path, found_line_idx, declared, p, tech, name)
+                    if found_line_idx
+                    else generate_addition_remediation_diff(manifest_path, name, p, tech)
+                )
+                if diff_p:
+                    direct_options.append({
+                        "id": f"option_{p}",
+                        "label": format_remediation_option_label(p),
+                        "badge": "Option",
+                        "badge_class": "v-chip-safe",
+                        "diff": diff_p,
+                    })
+            diff_comb = (
+                generate_remediation_diff(manifest_path, found_line_idx, declared, target_string, tech, name)
+                if found_line_idx
+                else generate_addition_remediation_diff(manifest_path, name, target_string, tech)
+            )
+            if diff_comb:
+                direct_options.append({
+                    "id": f"option_{target_string}",
+                    "label": format_remediation_option_label(target_string),
+                    "badge": "Option",
+                    "badge_class": "v-chip-major",
+                    "diff": diff_comb,
+                })
+
+    if latest_patch:
+        diff_patch = (
+            generate_remediation_diff(manifest_path, found_line_idx, declared, latest_patch, tech, name)
+            if found_line_idx
+            else generate_addition_remediation_diff(manifest_path, name, latest_patch, tech)
+        )
+        if diff_patch:
+            direct_options.append({
+                "id": "patch",
+                "label": f"Patch: v{_clean_version_str(latest_patch)}",
+                "badge": "Patch / Bugfix",
+                "badge_class": "v-chip-ok",
+                "diff": diff_patch,
+            })
+
+    if latest_sm:
+        diff_sm = (
+            generate_remediation_diff(manifest_path, found_line_idx, declared, latest_sm, tech, name)
+            if found_line_idx
+            else generate_addition_remediation_diff(manifest_path, name, latest_sm, tech)
+        )
+        if diff_sm:
+            direct_options.append({
+                "id": "minor",
+                "label": f"Minor: v{_clean_version_str(latest_sm)}",
+                "badge": "Minor / Feature",
+                "badge_class": "v-chip-safe",
+                "diff": diff_sm,
+            })
+
+    if latest_abs and " or " not in str(latest_abs):
+        diff_abs = (
+            generate_remediation_diff(manifest_path, found_line_idx, declared, latest_abs, tech, name)
+            if found_line_idx
+            else generate_addition_remediation_diff(manifest_path, name, latest_abs, tech)
+        )
+        if diff_abs:
+            direct_options.append({
+                "id": "major",
+                "label": f"Major: v{_clean_version_str(latest_abs)}",
+                "badge": "Major / Breaking",
+                "badge_class": "v-chip-major",
+                "diff": diff_abs,
+            })
+
+    if direct_options:
+        return [{
+            "id": "direct_upgrade",
+            "title": f"Update Dependency ({name})" if r.get("dep_type") == "Transitive" else f"Update Direct Dependency ({name})",
+            "description": f"Updates '{name}' in manifest file.",
+            "is_recommended": True,
+            "options": direct_options,
+        }]
+    return []
+
+
+def _populate_parent_strategies(r, results, manifest_path, lines, tech, name, get_line_idx_fn):
+    strategies = []
+    if not r.get("required_by"):
+        return strategies
+
+    for parent_name in r.get("required_by", []):
+        parent_candidate = next(
+            (
+                item
+                for item in results
+                if item.get("name") == parent_name
+                and item.get("project_path") == r.get("project_path")
+            ),
+            None,
+        )
+        if not parent_candidate:
+            continue
+
+        parent_line_idx = get_line_idx_fn(manifest_path, lines, parent_name, tech, parent_candidate.get("declared"), False)
+        if parent_line_idx is None:
+            continue
+
+        p_name = parent_candidate.get("name")
+        p_inst = parent_candidate.get("installed")
+        p_clean_inst = p_inst[0] if (isinstance(p_inst, list) and p_inst) else p_inst
+        p_decl = parent_candidate.get("declared")
+        p_patch = parent_candidate.get("latest_patch")
+        p_sm = parent_candidate.get("latest_same_major")
+        p_abs = parent_candidate.get("latest_absolute") or parent_candidate.get("latest")
+
+        p_clean_inst_v = _clean_version_str(p_clean_inst)
+        p_clean_decl_v = _clean_version_str(p_decl)
+
+        if p_patch and _clean_version_str(p_patch) in (p_clean_inst_v, p_clean_decl_v):
+            p_patch = None
+        if p_sm and (
+            _clean_version_str(p_sm) in (p_clean_inst_v, p_clean_decl_v)
+            or _clean_version_str(p_sm) == _clean_version_str(p_patch)
+        ):
+            p_sm = None
+        if p_abs and (
+            _clean_version_str(p_abs) in (p_clean_inst_v, p_clean_decl_v)
+            or _clean_version_str(p_abs) == _clean_version_str(p_sm)
+            or _clean_version_str(p_abs) == _clean_version_str(p_patch)
+        ):
+            p_abs = None
+
+        parent_options = []
+        if p_patch:
+            p_diff = generate_remediation_diff(manifest_path, parent_line_idx, p_decl, p_patch, tech, p_name)
+            if p_diff:
+                parent_options.append({
+                    "id": "patch",
+                    "label": f"Patch {p_name}: v{_clean_version_str(p_patch)}",
+                    "badge": "Patch / Bugfix",
+                    "badge_class": "v-chip-ok",
+                    "diff": p_diff,
+                })
+        if p_sm:
+            p_diff = generate_remediation_diff(manifest_path, parent_line_idx, p_decl, p_sm, tech, p_name)
+            if p_diff:
+                parent_options.append({
+                    "id": "minor",
+                    "label": f"Minor {p_name}: v{_clean_version_str(p_sm)}",
+                    "badge": "Minor / Feature",
+                    "badge_class": "v-chip-safe",
+                    "diff": p_diff,
+                })
+        if p_abs:
+            p_diff = generate_remediation_diff(manifest_path, parent_line_idx, p_decl, p_abs, tech, p_name)
+            if p_diff:
+                parent_options.append({
+                    "id": "major",
+                    "label": f"Major {p_name}: v{_clean_version_str(p_abs)}",
+                    "badge": "Major / Breaking",
+                    "badge_class": "v-chip-major",
+                    "diff": p_diff,
+                })
+
+        if parent_options:
+            strategies.append({
+                "id": "parent_upgrade",
+                "title": f"Upgrade Parent Package ({p_name})",
+                "description": f"Recommended. Upgrades parent package '{p_name}' which requires '{name}'.",
+                "is_recommended": True,
+                "options": parent_options,
+            })
+            break
+
+    return strategies
+
+
+def _populate_override_strategies(manifest_path, name, tech, latest_patch, latest_sm, latest_abs, clean_installed, has_prior_strategies):
+    target_ver_str = latest_patch or latest_sm or latest_abs or clean_installed
+    if not target_ver_str:
+        return []
+
+    ov_diff = generate_override_remediation_diff(manifest_path, name, target_ver_str, tech)
+    if not ov_diff:
+        return []
+
+    ov_badge = "Patch" if target_ver_str == latest_patch else "Minor" if target_ver_str == latest_sm else "Major"
+    ov_badge_class = "v-chip-ok" if ov_badge == "Patch" else "v-chip-safe" if ov_badge == "Minor" else "v-chip-major"
+
+    return [{
+        "id": "override",
+        "title": f"Force Transitive Override ({name})",
+        "description": f"Adds explicit override / resolution for '{name}' in manifest.",
+        "is_recommended": not has_prior_strategies,
+        "options": [{
+            "id": "override",
+            "label": f"Override {name}: v{_clean_version_str(target_ver_str)}",
+            "badge": ov_badge,
+            "badge_class": ov_badge_class,
+            "diff": ov_diff,
+        }],
+    }]
+
+
+def _build_final_remediation(strategies, manifest_missing):
+    if not strategies:
+        return None
+
+    all_flat_options = []
+    for st in strategies:
+        all_flat_options.extend(st.get("options", []))
+
+    remediation_safe = next((opt["diff"] for opt in all_flat_options if opt["id"] in {"patch", "minor"}), None)
+    remediation_major = next((opt["diff"] for opt in all_flat_options if opt["id"] == "major"), None)
+    remediation_options = (
+        [{"label": opt["label"], "diff": opt["diff"]} for opt in all_flat_options]
+        if all_flat_options
+        else None
+    )
+
+    first_diff = all_flat_options[0]["diff"] if all_flat_options else None
+    last_diff = all_flat_options[-1]["diff"] if all_flat_options else None
+
+    return {
+        "safe": remediation_safe or first_diff,
+        "major": remediation_major or last_diff,
+        "options": remediation_options,
+        "manifest_missing": manifest_missing,
+        "strategies": strategies,
+    }
+
+
 def populate_remediation_recommendations(results, default_project_path):
     """Calculates and attaches remediation info with multi-level strategies (Patch, Minor, Major, Parent Upgrade, Override) to each result."""
-
-    def _clean_v(v):
-        if not v:
-            return ""
-        v = str(v).strip().lower()
-        v = v.removeprefix("v")
-        return re.sub(r"^[~^>=<!\s]+", "", v)
-
     manifest_file_cache = {}
 
     def _get_manifest_lines(m_path):
@@ -9560,19 +10093,12 @@ def populate_remediation_recommendations(results, default_project_path):
         found_line_idx = None
         best_score = -1
         for idx, line in enumerate(lines):
-            if is_engine:
-                matched = f'"{pkg_name}"' in line or '"engines"' in line
-            else:
-                matched = match_line_for_dependency(line, pkg_name, tech)
+            matched = (f'"{pkg_name}"' in line or '"engines"' in line) if is_engine else match_line_for_dependency(line, pkg_name, tech)
             if matched:
                 score = 1
                 if declared:
                     ver_digits = re.search(r"\d+\.\d+", str(declared))
-                    if (
-                        ver_digits
-                        and ver_digits.group(0) in line
-                        or str(declared).strip() in line
-                    ):
+                    if ver_digits and ver_digits.group(0) in line or str(declared).strip() in line:
                         score = 2
                 if score > best_score:
                     best_score = score
@@ -9588,10 +10114,8 @@ def populate_remediation_recommendations(results, default_project_path):
         cache_key = (p_path, tech, is_engine)
         if cache_key not in manifest_files_cache:
             if is_engine:
-                package_json_path = os.path.join(p_path, "package.json")
-                manifest_files_cache[cache_key] = (
-                    [package_json_path] if os.path.exists(package_json_path) else []
-                )
+                pkg_json = os.path.join(p_path, "package.json")
+                manifest_files_cache[cache_key] = [pkg_json] if os.path.exists(pkg_json) else []
             else:
                 manifest_files_cache[cache_key] = find_manifest_files(p_path, tech)
         return manifest_files_cache[cache_key]
@@ -9611,13 +10135,7 @@ def populate_remediation_recommendations(results, default_project_path):
 
         r["remediation"] = None
 
-        is_outdated = r.get("status") in {
-            "major",
-            "minor",
-            "patch",
-            "minor-major",
-            "patch-major",
-        }
+        is_outdated = r.get("status") in {"major", "minor", "patch", "minor-major", "patch-major"}
         has_vulns = bool(r.get("vulnerabilities"))
         is_depr = bool(r.get("deprecated"))
 
@@ -9634,36 +10152,29 @@ def populate_remediation_recommendations(results, default_project_path):
         installed = r.get("installed")
         dep_type = r.get("dep_type")
 
-        clean_installed = (
-            installed[0] if (isinstance(installed, list) and installed) else installed
-        )
-
+        clean_installed = installed[0] if (isinstance(installed, list) and installed) else installed
         latest_patch = r.get("latest_patch")
         latest_sm = r.get("latest_same_major")
         latest_abs = r.get("latest_absolute") or r.get("latest")
 
-        clean_inst_v = _clean_v(clean_installed)
-        clean_decl_v = _clean_v(declared)
+        clean_inst_v = _clean_version_str(clean_installed)
+        clean_decl_v = _clean_version_str(declared)
 
-        if latest_patch and _clean_v(latest_patch) in (clean_inst_v, clean_decl_v):
+        if latest_patch and _clean_version_str(latest_patch) in (clean_inst_v, clean_decl_v):
             latest_patch = None
         if latest_sm and (
-            _clean_v(latest_sm) in (clean_inst_v, clean_decl_v)
-            or _clean_v(latest_sm) == _clean_v(latest_patch)
+            _clean_version_str(latest_sm) in (clean_inst_v, clean_decl_v)
+            or _clean_version_str(latest_sm) == _clean_version_str(latest_patch)
         ):
             latest_sm = None
-        if latest_abs and " or " not in str(latest_abs):
-            if (
-                _clean_v(latest_abs) in (clean_inst_v, clean_decl_v)
-                or _clean_v(latest_abs) == _clean_v(latest_sm)
-                or _clean_v(latest_abs) == _clean_v(latest_patch)
-            ):
-                latest_abs = None
+        if latest_abs and " or " not in str(latest_abs) and (
+            _clean_version_str(latest_abs) in (clean_inst_v, clean_decl_v)
+            or _clean_version_str(latest_abs) == _clean_version_str(latest_sm)
+            or _clean_version_str(latest_abs) == _clean_version_str(latest_patch)
+        ):
+            latest_abs = None
 
-        manifest_files = _get_manifest_files(
-            project_path, tech, r.get("is_engine", False)
-        )
-
+        manifest_files = _get_manifest_files(project_path, tech, r.get("is_engine", False))
         if not manifest_files:
             continue
 
@@ -9672,333 +10183,25 @@ def populate_remediation_recommendations(results, default_project_path):
         if not lines:
             continue
 
-        found_line_idx = _find_line_idx(
-            manifest_path, lines, name, tech, declared, r.get("is_engine", False)
-        )
-
-        parent_r = None
-        parent_line_idx = None
-        if r.get("required_by"):
-            for parent_name in r.get("required_by", []):
-                parent_candidate = next(
-                    (
-                        item
-                        for item in results
-                        if item.get("name") == parent_name
-                        and item.get("project_path") == r.get("project_path")
-                    ),
-                    None,
-                )
-                if parent_candidate:
-                    parent_line_idx = _find_line_idx(
-                        manifest_path,
-                        lines,
-                        parent_name,
-                        tech,
-                        parent_candidate.get("declared"),
-                        False,
-                    )
-                    if parent_line_idx is not None:
-                        parent_r = parent_candidate
-                        break
-
-        manifest_missing = False
-        if (
-            found_line_idx is None
-            and dep_type != "Transitive"
-            and not r.get("required_by")
-        ):
-            manifest_missing = True
+        found_line_idx = _find_line_idx(manifest_path, lines, name, tech, declared, r.get("is_engine", False))
+        manifest_missing = (found_line_idx is None and dep_type != "Transitive" and not r.get("required_by"))
 
         strategies = []
 
         if dep_type != "Transitive" or found_line_idx is not None:
-            # Direct/Dev dependency or explicit package in manifest
-            direct_options = []
-            target_string = (
-                latest_abs or (r.get("latest") if r.get("name") == name else "") or ""
-            )
-            if " or " in target_string:
-                parts = [p.strip() for p in target_string.split(" or ") if p.strip()]
-                if len(parts) >= 2:
-                    for p in parts:
-                        diff_p = (
-                            generate_remediation_diff(
-                                manifest_path, found_line_idx, declared, p, tech, name
-                            )
-                            if found_line_idx
-                            else generate_addition_remediation_diff(
-                                manifest_path, name, p, tech
-                            )
-                        )
-                        if diff_p:
-                            lbl = format_remediation_option_label(p)
-                            direct_options.append(
-                                {
-                                    "id": f"option_{p}",
-                                    "label": lbl,
-                                    "badge": "Option",
-                                    "badge_class": "v-chip-safe",
-                                    "diff": diff_p,
-                                }
-                            )
-                    diff_comb = (
-                        generate_remediation_diff(
-                            manifest_path,
-                            found_line_idx,
-                            declared,
-                            target_string,
-                            tech,
-                            name,
-                        )
-                        if found_line_idx
-                        else generate_addition_remediation_diff(
-                            manifest_path, name, target_string, tech
-                        )
-                    )
-                    if diff_comb:
-                        lbl_comb = format_remediation_option_label(target_string)
-                        direct_options.append(
-                            {
-                                "id": f"option_{target_string}",
-                                "label": lbl_comb,
-                                "badge": "Option",
-                                "badge_class": "v-chip-major",
-                                "diff": diff_comb,
-                            }
-                        )
+            strategies.extend(_populate_direct_strategies(
+                r, manifest_path, found_line_idx, name, declared, tech, latest_patch, latest_sm, latest_abs
+            ))
 
-            if latest_patch:
-                diff_patch = (
-                    generate_remediation_diff(
-                        manifest_path,
-                        found_line_idx,
-                        declared,
-                        latest_patch,
-                        tech,
-                        name,
-                    )
-                    if found_line_idx
-                    else generate_addition_remediation_diff(
-                        manifest_path, name, latest_patch, tech
-                    )
-                )
-                if diff_patch:
-                    direct_options.append(
-                        {
-                            "id": "patch",
-                            "label": f"Patch: v{_clean_v(latest_patch)}",
-                            "badge": "Patch / Bugfix",
-                            "badge_class": "v-chip-ok",
-                            "diff": diff_patch,
-                        }
-                    )
+        if dep_type == "Transitive" and found_line_idx is None:
+            strategies.extend(_populate_parent_strategies(r, results, manifest_path, lines, tech, name, _find_line_idx))
+            strategies.extend(_populate_override_strategies(
+                manifest_path, name, tech, latest_patch, latest_sm, latest_abs, clean_installed, bool(strategies)
+            ))
 
-            if latest_sm:
-                diff_sm = (
-                    generate_remediation_diff(
-                        manifest_path, found_line_idx, declared, latest_sm, tech, name
-                    )
-                    if found_line_idx
-                    else generate_addition_remediation_diff(
-                        manifest_path, name, latest_sm, tech
-                    )
-                )
-                if diff_sm:
-                    direct_options.append(
-                        {
-                            "id": "minor",
-                            "label": f"Minor: v{_clean_v(latest_sm)}",
-                            "badge": "Minor / Feature",
-                            "badge_class": "v-chip-safe",
-                            "diff": diff_sm,
-                        }
-                    )
-
-            if latest_abs and " or " not in str(latest_abs):
-                diff_abs = (
-                    generate_remediation_diff(
-                        manifest_path, found_line_idx, declared, latest_abs, tech, name
-                    )
-                    if found_line_idx
-                    else generate_addition_remediation_diff(
-                        manifest_path, name, latest_abs, tech
-                    )
-                )
-                if diff_abs:
-                    direct_options.append(
-                        {
-                            "id": "major",
-                            "label": f"Major: v{_clean_v(latest_abs)}",
-                            "badge": "Major / Breaking",
-                            "badge_class": "v-chip-major",
-                            "diff": diff_abs,
-                        }
-                    )
-
-            if direct_options:
-                strategies.append(
-                    {
-                        "id": "direct_upgrade",
-                        "title": f"Update Direct Dependency ({name})",
-                        "description": f"Updates '{name}' in manifest file.",
-                        "is_recommended": True,
-                        "options": direct_options,
-                    }
-                )
-
-        if dep_type == "Transitive":
-            # Strategy 1: Upgrade Parent Package
-            if parent_r and parent_line_idx is not None:
-                p_name = parent_r.get("name")
-                p_inst = parent_r.get("installed")
-                p_clean_inst = (
-                    p_inst[0] if (isinstance(p_inst, list) and p_inst) else p_inst
-                )
-                p_decl = parent_r.get("declared")
-                p_patch = parent_r.get("latest_patch")
-                p_sm = parent_r.get("latest_same_major")
-                p_abs = parent_r.get("latest_absolute") or parent_r.get("latest")
-
-                p_clean_inst_v = _clean_v(p_clean_inst)
-                p_clean_decl_v = _clean_v(p_decl)
-
-                if p_patch and _clean_v(p_patch) in (p_clean_inst_v, p_clean_decl_v):
-                    p_patch = None
-                if p_sm and (
-                    _clean_v(p_sm) in (p_clean_inst_v, p_clean_decl_v)
-                    or _clean_v(p_sm) == _clean_v(p_patch)
-                ):
-                    p_sm = None
-                if p_abs and (
-                    _clean_v(p_abs) in (p_clean_inst_v, p_clean_decl_v)
-                    or _clean_v(p_abs) == _clean_v(p_sm)
-                    or _clean_v(p_abs) == _clean_v(p_patch)
-                ):
-                    p_abs = None
-
-                parent_options = []
-                if p_patch:
-                    p_diff = generate_remediation_diff(
-                        manifest_path, parent_line_idx, p_decl, p_patch, tech, p_name
-                    )
-                    if p_diff:
-                        parent_options.append(
-                            {
-                                "id": "patch",
-                                "label": f"Patch {p_name}: v{_clean_v(p_patch)}",
-                                "badge": "Patch / Bugfix",
-                                "badge_class": "v-chip-ok",
-                                "diff": p_diff,
-                            }
-                        )
-                if p_sm:
-                    p_diff = generate_remediation_diff(
-                        manifest_path, parent_line_idx, p_decl, p_sm, tech, p_name
-                    )
-                    if p_diff:
-                        parent_options.append(
-                            {
-                                "id": "minor",
-                                "label": f"Minor {p_name}: v{_clean_v(p_sm)}",
-                                "badge": "Minor / Feature",
-                                "badge_class": "v-chip-safe",
-                                "diff": p_diff,
-                            }
-                        )
-                if p_abs:
-                    p_diff = generate_remediation_diff(
-                        manifest_path, parent_line_idx, p_decl, p_abs, tech, p_name
-                    )
-                    if p_diff:
-                        parent_options.append(
-                            {
-                                "id": "major",
-                                "label": f"Major {p_name}: v{_clean_v(p_abs)}",
-                                "badge": "Major / Breaking",
-                                "badge_class": "v-chip-major",
-                                "diff": p_diff,
-                            }
-                        )
-
-                if parent_options:
-                    strategies.append(
-                        {
-                            "id": "parent_upgrade",
-                            "title": f"Upgrade Parent Package ({p_name})",
-                            "description": f"Recommended. Upgrades parent package '{p_name}' which requires '{name}'.",
-                            "is_recommended": True,
-                            "options": parent_options,
-                        }
-                    )
-
-            # Strategy 2: Force Transitive Override / Resolution
-            target_ver_str = latest_patch or latest_sm or latest_abs or clean_installed
-            if target_ver_str:
-                ov_diff = generate_override_remediation_diff(
-                    manifest_path, name, target_ver_str, tech
-                )
-                if ov_diff:
-                    ov_badge = (
-                        "Patch"
-                        if target_ver_str == latest_patch
-                        else "Minor" if target_ver_str == latest_sm else "Major"
-                    )
-                    ov_badge_class = (
-                        "v-chip-ok"
-                        if ov_badge == "Patch"
-                        else "v-chip-safe" if ov_badge == "Minor" else "v-chip-major"
-                    )
-                    override_options = [
-                        {
-                            "id": "override",
-                            "label": f"Override {name}: v{_clean_v(target_ver_str)}",
-                            "badge": ov_badge,
-                            "badge_class": ov_badge_class,
-                            "diff": ov_diff,
-                        }
-                    ]
-                    strategies.append(
-                        {
-                            "id": "override",
-                            "title": f"Force Transitive Override ({name})",
-                            "description": f"Adds explicit override / resolution for '{name}' in manifest.",
-                            "is_recommended": len(strategies) == 0,
-                            "options": override_options,
-                        }
-                    )
-
-        all_flat_options = []
-        for st in strategies:
-            all_flat_options.extend(st.get("options", []))
-
-        remediation_safe = next(
-            (
-                opt["diff"]
-                for opt in all_flat_options
-                if opt["id"] in {"patch", "minor"}
-            ),
-            None,
-        )
-        remediation_major = next(
-            (opt["diff"] for opt in all_flat_options if opt["id"] == "major"), None
-        )
-        remediation_options = (
-            [{"label": opt["label"], "diff": opt["diff"]} for opt in all_flat_options]
-            if all_flat_options
-            else None
-        )
-
-        if strategies:
-            first_diff = all_flat_options[0]["diff"] if all_flat_options else None
-            last_diff = all_flat_options[-1]["diff"] if all_flat_options else None
-            r["remediation"] = {
-                "safe": remediation_safe or first_diff,
-                "major": remediation_major or last_diff,
-                "options": remediation_options,
-                "manifest_missing": manifest_missing,
-                "strategies": strategies,
-            }
+        remed_dict = _build_final_remediation(strategies, manifest_missing)
+        if remed_dict:
+            r["remediation"] = remed_dict
             if manifest_missing:
                 r["manifest_missing"] = True
 
@@ -10009,2760 +10212,307 @@ def populate_remediation_recommendations(results, default_project_path):
         sys.stdout.flush()
 
 
+# Compressed embedded HTML Report Template (gzip + base64)
+# To edit the template with full IDE support, modify 'assets/report_template.html'
+# and run 'python scripts/pack_template.py' to update this string.
+_HTML_TEMPLATE_GZIP_B64 = (
+    "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"
+    "AA=="
+)
+
+
 class HTMLReportTemplateProvider:
-    @staticmethod
-    def get_template():
-        return """<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dependency Status & Security Report</title>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700;800&display=swap" rel="stylesheet">
-    <style>
-        :root {
-            --bg-color: #0b0f19;
-            --card-bg: #111827;
-            --card-hover: #1f2937;
-            --text-main: #f9fafb;
-            --text-muted: #9ca3af;
-            --border-color: #374151;
-            --primary: #38bdf8;
-            --success: #10b981;
-            --warning: #f59e0b;
-            --error: #ef4444;
-            --info: #0ea5e9;
-            --depr: #a855f7;
-            --muted: #4b5563;
-        }
-        
-        body {
-            background-color: var(--bg-color);
-            color: var(--text-main);
-            font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            margin: 0;
-            padding: 40px 20px;
-            display: flex;
-            justify-content: center;
-        }
-        
-        .container {
-            max-width: 1000px;
-            width: 100%;
-        }
-        
-        header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 30px;
-            border-bottom: 1px solid var(--border-color);
-            padding-bottom: 20px;
-        }
-        
-        h1 {
-            margin: 0;
-            font-size: 28px;
-            font-weight: 800;
-            background: linear-gradient(135deg, #38bdf8 0%, #3b82f6 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-        }
-        
-        .meta-info {
-            font-size: 13px;
-            color: var(--text-muted);
-            text-align: right;
-        }
-        
-        /* Grid Dashboard */
-        .dashboard-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 20px;
-            margin-bottom: 30px;
-        }
-        
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 15px;
-        }
-        
-        @media (max-width: 768px) {
-            .dashboard-grid {
-                grid-template-columns: 1fr;
-            }
-            .stats-grid {
-                grid-template-columns: repeat(2, 1fr);
-            }
-        }
-        
-        .stat-card {
-            background-color: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 12px;
-            padding: 15px;
-            text-align: center;
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-        }
-        
-        .stat-card.primary-large {
-            grid-column: span 2;
-        }
-        
-        .stat-val {
-            font-size: 24px;
-            font-weight: 700;
-            margin-bottom: 5px;
-        }
-        
-        .stat-lbl {
-            font-size: 11px;
-            color: var(--text-muted);
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-        
-        .stat-card.primary .stat-val, .stat-card.primary-large .stat-val { color: var(--primary); }
-        .stat-card.warning .stat-val { color: var(--warning); }
-        .stat-card.error .stat-val { color: var(--error); }
-        .stat-card.success .stat-val { color: var(--success); }
-        .stat-card.muted .stat-val { color: var(--text-muted); }
-        .stat-card.depr .stat-val { color: var(--depr); }
-        .stat-card.malicious { background-color: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); }
-        .stat-card.malicious .stat-val { color: #fca5a5; }
-        
-        /* Controls Panel Card & Layout */
-        .controls-placeholder {
-            display: block;
-            margin-bottom: 24px;
-            position: relative;
-        }
+    """Provides the HTML/CSS/JS template for interactive dependency reports."""
 
-        .controls-toolbar {
-            background: rgba(17, 24, 39, 0.75);
-            backdrop-filter: blur(16px);
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            border-radius: 12px;
-            padding: 14px 18px;
-            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-            box-sizing: border-box;
-            transition: background 0.25s ease, border-color 0.25s ease;
-        }
-        
-        /* Floating controls-toolbar styles on scroll */
-        @media (min-width: 768px) {
-            .controls-toolbar.floating {
-                position: fixed;
-                top: 0;
-                left: 50%;
-                transform: translate(-50%, 0);
-                width: calc(100% - 40px);
-                max-width: 1000px;
-                border-radius: 0 0 12px 12px;
-                border-left: 1px solid rgba(255, 255, 255, 0.12);
-                border-right: 1px solid rgba(255, 255, 255, 0.12);
-                border-top: none;
-                border-bottom: 1px solid rgba(255, 255, 255, 0.12);
-                background-color: rgba(17, 24, 39, 0.95);
-                backdrop-filter: blur(16px);
-                z-index: 1000;
-                box-shadow: 0 12px 36px rgba(0, 0, 0, 0.6);
-                padding: 10px 16px;
-                box-sizing: border-box;
-                animation: desktopStickyIn 0.2s ease;
-            }
-        }
-        
-        /* Mobile Sticky fallback */
-        @media (max-width: 767px) {
-            .controls-toolbar.floating {
-                position: fixed;
-                top: 0;
-                left: 0;
-                width: 100%;
-                border-radius: 0;
-                border-left: 0;
-                border-right: 0;
-                border-top: 0;
-                border-bottom: 1px solid rgba(255, 255, 255, 0.12);
-                background-color: rgba(17, 24, 39, 0.95);
-                backdrop-filter: blur(16px);
-                z-index: 1000;
-                box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
-                padding: 10px 14px;
-                margin-bottom: 0;
-                box-sizing: border-box;
-                animation: mobileStickyIn 0.2s ease;
-            }
-        }
-        
-        @keyframes desktopStickyIn {
-            from {
-                transform: translate(-50%, -100%);
-            }
-            to {
-                transform: translate(-50%, 0);
-            }
-        }
-        
-        @keyframes mobileStickyIn {
-            from {
-                transform: translateY(-100%);
-            }
-            to {
-                transform: translateY(0);
-            }
-        }
-        
-        .controls-row {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 16px;
-            width: 100%;
-        }
-        
-        .primary-row {
-            flex-wrap: wrap;
-        }
-        
-        .secondary-row {
-            flex-wrap: wrap;
-            padding-top: 10px;
-            border-top: 1px solid rgba(255, 255, 255, 0.06);
-            font-size: 13px;
-        }
+    _cached_template = None
 
-        .search-box {
-            position: relative;
-            display: inline-flex;
-            align-items: center;
-            flex: 1 1 320px;
-            min-width: 240px;
-            height: 38px;
-        }
-        
-        .search-box input {
-            width: 100%;
-            height: 100%;
-            background-color: rgba(15, 23, 42, 0.6);
-            border: 1px solid rgba(255, 255, 255, 0.12);
-            border-radius: 8px;
-            color: var(--text-main);
-            padding: 0 38px 0 36px;
-            font-size: 13.5px;
-            box-sizing: border-box;
-            font-family: inherit;
-            transition: all 0.2s ease;
-        }
-        
-        .search-box input:focus {
-            outline: none;
-            background-color: rgba(15, 23, 42, 0.95);
-            border-color: var(--primary);
-            box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.2);
-        }
-        
-        .search-icon {
-            position: absolute;
-            left: 12px;
-            top: 50%;
-            transform: translateY(-50%);
-            color: var(--text-muted);
-            pointer-events: none;
-            z-index: 2;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-        
-        .search-kbd {
-            position: absolute;
-            right: 12px;
-            top: 50%;
-            transform: translateY(-50%);
-            background: rgba(255, 255, 255, 0.08);
-            border: 1px solid rgba(255, 255, 255, 0.15);
-            border-radius: 4px;
-            padding: 1px 6px;
-            font-size: 11px;
-            color: var(--text-muted);
-            font-family: monospace;
-            pointer-events: none;
-            z-index: 2;
-            line-height: 1.2;
-        }
+    @classmethod
+    def get_template(cls):
+        if cls._cached_template is not None:
+            return cls._cached_template
 
-        #clearSearch {
-            position: absolute;
-            right: 10px;
-            top: 50%;
-            transform: translateY(-50%);
-            background: none;
-            border: none;
-            color: var(--text-muted);
-            font-size: 18px;
-            cursor: pointer;
-            padding: 0;
-            line-height: 1;
-            display: none;
-            z-index: 3;
-        }
+        # 1. In local development mode, read from assets/report_template.html if present
+        dev_template_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "assets",
+            "report_template.html",
+        )
+        if os.path.exists(dev_template_path):
+            try:
+                with open(dev_template_path, "r", encoding="utf-8") as f:
+                    cls._cached_template = f.read()
+                    return cls._cached_template
+            except OSError:
+                pass
 
-        .segmented-control {
-            display: inline-flex;
-            align-items: center;
-            background: rgba(15, 23, 42, 0.6);
-            padding: 3px;
-            border-radius: 9px;
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            gap: 3px;
-            flex-wrap: wrap;
-        }
-
-        .secondary-filters-group {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            flex-wrap: wrap;
-        }
-
-        .facet-label {
-            font-size: 11.5px;
-            font-weight: 600;
-            color: var(--text-muted);
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            margin-right: 4px;
-        }
-
-        .filter-divider {
-            width: 1px;
-            height: 18px;
-            background: rgba(255, 255, 255, 0.1);
-            margin: 0 4px;
-        }
-
-        .btn-facet {
-            background: rgba(30, 41, 59, 0.4);
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            font-size: 12.5px;
-            padding: 5px 12px;
-        }
-
-        .btn-facet:hover {
-            background: rgba(51, 65, 85, 0.6);
-            border-color: rgba(255, 255, 255, 0.18);
-            transform: translateY(-1px);
-        }
-
-        .btn-reset-filters {
-            background: transparent;
-            border: 1px solid rgba(255, 255, 255, 0.12);
-            color: var(--text-muted);
-            font-size: 12px;
-            padding: 5px 12px;
-            border-radius: 6px;
-            cursor: pointer;
-            transition: all 0.2s ease;
-            display: inline-flex;
-            align-items: center;
-        }
-
-        .btn-reset-filters:hover {
-            color: var(--text-main);
-            background: rgba(239, 68, 68, 0.15);
-            border-color: rgba(239, 68, 68, 0.4);
-        }
-        
-        .filter-group {
-            position: relative;
-            display: inline-block;
-        }
-        
-        .chevron-inline {
-            display: inline-block;
-            font-size: 8px;
-            margin-left: 6px;
-            opacity: 0.7;
-            transition: transform 0.2s ease;
-        }
-        
-        .filter-btn.dropdown-open .chevron-inline {
-            transform: rotate(180deg);
-        }
-        
-        .filter-dropdown {
-            position: absolute;
-            top: calc(100% + 6px);
-            left: 0;
-            z-index: 100;
-            background: rgba(17, 24, 39, 0.95);
-            backdrop-filter: blur(10px);
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            padding: 12px;
-            min-width: 200px;
-            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5), 0 4px 6px -2px rgba(0, 0, 0, 0.5);
-            display: none;
-        }
-        
-        .dropdown-row {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 12px;
-            width: 100%;
-        }
-        
-        .row-actions {
-            display: inline-flex;
-            align-items: center;
-            opacity: 0;
-            pointer-events: none;
-            transition: opacity 0.15s ease;
-            user-select: none;
-        }
-        
-        .dropdown-row:hover .row-actions {
-            opacity: 1;
-            pointer-events: auto;
-        }
-        
-        .action-btn {
-            font-size: 10px;
-            color: var(--primary);
-            cursor: pointer;
-            text-decoration: underline;
-            font-weight: 500;
-        }
-        
-        .action-btn:hover {
-            color: var(--text-main);
-        }
-        
-        .action-separator {
-            font-size: 10px;
-            color: var(--text-muted);
-            margin: 0 3px;
-        }
-        
-        @keyframes fadeInSlide {
-            from {
-                opacity: 0;
-                transform: translateY(-8px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
-        
-        .filter-dropdown.show {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-            animation: fadeInSlide 0.15s ease-out forwards;
-        }
-        
-        .filter-dropdown label {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            font-size: 13px;
-            color: var(--text-main);
-            cursor: pointer;
-            user-select: none;
-            transition: opacity 0.15s;
-        }
-        
-        .filter-dropdown label:hover {
-            opacity: 0.85;
-        }
-        
-        .filter-dropdown input[type="checkbox"] {
-            accent-color: var(--primary);
-            cursor: pointer;
-            width: 14px;
-            height: 14px;
-        }
-        
-        .dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            display: inline-block;
-        }
-        .mal-dot { background-color: #b91c1c; border: 1px solid #f87171; box-shadow: 0 0 6px #ef4444; }
-        .crit-dot { background-color: var(--error); }
-        .high-dot { background-color: #f97316; }
-        .med-dot { background-color: var(--warning); }
-        .low-dot { background-color: var(--info); }
-        .unkn-dot { background-color: var(--text-muted); }
-        
-        .filter-btn {
-            background-color: var(--bg-color);
-            border: 1px solid var(--border-color);
-            color: var(--text-muted);
-            border-radius: 8px;
-            padding: 8px 14px;
-            font-size: 13px;
-            cursor: pointer;
-            font-family: inherit;
-            transition: all 0.2s ease;
-            display: inline-flex;
-            align-items: center;
-        }
-        
-        .filter-btn:hover {
-            background-color: var(--card-hover);
-            color: var(--text-main);
-        }
-        
-        .filter-btn.active {
-            background: linear-gradient(135deg, #38bdf8 0%, #3b82f6 100%);
-            border-color: var(--primary);
-            color: white;
-            font-weight: 600;
-        }
-        
-        .filter-btn:disabled {
-            opacity: 0.3;
-            cursor: not-allowed;
-            pointer-events: none;
-        }
-        
-        /* Packages list */
-        .packages-list {
-            display: flex;
-            flex-direction: column;
-            gap: 15px;
-        }
-        
-        .package-card {
-            background-color: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 12px;
-            overflow: hidden;
-            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-        }
-        
-        .package-card:hover {
-            border-color: rgba(59, 130, 246, 0.5);
-            background-color: var(--card-hover);
-            transform: translateY(-1px);
-            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
-        }
-        
-        .card-header {
-            padding: 18px 20px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            cursor: pointer;
-            user-select: none;
-            gap: 20px;
-        }
-        
-        .card-header:hover {
-            background-color: #161e2e;
-        }
-        
-        .header-left {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
-        
-        .pkg-title {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-        
-        .pkg-name {
-            font-weight: 700;
-            font-size: 16px;
-        }
-        
-        .pkg-type-badge {
-            font-size: 10px;
-            background-color: #1e293b;
-            color: var(--text-muted);
-            padding: 0 6px;
-            height: 20px;
-            box-sizing: border-box;
-            border-radius: 5px;
-            text-transform: uppercase;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            line-height: 1;
-        }
-        
-        .pkg-badges {
-            display: flex;
-            gap: 6px;
-            flex-wrap: wrap;
-            align-items: center;
-        }
-        
-        .badge {
-            font-size: 11px;
-            padding: 0 7px;
-            height: 20px;
-            box-sizing: border-box;
-            border-radius: 5px;
-            font-weight: 600;
-            line-height: 1;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-        }
-        
-        .badge-success { background-color: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
-        .badge-warning { background-color: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
-        .badge-error { background-color: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
-        .badge-info { background-color: rgba(14, 165, 233, 0.15); color: #38bdf8; border: 1px solid rgba(14, 165, 233, 0.3); }
-        .badge-depr { background-color: rgba(168, 85, 247, 0.15); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.3); }
-        .badge-danger { background-color: rgba(220, 38, 38, 0.25); color: #fca5a5; border: 1px solid rgba(220, 38, 38, 0.4); }
-        .badge-muted { background-color: rgba(100, 116, 139, 0.15); color: #94a3b8; border: 1px solid rgba(100, 116, 139, 0.3); }
-        .badge-project { background-color: rgba(55, 65, 81, 0.4); color: #9ca3af; border: 1px solid rgba(75, 85, 99, 0.4); }
-        .badge-tech { font-family: var(--font-sans); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; padding: 0 6px; height: 18px; line-height: 18px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; margin-left: 6px; }
-        .badge-tech-npm { background-color: rgba(203, 56, 55, 0.18); color: #f87171; border: 1px solid rgba(203, 56, 55, 0.4); }
-        .badge-tech-ruby { background-color: rgba(204, 52, 45, 0.18); color: #fb7185; border: 1px solid rgba(204, 52, 45, 0.4); }
-        .badge-tech-pip, .badge-tech-python { background-color: rgba(55, 118, 171, 0.18); color: #60a5fa; border: 1px solid rgba(55, 118, 171, 0.4); }
-        .badge-tech-nuget, .badge-tech-csharp { background-color: rgba(0, 72, 128, 0.18); color: #38bdf8; border: 1px solid rgba(0, 72, 128, 0.4); }
-        .badge-tech-go { background-color: rgba(0, 173, 216, 0.18); color: #22d3ee; border: 1px solid rgba(0, 173, 216, 0.4); }
-        .badge-tech-cargo, .badge-tech-rust { background-color: rgba(222, 165, 132, 0.18); color: #fb923c; border: 1px solid rgba(222, 165, 132, 0.4); }
-        .badge-tech-composer, .badge-tech-php { background-color: rgba(136, 146, 191, 0.18); color: #a78bfa; border: 1px solid rgba(136, 146, 191, 0.4); }
-        .badge-tech-maven, .badge-tech-gradle, .badge-tech-java { background-color: rgba(237, 139, 0, 0.18); color: #facc15; border: 1px solid rgba(237, 139, 0, 0.4); }
-        
-        .badge-vuln-stats {
-            background-color: rgba(239, 68, 68, 0.12);
-            border: 1px solid rgba(239, 68, 68, 0.25);
-            color: #ef4444;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 5px;
-            padding: 0 7px;
-            height: 20px;
-            box-sizing: border-box;
-            font-weight: 700;
-            line-height: 1;
-        }
-        .badge-vuln-stats .vuln-severity-pills-inner {
-            display: inline-flex;
-            gap: 3px;
-            align-items: center;
-            justify-content: center;
-            margin-left: 2px;
-        }
-        .vuln-severity-pills {
-            display: inline-flex;
-            gap: 3px;
-            align-items: center;
-            justify-content: center;
-        }
-        .sev-pill {
-            font-size: 9px;
-            padding: 0 4px;
-            height: 14px;
-            line-height: 14px;
-            box-sizing: border-box;
-            border-radius: 3px;
-            font-weight: 700;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-        }
-        .sev-pill.sev-mal { background-color: rgba(127, 29, 29, 0.4); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.5); }
-        .sev-pill.sev-c { background-color: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
-        .sev-pill.sev-h { background-color: rgba(245, 158, 11, 0.2); color: #fb923c; border: 1px solid rgba(245, 158, 11, 0.3); }
-        .sev-pill.sev-m { background-color: rgba(234, 179, 8, 0.2); color: #facc15; border: 1px solid rgba(234, 179, 8, 0.3); }
-        .sev-pill.sev-l { background-color: rgba(156, 163, 175, 0.2); color: #d1d5db; border: 1px solid rgba(156, 163, 175, 0.3); }
-        .sev-pill.sev-u { background-color: rgba(156, 163, 175, 0.15); color: #9ca3af; border: 1px solid rgba(156, 163, 175, 0.25); }
-        
-        .header-right {
-            display: flex;
-            align-items: center;
-            gap: 20px;
-        }
-        
-        .pkg-versions {
-            display: flex;
-            flex-direction: column;
-            align-items: flex-end;
-            gap: 6px;
-            font-family: 'Outfit', sans-serif;
-        }
-        
-        .version-installed {
-            font-size: 13px;
-            color: var(--text-main);
-            font-weight: 600;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-        
-        .version-installed .label {
-            font-size: 11px;
-            color: var(--text-muted);
-            font-weight: 400;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-        
-        .version-chips {
-            display: flex;
-            flex-direction: column;
-            align-items: flex-end;
-            gap: 4px;
-        }
-        
-        .v-chip {
-            font-size: 11px;
-            padding: 3px 8px;
-            border-radius: 6px;
-            font-weight: 600;
-            display: inline-flex;
-            align-items: center;
-            gap: 4px;
-            transition: all 0.2s ease;
-        }
-        
-        .v-chip-ok {
-            background-color: rgba(16, 185, 129, 0.1);
-            border: 1px solid rgba(16, 185, 129, 0.2);
-            color: #34d399;
-        }
-        
-        .v-chip-safe {
-            background-color: rgba(14, 165, 233, 0.1);
-            border: 1px solid rgba(14, 165, 233, 0.2);
-            color: #38bdf8;
-        }
-        
-        .v-chip-major {
-            background-color: rgba(245, 158, 11, 0.1);
-            border: 1px solid rgba(245, 158, 11, 0.2);
-            color: #fbbf24;
-        }
-        
-        .chevron {
-            color: var(--text-muted);
-            transition: transform 0.2s ease;
-        }
-        
-        /* Details Expanded */
-        .card-details {
-            display: none;
-            padding: 20px;
-            background-color: #0d131f;
-            border-top: 1px solid var(--border-color);
-        }
-        
-        .required-by-section {
-            font-size: 12px;
-            color: var(--text-muted);
-            background-color: var(--card-bg);
-            border: 1px solid var(--border-color);
-            padding: 8px 12px;
-            border-radius: 6px;
-            margin-bottom: 15px;
-            display: inline-block;
-        }
-        
-        .error-section {
-            color: #f87171;
-            font-size: 13px;
-            background-color: rgba(220, 38, 38, 0.1);
-            border: 1px solid rgba(220, 38, 38, 0.3);
-            padding: 10px 14px;
-            border-radius: 6px;
-            margin-bottom: 15px;
-        }
-        
-        .section-title {
-            font-size: 12px;
-            font-weight: 700;
-            color: var(--text-muted);
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            margin: 15px 0 10px 0;
-        }
-        
-        /* Vulnerability item */
-        .vuln-item {
-            background-color: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-left: 3px solid var(--error);
-            border-radius: 8px;
-            padding: 12px 15px;
-            margin-bottom: 12px;
-        }
-        
-        .vuln-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 6px;
-        }
-        
-        .vuln-id {
-            font-weight: 700;
-            font-size: 14px;
-            color: #fca5a5;
-        }
-        
-        .sev-badge {
-            font-size: 10px;
-            font-weight: 700;
-            padding: 2px 6px;
-            border-radius: 4px;
-            text-transform: uppercase;
-            display: inline-block;
-        }
-        
-        .sev-malicious { background-color: #7f1d1d; color: #fee2e2; border: 1px solid #ef4444; font-weight: 800; }
-        .sev-critical { background-color: #ef4444; color: white; }
-        .sev-high { background-color: #f97316; color: white; }
-        .sev-medium { background-color: #eab308; color: black; }
-        .sev-low { background-color: #0ea5e9; color: white; }
-        .sev-unknown { background-color: #374151; color: white; }
-        
-        .vuln-summary {
-            font-size: 13.5px;
-            color: var(--text-main);
-            margin-bottom: 8px;
-            line-height: 1.4;
-        }
-        
-        .vuln-details {
-            font-family: monospace;
-            font-size: 11px;
-            background-color: var(--bg-color);
-            padding: 10px;
-            border-radius: 6px;
-            border: 1px solid var(--border-color);
-            overflow-x: auto;
-            color: var(--text-muted);
-            margin: 0;
-            white-space: pre-wrap;
-        }
-        
-        /* Suppressed item */
-        .suppressed-item {
-            background-color: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-left: 3px solid var(--muted);
-            border-radius: 8px;
-            padding: 12px 15px;
-            margin-bottom: 12px;
-        }
-        
-        .suppressed-item .vuln-id {
-            color: var(--text-muted);
-        }
-        
-        .suppressed-label {
-            font-size: 10px;
-            font-weight: 700;
-            background-color: var(--muted);
-            color: var(--text-main);
-            padding: 2px 6px;
-            border-radius: 4px;
-            text-transform: uppercase;
-        }
-        
-        .suppressed-reason {
-            font-size: 12.5px;
-            background-color: var(--bg-color);
-            border: 1px solid var(--border-color);
-            padding: 8px 12px;
-            border-radius: 6px;
-            margin-top: 8px;
-            color: #94a3b8;
-        }
-        
-        /* Notes & Warnings inline section */
-        .notes-warnings-section {
-            background-color: rgba(245, 158, 11, 0.05);
-            border: 1px solid rgba(245, 158, 11, 0.25);
-            border-left: 4px solid var(--warning);
-            border-radius: 8px;
-            padding: 12px 15px;
-            margin-bottom: 15px;
-        }
-        
-        .section-title-inline {
-            font-size: 11px;
-            font-weight: 700;
-            color: var(--warning);
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            margin-bottom: 8px;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-        
-        .section-title-inline svg {
-            stroke: var(--warning);
-            fill: none;
-        }
-        
-        .notes-warnings-body {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
-        
-        .note-warning-item {
-            display: flex;
-            align-items: flex-start;
-            gap: 8px;
-            font-size: 13px;
-            line-height: 1.45;
-            color: var(--text-main);
-        }
-        
-        .note-warning-icon {
-            flex-shrink: 0;
-            font-size: 14px;
-        }
-        
-        /* Changelog & Migration buttons */
-        .changelog-btn {
-            display: inline-flex;
-            align-items: center;
-            background-color: var(--border-color);
-            color: var(--text-main);
-            border: 1px solid var(--border-color);
-            padding: 5px 12px;
-            border-radius: 6px;
-            font-size: 11px;
-            font-weight: 600;
-            text-decoration: none;
-            margin-right: 8px;
-            transition: all 0.2s ease;
-        }
-        .changelog-btn:hover {
-            background-color: var(--primary);
-            color: #0b0f19;
-            border-color: var(--primary);
-        }
-
-        /* Modal backdrop */
-        .modal-backdrop {
-            display: none;
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background-color: rgba(0, 0, 0, 0.7);
-            z-index: 1000;
-            backdrop-filter: blur(4px);
-            transition: opacity 0.3s ease;
-        }
-        
-        /* Modal box */
-        .remediation-modal {
-            display: none;
-            position: fixed;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%) scale(0.9);
-            width: 90%;
-            max-width: 950px;
-            max-height: 85vh;
-            background-color: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 16px;
-            z-index: 1001;
-            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
-            overflow: hidden;
-            transition: transform 0.3s ease, opacity 0.3s ease;
-            opacity: 0;
-        }
-        
-        .remediation-modal.active, .modal-backdrop.active {
-            display: block;
-            opacity: 1;
-        }
-        
-        .remediation-modal.active {
-            transform: translate(-50%, -50%) scale(1);
-            display: flex;
-            flex-direction: column;
-        }
-        
-        .modal-header {
-            padding: 20px 24px;
-            border-bottom: 1px solid var(--border-color);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            background-color: #161e2e;
-        }
-        
-        .modal-header h3 {
-            margin: 0;
-            font-size: 18px;
-            font-weight: 700;
-            color: var(--primary);
-        }
-        
-        .modal-close {
-            background: none;
-            border: none;
-            color: var(--text-muted);
-            font-size: 24px;
-            cursor: pointer;
-            line-height: 1;
-            padding: 0;
-        }
-        
-        .modal-close:hover {
-            color: var(--text-main);
-        }
-        
-        .modal-body {
-            padding: 24px;
-            overflow-y: auto;
-            flex-grow: 1;
-        }
-        
-        .modal-tabs {
-            display: none;
-            gap: 8px;
-            margin-bottom: 20px;
-            border-bottom: 1px solid var(--border-color);
-            padding-bottom: 1px;
-        }
-        
-        .modal-tab {
-            background: none;
-            border: none;
-            color: var(--text-muted);
-            padding: 8px 16px;
-            cursor: pointer;
-            font-size: 13px;
-            font-weight: 600;
-            border-radius: 6px 6px 0 0;
-            border-bottom: 2px solid transparent;
-            transition: all 0.2s ease;
-        }
-        
-        .modal-tab:hover {
-            color: var(--text-main);
-            background-color: var(--card-hover);
-        }
-        
-        .modal-tab.active {
-            color: var(--primary);
-            border-bottom-color: var(--primary);
-        }
-
-        .modal-strategy-tab {
-            background-color: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            padding: 8px 14px;
-            font-size: 13px;
-            font-weight: 600;
-            color: var(--text-muted);
-            cursor: pointer;
-            transition: all 0.2s ease;
-        }
-        .modal-strategy-tab:hover {
-            color: var(--text-main);
-            border-color: var(--primary);
-        }
-        .modal-strategy-tab.active {
-            background-color: rgba(56, 189, 248, 0.15);
-            color: var(--primary);
-            border-color: var(--primary);
-        }
-
-        .modal-level-tab {
-            background-color: #1e293b;
-            border: 1px solid var(--border-color);
-            border-radius: 6px;
-            padding: 6px 12px;
-            font-size: 12px;
-            font-weight: 600;
-            color: var(--text-muted);
-            cursor: pointer;
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            transition: all 0.2s ease;
-        }
-        .modal-level-tab:hover {
-            color: var(--text-main);
-            border-color: var(--primary);
-        }
-        .modal-level-tab.active {
-            background-color: var(--card-bg);
-            color: #ffffff;
-            border-color: var(--primary);
-            box-shadow: 0 0 0 1px var(--primary);
-        }
-        
-        .modal-info-bar {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            background-color: #1e293b;
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            padding: 10px 16px;
-            font-family: monospace;
-            font-size: 14px;
-            margin-bottom: 20px;
-            color: #e2e8f0;
-        }
-        
-        .modal-diff-container {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 20px;
-        }
-        
-        @media (max-width: 768px) {
-            .modal-diff-container {
-                grid-template-columns: 1fr;
-            }
-        }
-        
-        .diff-box {
-            background-color: #0b0f19;
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            overflow: hidden;
-        }
-        
-        .diff-box-title {
-            padding: 10px 16px;
-            border-bottom: 1px solid var(--border-color);
-            font-size: 12px;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            background-color: #111827;
-        }
-        
-        .diff-box-title.current {
-            color: var(--error);
-            border-left: 3px solid var(--error);
-        }
-        
-        .diff-box-title.suggested {
-            color: var(--success);
-            border-left: 3px solid var(--success);
-        }
-        
-        .diff-code {
-            padding: 16px 0;
-            margin: 0;
-            font-family: 'Consolas', 'Courier New', Courier, monospace;
-            font-size: 13px;
-            line-height: 1.5;
-            overflow-x: auto;
-            white-space: pre;
-        }
-        
-        .diff-line {
-            display: flex;
-            width: 100%;
-            min-width: max-content;
-            box-sizing: border-box;
-            padding: 0 16px;
-        }
-        
-        .diff-line-num {
-            flex-shrink: 0;
-            width: 58px;
-            text-align: right;
-            padding-right: 12px;
-            color: var(--text-muted);
-            user-select: none;
-            border-right: 1px solid var(--border-color);
-            margin-right: 12px;
-            font-size: 11px;
-            box-sizing: border-box;
-        }
-        
-        .diff-line-content {
-            flex-grow: 1;
-        }
-        
-        .diff-line.removed {
-            background-color: rgba(239, 68, 68, 0.15);
-        }
-        
-        .diff-line.added {
-            background-color: rgba(16, 185, 129, 0.15);
-        }
-        
-        .diff-remove-chunk {
-            background-color: rgba(239, 68, 68, 0.4);
-            text-decoration: line-through;
-            padding: 1px 3px;
-            border-radius: 3px;
-        }
-        
-        .diff-add-chunk {
-            background-color: rgba(16, 185, 129, 0.4);
-            padding: 1px 3px;
-            border-radius: 3px;
-        }
-        
-        .btn-remediation {
-            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
-            border: none;
-            color: white;
-            font-weight: 600;
-            padding: 8px 16px;
-            font-size: 12px;
-            border-radius: 6px;
-            cursor: pointer;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 6px;
-            line-height: 1;
-            transition: filter 0.2s ease;
-        }
-        
-        .btn-remediation:hover {
-            filter: brightness(1.1);
-        }
-        
-        .btn-ai-prompt {
-            background: linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%);
-            border: none;
-            color: white;
-            font-weight: 600;
-            padding: 8px 16px;
-            font-size: 12px;
-            border-radius: 6px;
-            cursor: pointer;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 6px;
-            line-height: 1;
-            transition: filter 0.2s ease;
-            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
-        }
-        
-        .btn-ai-prompt:hover {
-            filter: brightness(1.15);
-        }
-        
-        .changelog-section, .remediation-section {
-            margin-top: 12px;
-            border-top: 1px solid var(--border-color);
-            padding-top: 10px;
-            margin-bottom: 12px;
-        }
-        
-        .card-details > .changelog-section:first-child,
-        .card-details > .remediation-section:first-child {
-            border-top: none;
-            padding-top: 0;
-            margin-top: 0;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <header>
-            <div>
-                <h1 style="display: flex; align-items: center; gap: 10px;">
-                    <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="var(--primary)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0; filter: drop-shadow(0 2px 8px rgba(56, 189, 248, 0.3));">
-                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
-                    </svg>
-                    <span>Kevlar CheckDeps <span style="font-size: 13px; font-weight: normal; color: var(--text-muted); margin-left: 6px;">v${VERSION}</span></span>
-                </h1>
-                <div style="font-size: 14px; color: var(--text-muted); margin-top: 4px;">Dependency Status & Security Audit</div>
-                <div style="font-size: 12px; margin-top: 6px;"><a href="https://github.com/brunoevn/kevlar-checkdeps" target="_blank" style="color: var(--primary); text-decoration: none;">https://github.com/brunoevn/kevlar-checkdeps</a></div>
-            </div>
-            <div class="meta-info">
-                <div>Report Generated: <strong>${scan_date}</strong></div>
-                <div>Ecosystem: <strong>${project_title}</strong></div>
-                ${project_path_header_html}
-            </div>
-        </header>
-        
-        <div class="dashboard-grid">
-            <!-- Stats -->
-            <div class="stats-grid">
-                <div class="stat-card primary">
-                    <div class="stat-val">${total}</div>
-                    <div class="stat-lbl">Checked</div>
-                </div>
-                <div class="stat-card malicious">
-                    <div class="stat-val">☠️ ${malicious}</div>
-                    <div class="stat-lbl">Malicious</div>
-                </div>
-                <div class="stat-card error">
-                    <div class="stat-val">${total_vulns}</div>
-                    <div class="stat-lbl">Vulnerable</div>
-                </div>
-                <div class="stat-card error" style="background-color: rgba(239, 68, 68, 0.05);">
-                    <div class="stat-val">${errors}</div>
-                    <div class="stat-lbl">Errors</div>
-                </div>
-                <div class="stat-card success">
-                    <div class="stat-val">${up_to_date}</div>
-                    <div class="stat-lbl">Up-to-date</div>
-                </div>
-                <div class="stat-card warning">
-                    <div class="stat-val">${outdated}</div>
-                    <div class="stat-lbl">Outdated</div>
-                </div>
-                <div class="stat-card depr">
-                    <div class="stat-val">${deprecated}</div>
-                    <div class="stat-lbl">Deprecated</div>
-                </div>
-                <div class="stat-card muted">
-                    <div class="stat-val">${suppressed_vulns}</div>
-                    <div class="stat-lbl">Suppressed</div>
-                </div>
-            </div>
-            
-            <!-- SVG Bar Chart -->
-            <div>
-                ${svg_chart}
-            </div>
-        </div>
-        
-        <!-- Controls -->
-        <div class="controls-placeholder">
-            <div class="controls-toolbar">
-                <!-- Top Row: Search + Main Views Segmented Control -->
-                <div class="controls-row primary-row">
-                    <div class="search-box">
-                        <svg class="search-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-                        <input type="text" id="searchInput" placeholder="Search packages by name... (Press / to focus)" oninput="onSearchInput()">
-                        <kbd class="search-kbd" id="searchKbd">/</kbd>
-                        <button id="clearSearch" style="display: none;" onclick="clearSearchInput()">&times;</button>
-                    </div>
-                    
-                    <div class="segmented-control">
-                        <button class="filter-btn active" data-cat="all" onclick="setCategory('all', event)">All</button>
-                        
-                        <div class="filter-group">
-                            <button class="filter-btn" data-cat="vulnerable" onclick="setCategory('vulnerable', event)">
-                                Vulnerable <span class="chevron-inline">▼</span>
-                            </button>
-                            <div class="filter-dropdown" id="dropdown-vulnerable">
-                                <div class="dropdown-row">
-                                    <label><input type="checkbox" value="malicious" checked onchange="filterPackages()"> <span class="dot mal-dot"></span> Malicious Code</label>
-                                    <span class="row-actions">
-                                        <span class="action-btn" onclick="selectOnly(event, 'malicious')">only</span>
-                                        <span class="action-separator">/</span>
-                                        <span class="action-btn" onclick="selectAll(event)">all</span>
-                                    </span>
-                                </div>
-                                <div class="dropdown-row">
-                                    <label><input type="checkbox" value="critical" checked onchange="filterPackages()"> <span class="dot crit-dot"></span> Critical</label>
-                                    <span class="row-actions">
-                                        <span class="action-btn" onclick="selectOnly(event, 'critical')">only</span>
-                                        <span class="action-separator">/</span>
-                                        <span class="action-btn" onclick="selectAll(event)">all</span>
-                                    </span>
-                                </div>
-                                <div class="dropdown-row">
-                                    <label><input type="checkbox" value="high" checked onchange="filterPackages()"> <span class="dot high-dot"></span> High</label>
-                                    <span class="row-actions">
-                                        <span class="action-btn" onclick="selectOnly(event, 'high')">only</span>
-                                        <span class="action-separator">/</span>
-                                        <span class="action-btn" onclick="selectAll(event)">all</span>
-                                    </span>
-                                </div>
-                                <div class="dropdown-row">
-                                    <label><input type="checkbox" value="medium" checked onchange="filterPackages()"> <span class="dot med-dot"></span> Medium</label>
-                                    <span class="row-actions">
-                                        <span class="action-btn" onclick="selectOnly(event, 'medium')">only</span>
-                                        <span class="action-separator">/</span>
-                                        <span class="action-btn" onclick="selectAll(event)">all</span>
-                                    </span>
-                                </div>
-                                <div class="dropdown-row">
-                                    <label><input type="checkbox" value="low" checked onchange="filterPackages()"> <span class="dot low-dot"></span> Low</label>
-                                    <span class="row-actions">
-                                        <span class="action-btn" onclick="selectOnly(event, 'low')">only</span>
-                                        <span class="action-separator">/</span>
-                                        <span class="action-btn" onclick="selectAll(event)">all</span>
-                                    </span>
-                                </div>
-                                <div class="dropdown-row">
-                                    <label><input type="checkbox" value="unknown" checked onchange="filterPackages()"> <span class="dot unkn-dot"></span> Unknown</label>
-                                    <span class="row-actions">
-                                        <span class="action-btn" onclick="selectOnly(event, 'unknown')">only</span>
-                                        <span class="action-separator">/</span>
-                                        <span class="action-btn" onclick="selectAll(event)">all</span>
-                                    </span>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <div class="filter-group">
-                            <button class="filter-btn" data-cat="outdated" onclick="setCategory('outdated', event)">
-                                Outdated <span class="chevron-inline">▼</span>
-                            </button>
-                            <div class="filter-dropdown" id="dropdown-outdated">
-                                <div class="dropdown-row">
-                                    <label><input type="checkbox" value="major" checked onchange="filterPackages()"> Major Update</label>
-                                    <span class="row-actions">
-                                        <span class="action-btn" onclick="selectOnly(event, 'major')">only</span>
-                                        <span class="action-separator">/</span>
-                                        <span class="action-btn" onclick="selectAll(event)">all</span>
-                                    </span>
-                                </div>
-                                <div class="dropdown-row">
-                                    <label><input type="checkbox" value="minor" checked onchange="filterPackages()"> Minor Update</label>
-                                    <span class="row-actions">
-                                        <span class="action-btn" onclick="selectOnly(event, 'minor')">only</span>
-                                        <span class="action-separator">/</span>
-                                        <span class="action-btn" onclick="selectAll(event)">all</span>
-                                    </span>
-                                </div>
-                                <div class="dropdown-row">
-                                    <label><input type="checkbox" value="patch" checked onchange="filterPackages()"> Patch Update</label>
-                                    <span class="row-actions">
-                                        <span class="action-btn" onclick="selectOnly(event, 'patch')">only</span>
-                                        <span class="action-separator">/</span>
-                                        <span class="action-btn" onclick="selectAll(event)">all</span>
-                                    </span>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <button class="filter-btn" data-cat="clean" onclick="setCategory('clean', event)">Clean</button>
-                    </div>
-                </div>
-                
-                <!-- Bottom Row: Alerts + Dimensions + Reset -->
-                <div class="controls-row secondary-row">
-                    <div class="secondary-filters-group">
-                        <span class="facet-label">Alerts:</span>
-                        <button class="filter-btn btn-facet" data-cat="error" onclick="setCategory('error', event)">Errors</button>
-                        <button class="filter-btn btn-facet" data-cat="deprecated" onclick="setCategory('deprecated', event)">Deprecated</button>
-                        <button class="filter-btn btn-facet" data-cat="suppressed" onclick="setCategory('suppressed', event)">Suppressed</button>
-                    </div>
-                    
-                    <div class="filter-divider"></div>
-                    
-                    <div class="secondary-filters-group">
-                        <span class="facet-label">Dimensions:</span>
-                        <div class="filter-group">
-                            <button class="filter-btn btn-facet" data-cat="scope" onclick="setCategory('scope', event)">
-                                Scope <span class="chevron-inline">▼</span>
-                            </button>
-                            <div class="filter-dropdown" id="dropdown-scope">
-                                <div class="dropdown-row">
-                                    <label><input type="checkbox" value="direct" checked onchange="filterPackages()"> Direct</label>
-                                    <span class="row-actions">
-                                        <span class="action-btn" onclick="selectOnly(event, 'direct')">only</span>
-                                        <span class="action-separator">/</span>
-                                        <span class="action-btn" onclick="selectAll(event)">all</span>
-                                    </span>
-                                </div>
-                                <div class="dropdown-row">
-                                    <label><input type="checkbox" value="dev" checked onchange="filterPackages()"> Dev</label>
-                                    <span class="row-actions">
-                                        <span class="action-btn" onclick="selectOnly(event, 'dev')">only</span>
-                                        <span class="action-separator">/</span>
-                                        <span class="action-btn" onclick="selectAll(event)">all</span>
-                                    </span>
-                                </div>
-                                <div class="dropdown-row">
-                                    <label><input type="checkbox" value="transitive" checked onchange="filterPackages()"> Transitive</label>
-                                    <span class="row-actions">
-                                        <span class="action-btn" onclick="selectOnly(event, 'transitive')">only</span>
-                                        <span class="action-separator">/</span>
-                                        <span class="action-btn" onclick="selectAll(event)">all</span>
-                                    </span>
-                                </div>
-                                <div class="dropdown-row">
-                                    <label><input type="checkbox" value="engine" checked onchange="filterPackages()"> Engine</label>
-                                    <span class="row-actions">
-                                        <span class="action-btn" onclick="selectOnly(event, 'engine')">only</span>
-                                        <span class="action-separator">/</span>
-                                        <span class="action-btn" onclick="selectAll(event)">all</span>
-                                    </span>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        ${technology_dropdown_html}
-                    </div>
-                    
-                    <div style="margin-left: auto;">
-                        <button class="btn-reset-filters" onclick="resetAllFilters()" title="Reset search and filters">
-                            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 5px; vertical-align: middle;"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>Reset
-                        </button>
-                    </div>
-                </div>
-            </div>
-        </div>
-        
-        <!-- Packages List -->
-        <div class="packages-list" id="packageContainer">
-            <!-- Dynamic cards are rendered here -->
-        </div>
-    </div>
-    
-    <script>
-        const KEVLAR_REPORT_PACKAGES = ${packages_json_data};
-        const KEVLAR_VULNERABILITY_STORE = ${vulns_json_data};
-        const SHOW_PROJECT_GLOBALLY = ${show_project_globally};
-        const UNIQUE_PROJECT_PATHS = ${unique_project_paths};
-        const UNIQUE_TECHNOLOGIES = ${unique_technologies};
-        const VULS_ENABLED = ${vuls_enabled};
-        
-        function renderPackages() {
-            const container = document.getElementById('packageContainer');
-            if (!container) return;
-            
-            let htmlBuffer = '';
-            
-            KEVLAR_REPORT_PACKAGES.forEach((r, i) => {
-                const name = r.name;
-                const declared = r.declared;
-                const installed = r.installed;
-                const latest = r.latest;
-                const status = r.status;
-                const is_deprecated = r.deprecated;
-                const error = r.error;
-                const dep_type = r.dep_type;
-                
-                const name_esc = escapeHtml(name);
-                const declared_esc = declared ? escapeHtml(declared) : "";
-                const installed_esc = escapeHtml(installed);
-                const latest_esc = escapeHtml(latest);
-                const status_esc = escapeHtml(status);
-                const error_esc = escapeHtml(error || '');
-                const dep_type_esc = escapeHtml(dep_type);
-                
-                let project_badge = "";
-                if (!SHOW_PROJECT_GLOBALLY && r.project_path) {
-                    const proj_path = r.project_path;
-                    const tech_val = r.technology || "";
-                    project_badge = '<span class="badge badge-project" style="font-family: monospace; text-transform: none; margin-left: 4px;">' + escapeHtml(proj_path) + ' [' + escapeHtml(tech_val) + ']</span>';
-                }
-                
-                let tech_badge = "";
-                if (UNIQUE_TECHNOLOGIES.length > 1 && r.technology) {
-                    const tech_name = r.technology;
-                    const tech_val = tech_name.toLowerCase();
-                    tech_badge = '<span class="badge badge-tech badge-tech-' + escapeHtml(tech_val) + '">' + escapeHtml(tech_name) + '</span>';
-                }
-                
-                let badges = [];
-                if (error) {
-                    badges.push('<span class="badge badge-error">Error</span>');
-                } else if (status.includes("major")) {
-                    badges.push('<span class="badge badge-error">Major Update</span>');
-                } else if (status === "minor") {
-                    badges.push('<span class="badge badge-warning">Minor Update</span>');
-                } else if (status === "patch") {
-                    badges.push('<span class="badge badge-info">Patch Update</span>');
-                } else if (status === "local") {
-                    badges.push('<span class="badge badge-info">Verify Local</span>');
-                }
-                
-                if (is_deprecated) {
-                    badges.push('<span class="badge badge-depr">Deprecated</span>');
-                }
-                
-                if (r.missing_checksum) {
-                    badges.push('<span class="badge badge-warning">No Checksum</span>');
-                } else if (r.weak_checksum) {
-                    badges.push('<span class="badge badge-warning">Weak Checksum</span>');
-                }
-                
-                if (r.mismatch_checksum) {
-                    badges.push('<span class="badge badge-error">Checksum Mismatch</span>');
-                }
-                
-                const pkg_vulns = r.vulnerabilities || [];
-                const pkg_suppressed_vulns = r.suppressed_vulnerabilities || [];
-                const is_vulnerable = pkg_vulns.length > 0;
-                const is_suppressed = pkg_suppressed_vulns.length > 0;
-                
-                let severities_list = [];
-                pkg_vulns.forEach(vid => {
-                    const v = KEVLAR_VULNERABILITY_STORE[vid];
-                    if (v && v.severity) {
-                        severities_list.push(getSeverityLevel(v.severity));
-                    }
-                });
-                const data_severities = severities_list.join(',');
-                
-                if (is_vulnerable) {
-                    let mal_cnt = 0, c_cnt = 0, h_cnt = 0, m_cnt = 0, l_cnt = 0, u_cnt = 0;
-                    pkg_vulns.forEach(vid => {
-                        const v = KEVLAR_VULNERABILITY_STORE[vid];
-                        if (v) {
-                            const level = getSeverityLevel(v.severity || (v.id && v.id.startsWith("MAL-") ? "malicious" : ""));
-                            if (level === "malicious") mal_cnt++;
-                            else if (level === "critical") c_cnt++;
-                            else if (level === "high") h_cnt++;
-                            else if (level === "medium") m_cnt++;
-                            else if (level === "low") l_cnt++;
-                            else u_cnt++;
-                        }
-                    });
-                    
-                    let pills = [];
-                    if (mal_cnt > 0) pills.push('<span class="sev-pill sev-mal" title="Malicious Code">☠️ ' + mal_cnt + '</span>');
-                    if (c_cnt > 0) pills.push('<span class="sev-pill sev-c">' + c_cnt + ' C</span>');
-                    if (h_cnt > 0) pills.push('<span class="sev-pill sev-h">' + h_cnt + ' H</span>');
-                    if (m_cnt > 0) pills.push('<span class="sev-pill sev-m">' + m_cnt + ' M</span>');
-                    if (l_cnt > 0) pills.push('<span class="sev-pill sev-l">' + l_cnt + ' L</span>');
-                    if (u_cnt > 0) pills.push('<span class="sev-pill sev-u">' + u_cnt + ' U</span>');
-
-                    let pills_html = '';
-                    if (pills.length > 0) {
-                        pills_html = '<span class="vuln-severity-pills-inner">' + pills.join('') + '</span>';
-                    }
-
-                    const total_v = pkg_vulns.length;
-                    const badge_html = 
-                        '<span class="badge badge-vuln-stats" title="' + total_v + ' Vulnerabilities">' +
-                            '<svg class="icon-shield" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px; vertical-align: middle;"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>' +
-                            '<span>' + total_v + ' vuls</span>' +
-                            pills_html +
-                        '</span>';
-                    badges.push(badge_html);
-                }
-                
-                if (is_suppressed) {
-                    badges.push('<span class="badge badge-muted">' + pkg_suppressed_vulns.length + ' Suppressed</span>');
-                }
-                
-                let vuln_details_html = '';
-                if (is_vulnerable && VULS_ENABLED) {
-                    vuln_details_html += '<div class="section-title">Active Vulnerabilities</div>';
-                    
-                    const severity_order = {
-                        "malicious": 5,
-                        "critical": 4,
-                        "high": 3,
-                        "medium": 2,
-                        "low": 1,
-                        "unknown": 0
-                    };
-                    
-                    const sorted_vulns = [...pkg_vulns].sort((a_id, b_id) => {
-                        const a = KEVLAR_VULNERABILITY_STORE[a_id];
-                        const b = KEVLAR_VULNERABILITY_STORE[b_id];
-                        const a_sev = a ? getSeverityLevel(a.severity || (a_id.startsWith("MAL-") ? "malicious" : "")) : "unknown";
-                        const b_sev = b ? getSeverityLevel(b.severity || (b_id.startsWith("MAL-") ? "malicious" : "")) : "unknown";
-                        return (severity_order[b_sev] || 0) - (severity_order[a_sev] || 0);
-                    });
-                    
-                    sorted_vulns.forEach(vid => {
-                        const v = KEVLAR_VULNERABILITY_STORE[vid];
-                        if (!v) return;
-                        
-                        const severity = v.severity;
-                        const summary = v.summary;
-                        const details = v.details || "";
-                        
-                        const vid_esc = escapeHtml(vid);
-                        const severity_esc = escapeHtml(severity);
-                        const summary_esc = escapeHtml(summary);
-                        const details_esc = escapeHtml(details);
-                        
-                        const sev_lower = getSeverityLevel(severity || (vid.startsWith("MAL-") ? "malicious" : ""));
-                        const sev_badge_class = 'sev-' + escapeHtml(sev_lower);
-                        
-                        let cvss_html = '';
-                        // severity is now always a normalized text label (critical/high/medium/low/unknown)
-                        const label_text = sev_lower === "malicious" ? "☠️ MALICIOUS CODE" : (sev_lower || 'unknown').toUpperCase();
-                        const sev_badge_html = '<span class="sev-badge ' + sev_badge_class + '">' + escapeHtml(label_text) + '</span>';
-                        
-                        vuln_details_html += 
-                            '<div class="vuln-item">' +
-                                '<div class="vuln-header">' +
-                                    '<span class="vuln-id">' + vid_esc + '</span>' +
-                                '</div>' +
-                                cvss_html +
-                                '<div style="margin-top: 4px; margin-bottom: 8px;">' +
-                                    sev_badge_html +
-                                '</div>' +
-                                '<div class="vuln-summary">' + summary_esc + '</div>' +
-                                (details ? '<pre class="vuln-details">' + details_esc + '</pre>' : '') +
-                            '</div>';
-                    });
-                }
-                
-                let suppressed_details_html = '';
-                if (is_suppressed) {
-                    suppressed_details_html += '<div class="section-title">Suppressed Vulnerabilities (Ignored)</div>';
-                    pkg_suppressed_vulns.forEach(sv => {
-                        const vid = sv.id;
-                        const v_info = KEVLAR_VULNERABILITY_STORE[vid] || {};
-                        const summary = v_info.summary || sv.summary || "";
-                        const reason = sv.suppressed_reason || "No reason provided";
-                        const justification = sv.justification || "N/A";
-                        const expires_at = sv.expires_at || "N/A";
-                        const approved_by = sv.approved_by || "";
-                        
-                        const vid_esc = escapeHtml(vid);
-                        const summary_esc = escapeHtml(summary);
-                        const reason_esc = escapeHtml(reason);
-                        const justification_esc = escapeHtml(justification);
-                        const expires_at_esc = escapeHtml(expires_at);
-                        const approved_by_esc = escapeHtml(approved_by);
-                        
-                        const approved_by_html = approved_by_esc ? '<div style="margin-top: 4px; font-size: 12.5px; padding: 0 4px; color: var(--text-muted);"><strong>Approved By:</strong> ' + approved_by_esc + '</div>' : '';
-                        
-                        suppressed_details_html += 
-                            '<div class="suppressed-item">' +
-                                '<div class="vuln-header">' +
-                                    '<span class="vuln-id">' + vid_esc + '</span>' +
-                                    '<span class="suppressed-label">Ignored</span>' +
-                                '</div>' +
-                                '<div class="vuln-summary">' + summary_esc + '</div>' +
-                                '<div class="suppressed-reason"><strong>Reason:</strong> ' + reason_esc + '</div>' +
-                                '<div style="margin-top: 6px; font-size: 12.5px; padding: 0 4px; color: var(--text-muted);">' +
-                                    '<strong>Justification:</strong> ' + justification_esc +
-                                '</div>' +
-                                '<div style="margin-top: 4px; font-size: 12.5px; padding: 0 4px; color: var(--text-muted);">' +
-                                    '<strong>Expires At:</strong> ' + expires_at_esc +
-                                '</div>' +
-                                approved_by_html +
-                            '</div>';
-                    });
-                }
-                
-                let required_by_html = '';
-                const required_by = r.required_by || [];
-                const is_direct = (dep_type !== 'Transitive');
-                if (required_by.length > 0 && !is_direct) {
-                    const required_by_esc = required_by.map(rb => escapeHtml(rb));
-                    required_by_html = 
-                        '<div class="required-by-section">' +
-                            '<strong>Required by:</strong> ' + required_by_esc.join(', ') +
-                        '</div>';
-                }
-                
-                let notes_warnings_html = '';
-                let notes_warnings_list = [];
-                if (is_deprecated) {
-                    const msg = typeof is_deprecated === 'string' ? is_deprecated : "This package has been deprecated.";
-                    notes_warnings_list.push('<div class="note-warning-item"><span class="note-warning-icon">🚫</span> <div><strong>Deprecation Warning:</strong> ' + escapeHtml(msg) + '</div></div>');
-                }
-                if (error) {
-                    notes_warnings_list.push('<div class="note-warning-item"><span class="note-warning-icon">❌</span> <div><strong>Error:</strong> ' + error_esc + '</div></div>');
-                }
-                if (r.missing_checksum) {
-                    notes_warnings_list.push('<div class="note-warning-item"><span class="note-warning-icon">⚠️</span> <div><strong>Security Warning:</strong> Missing integrity checksum in lockfile</div></div>');
-                } else if (r.weak_checksum) {
-                    notes_warnings_list.push('<div class="note-warning-item"><span class="note-warning-icon">⚠️</span> <div><strong>Security Warning:</strong> Weak checksum (SHA-1) in lockfile</div></div>');
-                }
-                if (r.mismatch_checksum) {
-                    notes_warnings_list.push('<div class="note-warning-item"><span class="note-warning-icon">❌</span> <div><strong>INTEGRITY MISMATCH:</strong> Lockfile checksum does not match official registry checksum!</div></div>');
-                }
-                if (r.excluded_warning) {
-                    notes_warnings_list.push('<div class="note-warning-item"><span class="note-warning-icon">⚠️</span> <div><strong>Excluded Version Alert:</strong> ' + escapeHtml(r.excluded_warning) + '</div></div>');
-                }
-                if (r.manifest_missing || (r.remediation && r.remediation.manifest_missing)) {
-                    notes_warnings_list.push(
-                        '<div class="note-warning-item"><span class="note-warning-icon">⚠️</span> ' +
-                        '<div><strong>Manifest / Lockfile Discrepancy (Lockfile Drift):</strong> Package is resolved in lockfile as direct dependency but is missing from <code>package.json</code>.<br/>' +
-                        '<span style="font-size: 11.5px; opacity: 0.9; display: block; margin-top: 4px;"><strong>Potential causes to analyze:</strong><br/>' +
-                        '• <em>Lockfile Drift:</em> <code>package.json</code> was edited or merged manually without running <code>npm install</code>.<br/>' +
-                        '• <em>Branch Switch:</em> Switched Git branches without updating dependencies.<br/>' +
-                        '• <em>Tool Conflict:</em> Mixed usage of <code>npm</code> and <code>pnpm</code> in workspace.</span>' +
-                        '</div></div>'
-                    );
-                }
-                
-                if (notes_warnings_list.length > 0) {
-                    notes_warnings_html = 
-                        '<div class="notes-warnings-section">' +
-                            '<div class="section-title-inline">' +
-                                '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>' +
-                                ' Notes & Warnings' +
-                            '</div>' +
-                            '<div class="notes-warnings-body">' +
-                                notes_warnings_list.join('') +
-                            '</div>' +
-                        '</div>';
-                }
-                
-                let ai_button_html = '';
-                const requires_attention = (['major', 'minor', 'patch', 'minor-major', 'patch-major'].includes(status)) || is_deprecated || is_vulnerable;
-                if (requires_attention) {
-                    ai_button_html = '<button class="btn-ai-prompt" onclick="copiarPromptRemediacionByIndex(' + i + '); event.stopPropagation();">📋 AI Prompt</button>';
-                }
-                
-                let remediation_button_html = '';
-                const has_remediation = r.remediation && (r.remediation.safe || r.remediation.major || (r.remediation.options && r.remediation.options.length));
-                if (has_remediation) {
-                    remediation_button_html = 
-                        '<div class="remediation-section">' +
-                            '<div style="font-size: 12px; font-weight: 700; color: var(--success); margin-bottom: 8px;">Remediation Support:</div>' +
-                            '<div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">' +
-                                '<button class="btn-remediation" onclick="openRemediationModalByIndex(' + i + '); event.stopPropagation();">' +
-                                    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;">' +
-                                        '<path d="M12 20h9"></path>' +
-                                        '<path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>' +
-                                    '</svg>' +
-                                    'Show suggested change' +
-                                '</button>' +
-                                ai_button_html +
-                            '</div>' +
-                        '</div>';
-                } else if (ai_button_html) {
-                    remediation_button_html = 
-                        '<div class="remediation-section">' +
-                            '<div style="font-size: 12px; font-weight: 700; color: var(--success); margin-bottom: 8px;">Remediation Support:</div>' +
-                            ai_button_html +
-                        '</div>';
-                }
-                
-                let changelog_html = '';
-                if (status === "major" || status === "minor-major" || status === "patch-major") {
-                    const compare_url = r.compare_url;
-                    const releases_url = r.releases_url;
-                    let buttons = [];
-                    if (compare_url) {
-                        buttons.push('<a href="' + escapeHtml(compare_url) + '" target="_blank" class="changelog-btn">Compare Diff</a>');
-                    }
-                    if (releases_url) {
-                        buttons.push('<a href="' + escapeHtml(releases_url) + '" target="_blank" class="changelog-btn">Release Notes</a>');
-                    }
-                    if (buttons.length > 0) {
-                        changelog_html = 
-                            '<div class="changelog-section">' +
-                                '<div style="font-size: 12px; font-weight: 700; color: var(--warning); margin-bottom: 8px;">Analysis & Migration Links:</div>' +
-                                buttons.join('') +
-                            '</div>';
-                    }
-                }
-                
-                htmlBuffer += 
-                    '<div class="package-card" ' +
-                         'data-name="' + name_esc + '" ' +
-                         'data-status="' + status_esc + '" ' +
-                         'data-vulnerable="' + (is_vulnerable ? 'true' : 'false') + '" ' +
-                         'data-severities="' + escapeHtml(data_severities) + '" ' +
-                         'data-suppressed="' + (is_suppressed ? 'true' : 'false') + '" ' +
-                         'data-deprecated="' + (is_deprecated ? 'true' : 'false') + '" ' +
-                         'data-error="' + (error ? 'true' : 'false') + '" ' +
-                         'data-deptype="' + dep_type_esc.toLowerCase() + '" ' +
-                         'data-technology="' + escapeHtml((r.technology || '').toLowerCase()) + '" ' +
-                         'id="pkg-' + i + '">' +
-                        '<div class="card-header" onclick="toggleDetails(' + i + ')">' +
-                            '<div class="header-left">' +
-                                '<div class="pkg-title">' +
-                                    '<span class="pkg-name">' + name_esc + '</span>' +
-                                    '<span class="pkg-type-badge">' + dep_type_esc + '</span>' + tech_badge + project_badge +
-                                '</div>' +
-                                '<div class="pkg-badges">' +
-                                    badges.join(' ') +
-                                '</div>' +
-                            '</div>' +
-                            '<div class="header-right">' +
-                                (function() {
-                                    const installed = r.installed;
-                                    const latest_sm = r.latest_same_major || installed;
-                                    const latest_abs = r.latest_absolute || installed;
-                                    
-                                    const clean_ver_str = (val) => (val ? val.toString().replace(/^v/i, '') : '');
-                                    const latest_sm_clean = clean_ver_str(latest_sm);
-                                    const latest_abs_clean = clean_ver_str(latest_abs);
-                                    
-                                    let declared_html = '';
-                                    if (declared_esc) {
-                                        declared_html = '<div class="version-installed" style="margin-bottom: 2px;">' +
-                                            '<span class="label">Declared:</span>' +
-                                            '<span>' + declared_esc + '</span>' +
-                                        '</div>';
-                                    }
-                                    
-                                    let versions_html = '<div class="pkg-versions">' +
-                                        declared_html +
-                                        '<div class="version-installed">' +
-                                            '<span class="label">Installed:</span>' +
-                                            '<span>' + escapeHtml(installed || 'N/A') + '</span>' +
-                                        '</div>' +
-                                        '<div class="version-chips">';
-                                    
-                                    if (status === 'up-to-date' || status === 'local') {
-                                        versions_html += 
-                                            '<span class="v-chip v-chip-ok">' +
-                                                '<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 3px;"><polyline points="20 6 9 17 4 12"></polyline></svg>' +
-                                                'Up to date' +
-                                            '</span>';
-                                    } else {
-                                        // Safe update available (minor or patch)
-                                        if ((status.includes('minor') || status.includes('patch')) && latest_sm !== installed) {
-                                            versions_html += 
-                                                '<span class="v-chip v-chip-safe" title="Safe update within the same major version">' +
-                                                    '<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 3px;"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>' +
-                                                    'Safe: v' + escapeHtml(latest_sm_clean) +
-                                                '</span>';
-                                        }
-                                        // Major update available (requires upgrade to new major)
-                                        if (status.includes('major') && latest_abs !== installed) {
-                                            versions_html += 
-                                                '<span class="v-chip v-chip-major" title="Major update with potential breaking changes">' +
-                                                    '<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 3px;"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path></svg>' +
-                                                    'Major: v' + escapeHtml(latest_abs_clean) +
-                                                '</span>';
-                                        }
-                                    }
-                                    
-                                    versions_html += '</div></div>';
-                                    return versions_html;
-                                })() +
-                                '<svg class="chevron" id="chevron-' + i + '" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
-                                    '<polyline points="6 9 12 15 18 9"></polyline>' +
-                                    '</svg>' +
-                            '</div>' +
-                        '</div>' +
-                        '<div class="card-details" id="detail-' + i + '" style="display: none;">' +
-                            required_by_html +
-                            notes_warnings_html +
-                            changelog_html +
-                            remediation_button_html +
-                            vuln_details_html +
-                            suppressed_details_html +
-                        '</div>' +
-                    '</div>';
-            });
-            
-            container.innerHTML = htmlBuffer;
-        }
-        
-        function getSeverityLevel(severity) {
-            if (!severity) return 'unknown';
-            const s = severity.toLowerCase();
-            if (s.includes('malicious')) return 'malicious';
-            if (s.includes('critical')) return 'critical';
-            if (s.includes('high')) return 'high';
-            if (s.includes('medium')) return 'medium';
-            if (s.includes('low')) return 'low';
-            return 'unknown';
-        }
-        
-        function openRemediationModalByIndex(i) {
-            const r = KEVLAR_REPORT_PACKAGES[i];
-            if (r && r.remediation) {
-                openRemediationModal(r.remediation);
-            }
-        }
-        
-        function escapeJsString(str) {
-            if (!str) return '';
-            return str.toString()
-                      .replace(/\\\\/g, '\\\\\\\\')
-                      .replace(/'/g, "\\\\'")
-                      .replace(/"/g, '\\\\"')
-                      .replace(/\\n/g, '\\\\n')
-                      .replace(/\\r/g, '\\\\r');
-        }
-        
-        function copiarPromptRemediacionByIndex(i) {
-            const r = KEVLAR_REPORT_PACKAGES[i];
-            const name = r.name;
-            const status = r.status;
-            const is_deprecated = r.deprecated;
-            const pkg_vulns = r.vulnerabilities || [];
-            const is_vulnerable = pkg_vulns.length > 0;
-            const required_by = r.required_by || [];
-            
-            let alert_types = [];
-            let details_parts = [];
-            if (is_vulnerable) {
-                alert_types.push("Vulnerability");
-                let vuln_strings = [];
-                pkg_vulns.forEach(vid => {
-                    const v = KEVLAR_VULNERABILITY_STORE[vid];
-                    if (v) {
-                        let str = vid + ': ' + (v.summary || '');
-                        if (v.details) {
-                            let det = String(v.details).trim();
-                            if (det.length > 1000) {
-                                det = det.substring(0, 1000) + '...';
-                            }
-                            str += '\\\\n   Description/Details: ' + det;
-                        }
-                        vuln_strings.push(str);
-                    }
-                });
-                details_parts.push("Vulnerabilities:\\\\n" + vuln_strings.join('\\\\n\\\\n'));
-            }
-            if (is_deprecated) {
-                alert_types.push("Deprecation");
-                const dep_msg = typeof is_deprecated === 'string' ? is_deprecated : "This package has been deprecated.";
-                details_parts.push("Deprecation Warning: " + dep_msg);
-            }
-            if (['major', 'minor', 'patch', 'minor-major', 'patch-major'].includes(status)) {
-                alert_types.push("Outdated (" + status.charAt(0).toUpperCase() + status.slice(1) + ")");
-                details_parts.push("Outdated: " + status.toUpperCase() + " update available (Latest: " + r.latest + ")");
-            }
-            
-            const alert_type = alert_types.join(', ');
-            const details_str = details_parts.join(' | ');
-            
-            const tech_val = r.technology || "";
-            const tech_map = {
-                "npm": "Node.js / npm",
-                "pip": "Python / pip",
-                "nuget": ".NET / NuGet",
-                "php": "PHP / Composer",
-                "maven": "Java / Maven",
-                "go": "Go",
-                "rust": "Rust / Crates.io",
-                "ruby": "Ruby / RubyGems",
-                "gradle": "Java / Gradle",
-                "android": "Android / Gradle"
-            };
-            const ecosystem_name = tech_map[tech_val.toLowerCase()] || tech_val || "Software Development";
-            const curr_ver = r.installed ? r.installed : r.declared;
-            const latest_sm = r.latest_same_major || r.latest;
-            const latest_abs = r.latest_absolute || r.latest;
-            
-            const proj_path = r.project_path || "";
-            const proj_name = proj_path ? proj_path.split(/[\\/]/).pop() || "Project" : "Project";
-            const required_by_str = required_by.join(', ');
-            
-            let manifest_file = "";
-            let manifest_line = "";
-            if (r.remediation) {
-                const rem = r.remediation.safe || r.remediation.major;
-                if (rem) {
-                    manifest_file = rem.manifest_path || "";
-                    manifest_line = rem.line_number || "";
-                }
-            }
-            
-            copiarPromptRemediacion(name, ecosystem_name, curr_ver, latest_sm, latest_abs, alert_type, details_str, proj_name, proj_path, r.dep_type, required_by_str, manifest_file, manifest_line);
-        }
-        
-        // Floating toolbar logic on scroll
-        document.addEventListener('DOMContentLoaded', () => {
-            renderPackages();
-            const toolbar = document.querySelector('.controls-toolbar');
-            const placeholder = document.querySelector('.controls-placeholder');
-            const pkgList = document.querySelector('.packages-list');
-            
-            function updatePlaceholderHeight() {
-                if (placeholder && toolbar) {
-                    if (toolbar.classList.contains('floating')) {
-                        placeholder.style.height = toolbar.offsetHeight + 'px';
-                    } else {
-                        placeholder.style.height = 'auto';
-                    }
-                }
-            }
-            
-            // Set initial height
-            updatePlaceholderHeight();
-            window.addEventListener('resize', updatePlaceholderHeight);
-            
-            // Observe changes in toolbar height (e.g. wrap on screen resize)
-            if (window.ResizeObserver) {
-                const ro = new ResizeObserver(() => {
-                    updatePlaceholderHeight();
-                });
-                ro.observe(toolbar);
-            }
-            
-            window.addEventListener('scroll', () => {
-                if (!toolbar || !placeholder) return;
-                
-                const placeholderRect = placeholder.getBoundingClientRect();
-                
-                if (placeholderRect.top < 20) {
-                    if (!toolbar.classList.contains('floating')) {
-                        placeholder.style.height = toolbar.offsetHeight + 'px';
-                        toolbar.classList.add('floating');
-                        pkgList.classList.add('floating-active');
-                    }
-                } else {
-                    if (toolbar.classList.contains('floating')) {
-                        toolbar.classList.remove('floating');
-                        pkgList.classList.remove('floating-active');
-                        placeholder.style.height = 'auto';
-                    }
-                }
-            });
-
-            // Disable empty filter buttons on page load
-            const cards = document.querySelectorAll('.package-card');
-            const hasVulnerable = Array.from(cards).some(card => card.getAttribute('data-vulnerable') === 'true');
-            const hasOutdated = Array.from(cards).some(card => ['major', 'minor', 'patch'].includes(card.getAttribute('data-status')));
-            const hasDeprecated = Array.from(cards).some(card => card.getAttribute('data-deprecated') === 'true');
-            const hasSuppressed = Array.from(cards).some(card => card.getAttribute('data-suppressed') === 'true');
-            const hasErrors = Array.from(cards).some(card => card.getAttribute('data-error') === 'true');
-            const hasClean = Array.from(cards).some(card => 
-                card.getAttribute('data-status') === 'up-to-date' && 
-                card.getAttribute('data-vulnerable') === 'false' && 
-                card.getAttribute('data-deprecated') === 'false' && 
-                card.getAttribute('data-error') === 'false'
-            );
-            
-            if (!hasVulnerable) {
-                const btn = document.querySelector('.filter-btn[data-cat="vulnerable"]');
-                if (btn) btn.disabled = true;
-            }
-            if (!hasOutdated) {
-                const btn = document.querySelector('.filter-btn[data-cat="outdated"]');
-                if (btn) btn.disabled = true;
-            }
-            if (!hasDeprecated) {
-                const btn = document.querySelector('.filter-btn[data-cat="deprecated"]');
-                if (btn) btn.disabled = true;
-            }
-            if (!hasSuppressed) {
-                const btn = document.querySelector('.filter-btn[data-cat="suppressed"]');
-                if (btn) btn.disabled = true;
-            }
-            if (!hasErrors) {
-                const btn = document.querySelector('.filter-btn[data-cat="error"]');
-                if (btn) btn.disabled = true;
-            }
-            if (!hasClean) {
-                const btn = document.querySelector('.filter-btn[data-cat="clean"]');
-                if (btn) btn.disabled = true;
-            }
-        });
-
-        let activeCategories = ['all'];
-        
-        function selectOnly(event, value) {
-            event.preventDefault();
-            event.stopPropagation();
-            const dropdown = event.target.closest('.filter-dropdown');
-            if (dropdown) {
-                dropdown.querySelectorAll('input[type="checkbox"]').forEach(cb => {
-                    cb.checked = (cb.value === value);
-                });
-                filterPackages();
-            }
-        }
-        
-        function selectAll(event) {
-            event.preventDefault();
-            event.stopPropagation();
-            const dropdown = event.target.closest('.filter-dropdown');
-            if (dropdown) {
-                dropdown.querySelectorAll('input[type="checkbox"]').forEach(cb => {
-                    cb.checked = true;
-                });
-                filterPackages();
-            }
-        }
-        
-        function setCategory(cat, event) {
-            if (event) {
-                event.stopPropagation();
-            }
-            
-            if (cat === 'all') {
-                activeCategories = ['all'];
-                document.querySelectorAll('.filter-dropdown').forEach(dd => dd.classList.remove('show'));
-                document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('dropdown-open'));
-                document.querySelectorAll('.filter-dropdown input[type="checkbox"]').forEach(cb => {
-                    cb.checked = true;
-                });
-            } else if (cat === 'clean') {
-                activeCategories = ['clean'];
-                document.querySelectorAll('.filter-dropdown').forEach(dd => dd.classList.remove('show'));
-                document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('dropdown-open'));
-                document.querySelectorAll('.filter-dropdown input[type="checkbox"]').forEach(cb => {
-                    cb.checked = true;
-                });
-            } else {
-                activeCategories = activeCategories.filter(c => c !== 'all' && c !== 'clean');
-                
-                if (activeCategories.includes(cat)) {
-                    activeCategories = activeCategories.filter(c => c !== cat);
-                    const dd = document.getElementById(`dropdown-$${cat}`);
-                    if (dd) {
-                        dd.classList.remove('show');
-                        const group = dd.closest('.filter-group');
-                        if (group) {
-                            const btn = group.querySelector('.filter-btn');
-                            if (btn) btn.classList.remove('dropdown-open');
-                        }
-                    }
-                } else {
-                    activeCategories.push(cat);
-                    document.querySelectorAll('.filter-dropdown').forEach(dd => dd.classList.remove('show'));
-                    document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('dropdown-open'));
-                    
-                    const dd = document.getElementById(`dropdown-$${cat}`);
-                    if (dd) {
-                        dd.classList.add('show');
-                        const group = dd.closest('.filter-group');
-                        if (group) {
-                            const btn = group.querySelector('.filter-btn');
-                            if (btn) btn.classList.add('dropdown-open');
-                        }
-                    }
-                }
-                
-                if (activeCategories.length === 0) {
-                    activeCategories = ['all'];
-                }
-            }
-            
-            updateFilterButtonStates();
-            filterPackages();
-        }
-        
-        function updateFilterButtonStates() {
-            document.querySelectorAll('.filter-btn').forEach(btn => {
-                const cat = btn.getAttribute('data-cat');
-                if (activeCategories.includes(cat)) {
-                    btn.classList.add('active');
-                } else {
-                    btn.classList.remove('active');
-                }
-            });
-        }
-        
-        document.addEventListener('click', function(event) {
-            if (!event.target.closest('.filter-group')) {
-                document.querySelectorAll('.filter-dropdown').forEach(dd => dd.classList.remove('show'));
-                document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('dropdown-open'));
-            }
-        });
-        
-        document.addEventListener('keydown', function(e) {
-            if ((e.key === '/' || (e.ctrlKey && e.key.toLowerCase() === 'k')) && document.activeElement !== document.getElementById('searchInput')) {
-                e.preventDefault();
-                const input = document.getElementById('searchInput');
-                if (input) {
-                    input.focus();
-                    input.select();
-                }
-            }
-        });
-        
-        function resetAllFilters() {
-            clearSearchInput();
-            setCategory('all');
-        }
-
-        function onSearchInput() {
-            const input = document.getElementById('searchInput');
-            const clearBtn = document.getElementById('clearSearch');
-            const kbdHint = document.getElementById('searchKbd');
-            if (input.value) {
-                clearBtn.style.display = 'block';
-                if (kbdHint) kbdHint.style.display = 'none';
-            } else {
-                clearBtn.style.display = 'none';
-                if (kbdHint) kbdHint.style.display = 'block';
-            }
-            filterPackages();
-        }
-        
-        function clearSearchInput() {
-            const input = document.getElementById('searchInput');
-            const kbdHint = document.getElementById('searchKbd');
-            input.value = '';
-            document.getElementById('clearSearch').style.display = 'none';
-            if (kbdHint) kbdHint.style.display = 'block';
-            filterPackages();
-            input.focus();
-        }
-        
-        function filterPackages() {
-            const searchVal = document.getElementById('searchInput').value.toLowerCase();
-            const cards = document.querySelectorAll('.package-card');
-            
-            const checkedSeverities = Array.from(document.querySelectorAll('#dropdown-vulnerable input[type="checkbox"]:checked')).map(cb => cb.value);
-            const checkedOutdated = Array.from(document.querySelectorAll('#dropdown-outdated input[type="checkbox"]:checked')).map(cb => cb.value);
-            const checkedScopes = Array.from(document.querySelectorAll('#dropdown-scope input[type="checkbox"]:checked')).map(cb => cb.value);
-            const checkedTechs = Array.from(document.querySelectorAll('#dropdown-technology input[type="checkbox"]:checked')).map(cb => cb.value);
-            
-            cards.forEach(card => {
-                const name = card.getAttribute('data-name').toLowerCase();
-                const status = card.getAttribute('data-status');
-                const isVulnerable = card.getAttribute('data-vulnerable') === 'true';
-                const cardSeverities = (card.getAttribute('data-severities') || '').split(',').filter(s => s);
-                const isSuppressed = card.getAttribute('data-suppressed') === 'true';
-                const isDeprecated = card.getAttribute('data-deprecated') === 'true';
-                const depType = card.getAttribute('data-deptype');
-                const hasError = card.getAttribute('data-error') === 'true';
-                const cardTech = card.getAttribute('data-technology') || '';
-                
-                let matchesCategory = false;
-                if (activeCategories.includes('all')) {
-                    matchesCategory = true;
-                } else {
-                    let matchesAll = true;
-                    for (const cat of activeCategories) {
-                        if (cat === 'vulnerable') {
-                            const checkSeverities = cardSeverities.length > 0 ? cardSeverities : ['unknown'];
-                            if (!(isVulnerable && checkSeverities.some(s => checkedSeverities.includes(s)))) {
-                                matchesAll = false;
-                                break;
-                            }
-                        } else if (cat === 'outdated') {
-                            const statusParts = status.split('-');
-                            if (!statusParts.some(p => checkedOutdated.includes(p)) && !(checkedOutdated.includes('major') && isDeprecated)) {
-                                matchesAll = false;
-                                break;
-                            }
-                        } else if (cat === 'scope') {
-                            if (!checkedScopes.includes(depType)) {
-                                matchesAll = false;
-                                break;
-                            }
-                        } else if (cat === 'technology') {
-                            if (!checkedTechs.includes(cardTech)) {
-                                matchesAll = false;
-                                break;
-                            }
-                        } else if (cat === 'deprecated') {
-                            if (!isDeprecated) {
-                                matchesAll = false;
-                                break;
-                            }
-                        } else if (cat === 'suppressed') {
-                            if (!isSuppressed) {
-                                matchesAll = false;
-                                break;
-                            }
-                        } else if (cat === 'error') {
-                            if (!hasError) {
-                                matchesAll = false;
-                                break;
-                            }
-                        } else if (cat === 'clean') {
-                            if (!((status === 'up-to-date' || status === 'local') && !isVulnerable && !isDeprecated && !hasError)) {
-                                matchesAll = false;
-                                break;
-                            }
-                        }
-                    }
-                    matchesCategory = matchesAll;
-                }
-                
-                const matchesSearch = name.includes(searchVal);
-                
-                if (matchesCategory && matchesSearch) {
-                    card.style.display = 'block';
-                } else {
-                    card.style.display = 'none';
-                }
-            });
-        }
-        
-        function toggleDetails(idx) {
-            const detailEl = document.getElementById('detail-' + idx);
-            const chevronEl = document.getElementById('chevron-' + idx);
-            if (detailEl.style.display === 'none' || !detailEl.style.display) {
-                detailEl.style.display = 'block';
-                chevronEl.style.transform = 'rotate(180deg)';
-            } else {
-                detailEl.style.display = 'none';
-                chevronEl.style.transform = 'rotate(0deg)';
-            }
-        }
-
-        function escapeHtml(text) {
-            if (typeof text !== 'string') return '';
-            return text.replace(/&/g, '&amp;')
-                       .replace(/</g, '&lt;')
-                       .replace(/>/g, '&gt;')
-                       .replace(/"/g, '&quot;')
-                       .replace(/'/g, '&#039;');
-        }
-        
-        let activeRemediationInfo = null;
-        let activeStrategyIndex = 0;
-        let activeOptionIndex = 0;
-
-        function renderDiff(diff) {
-            if (!diff) return;
-            
-            const currentContainer = document.getElementById('modal-current-code');
-            currentContainer.innerHTML = '';
-            diff.current_code.forEach(line => {
-                const lineDiv = document.createElement('div');
-                lineDiv.className = 'diff-line' + (line.is_changed ? ' removed' : '');
-                
-                const numSpan = document.createElement('span');
-                numSpan.className = 'diff-line-num';
-                numSpan.textContent = line.line_num;
-                
-                const contentSpan = document.createElement('span');
-                contentSpan.className = 'diff-line-content';
-                contentSpan.innerHTML = line.html;
-                
-                lineDiv.appendChild(numSpan);
-                lineDiv.appendChild(contentSpan);
-                currentContainer.appendChild(lineDiv);
-            });
-            
-            const suggestedContainer = document.getElementById('modal-suggested-code');
-            suggestedContainer.innerHTML = '';
-            diff.suggested_code.forEach(line => {
-                const lineDiv = document.createElement('div');
-                lineDiv.className = 'diff-line' + (line.is_changed ? ' added' : '');
-                
-                const numSpan = document.createElement('span');
-                numSpan.className = 'diff-line-num';
-                numSpan.textContent = line.line_num;
-                
-                const contentSpan = document.createElement('span');
-                contentSpan.className = 'diff-line-content';
-                contentSpan.innerHTML = line.html;
-                
-                lineDiv.appendChild(numSpan);
-                lineDiv.appendChild(contentSpan);
-                suggestedContainer.appendChild(lineDiv);
-            });
-        }
-
-        function renderRemediationModalContent(info) {
-            if (!info) return;
-
-            const strategyContainer = document.getElementById('modal-strategy-tabs-container');
-            const levelContainer = document.getElementById('modal-level-tabs-container');
-            const legacyTabsContainer = document.getElementById('modal-tabs-container');
-
-            if (info.strategies && info.strategies.length > 0) {
-                legacyTabsContainer.style.display = 'none';
-                
-                if (activeStrategyIndex >= info.strategies.length) {
-                    activeStrategyIndex = 0;
-                }
-                const st = info.strategies[activeStrategyIndex];
-
-                // Render Strategy Tabs
-                if (info.strategies.length > 1) {
-                    strategyContainer.style.display = 'flex';
-                    strategyContainer.innerHTML = info.strategies.map((s, idx) => {
-                        const activeCls = (idx === activeStrategyIndex) ? ' active' : '';
-                        const star = s.is_recommended ? ' ★' : '';
-                        return '<button class="modal-strategy-tab' + activeCls + '" onclick="switchRemediationStrategy(' + idx + ')">' + escapeHtml(s.title) + star + '</button>';
-                    }).join('');
-                } else {
-                    strategyContainer.style.display = 'none';
-                }
-
-                // Render Level Options for active strategy
-                const options = st.options || [];
-                if (activeOptionIndex >= options.length) {
-                    activeOptionIndex = 0;
-                }
-
-                if (options.length > 0) {
-                    levelContainer.style.display = 'flex';
-                    levelContainer.innerHTML = options.map((opt, oIdx) => {
-                        const activeCls = (oIdx === activeOptionIndex) ? ' active' : '';
-                        const bCls = opt.badge_class || 'v-chip-safe';
-                        const badgeHtml = '<span class="v-chip ' + bCls + '" style="font-size: 10px; padding: 2px 6px; margin-right: 4px;">' + escapeHtml(opt.badge || opt.id) + '</span>';
-                        return '<button class="modal-level-tab' + activeCls + '" onclick="switchRemediationLevel(' + oIdx + ')">' + badgeHtml + ' ' + escapeHtml(opt.label) + '</button>';
-                    }).join('');
-
-                    const activeOpt = options[activeOptionIndex];
-                    if (activeOpt && activeOpt.diff) {
-                        const filepathEl = document.getElementById('modal-filepath');
-                        if (filepathEl) {
-                            filepathEl.textContent = activeOpt.diff.display_path || (activeOpt.diff.manifest_path + ':' + activeOpt.diff.line_number);
-                        }
-                        renderDiff(activeOpt.diff);
-                    }
-                } else {
-                    levelContainer.style.display = 'none';
-                }
-            } else if (info.options && info.options.length > 0) {
-                strategyContainer.style.display = 'none';
-                levelContainer.style.display = 'none';
-                legacyTabsContainer.style.display = 'flex';
-                
-                const firstValid = info.options[0].diff;
-                if (firstValid) {
-                    document.getElementById('modal-filepath').textContent = firstValid.display_path || (firstValid.manifest_path + ':' + firstValid.line_number);
-                }
-                
-                legacyTabsContainer.innerHTML = '';
-                info.options.forEach((opt, idx) => {
-                    const btn = document.createElement('button');
-                    btn.className = 'modal-tab' + (idx === 0 ? ' active' : '');
-                    btn.textContent = opt.label;
-                    btn.onclick = function() {
-                        const allTabs = legacyTabsContainer.querySelectorAll('.modal-tab');
-                        allTabs.forEach(t => t.classList.remove('active'));
-                        btn.classList.add('active');
-                        renderDiff(opt.diff);
-                    };
-                    legacyTabsContainer.appendChild(btn);
-                });
-                renderDiff(info.options[0].diff);
-            } else {
-                strategyContainer.style.display = 'none';
-                levelContainer.style.display = 'none';
-                
-                const firstValid = info.safe || info.major;
-                if (firstValid) {
-                    document.getElementById('modal-filepath').textContent = firstValid.display_path || (firstValid.manifest_path + ':' + firstValid.line_number);
-                }
-                
-                if (info.safe && info.major) {
-                    legacyTabsContainer.innerHTML = '<button id="tab-safe" class="modal-tab active" onclick="switchRemediationTab(&quot;safe&quot;)">Safe Update</button>' +
-                                              '<button id="tab-major" class="modal-tab" onclick="switchRemediationTab(&quot;major&quot;)">Major Upgrade</button>';
-                    legacyTabsContainer.style.display = 'flex';
-                    switchRemediationTab('safe');
-                } else {
-                    legacyTabsContainer.style.display = 'none';
-                    if (info.safe) {
-                        renderDiff(info.safe);
-                    } else if (info.major) {
-                        renderDiff(info.major);
-                    }
-                }
-            }
-        }
-
-        function switchRemediationStrategy(idx) {
-            activeStrategyIndex = idx;
-            activeOptionIndex = 0;
-            renderRemediationModalContent(activeRemediationInfo);
-        }
-
-        function switchRemediationLevel(idx) {
-            activeOptionIndex = idx;
-            renderRemediationModalContent(activeRemediationInfo);
-        }
-
-        function switchRemediationTab(type) {
-            if (!activeRemediationInfo) return;
-            
-            const safeTab = document.getElementById('tab-safe');
-            const majorTab = document.getElementById('tab-major');
-            
-            if (type === 'safe') {
-                if (safeTab) safeTab.classList.add('active');
-                if (majorTab) majorTab.classList.remove('active');
-                renderDiff(activeRemediationInfo.safe);
-            } else {
-                if (majorTab) majorTab.classList.add('active');
-                if (safeTab) safeTab.classList.remove('active');
-                renderDiff(activeRemediationInfo.major);
-            }
-        }
-
-        function openRemediationModal(info) {
-            if (!info) return;
-            activeRemediationInfo = info;
-            activeStrategyIndex = 0;
-            activeOptionIndex = 0;
-            
-            renderRemediationModalContent(info);
-            
-            // Synchronize scrolling between current and suggested code views
-            const leftScroll = document.getElementById('modal-current-code');
-            const rightScroll = document.getElementById('modal-suggested-code');
-            if (leftScroll && rightScroll) {
-                leftScroll.scrollLeft = 0;
-                leftScroll.scrollTop = 0;
-                rightScroll.scrollLeft = 0;
-                rightScroll.scrollTop = 0;
-                
-                leftScroll.onscroll = function() {
-                    rightScroll.scrollLeft = leftScroll.scrollLeft;
-                    rightScroll.scrollTop = leftScroll.scrollTop;
-                };
-                rightScroll.onscroll = function() {
-                    leftScroll.scrollLeft = rightScroll.scrollLeft;
-                    leftScroll.scrollTop = rightScroll.scrollTop;
-                };
-            }
-
-            document.getElementById('remediation-modal').style.display = 'flex';
-            document.getElementById('modal-backdrop').style.display = 'block';
-            
-            setTimeout(() => {
-                document.getElementById('remediation-modal').classList.add('active');
-                document.getElementById('modal-backdrop').classList.add('active');
-            }, 10);
-        }
-        
-        function closeRemediationModal() {
-            const modal = document.getElementById('remediation-modal');
-            const backdrop = document.getElementById('modal-backdrop');
-            
-            modal.classList.remove('active');
-            backdrop.classList.remove('active');
-            
-            setTimeout(() => {
-                modal.style.display = 'none';
-                backdrop.style.display = 'none';
-            }, 300);
-        }
-        
-        function copiarPromptRemediacion(pkgName, ecosystem, currentVer, latestSameMajor, latestAbsolute, alertType, details, projName, projDir, depType, requiredBy, manifestFile, manifestLine) {
-            if (window.event) {
-                window.event.stopPropagation();
-            }
-            
-            function cleanV(v) {
-                if (!v) return '';
-                v = String(v).trim().toLowerCase();
-                if (v.startsWith('v')) v = v.slice(1);
-                return v.replace(/^[~^>=<!\\s]+/, '');
-            }
-
-            const currClean = cleanV(currentVer);
-            const latestSmClean = cleanV(latestSameMajor);
-            const latestAbsClean = cleanV(latestAbsolute);
-
-            let hasNewerVersion = false;
-            let targetText = "";
-            let tasksIntro = "";
-            
-            if (latestAbsClean && latestAbsClean !== currClean) {
-                hasNewerVersion = true;
-                if (latestSmClean && latestAbsClean && latestSmClean !== latestAbsClean && latestSmClean !== currClean) {
-                    targetText = `${latestSameMajor} or ${latestAbsolute}`;
-                    tasksIntro = `I want to update this package to version "${targetText}". Please perform the following tasks in a detailed and professional manner (taking into account the minor update to "${latestSameMajor}" vs the major update to "${latestAbsolute}" in your analysis):`;
-                } else {
-                    targetText = latestAbsolute;
-                    tasksIntro = `I want to update this package to version "${targetText}". Please perform the following tasks in a detailed and professional manner:`;
-                }
-            } else if (latestSmClean && latestSmClean !== currClean) {
-                hasNewerVersion = true;
-                targetText = latestSameMajor;
-                tasksIntro = `I want to update this package to version "${targetText}". Please perform the following tasks in a detailed and professional manner:`;
-            } else {
-                hasNewerVersion = false;
-                targetText = currentVer;
-                tasksIntro = `The package "${pkgName}" is currently on version "${currentVer}", which is the latest available version under this artifact/package coordinate, but security vulnerabilities or deprecation issues have been identified. Please perform the following tasks in a detailed and professional manner:`;
-            }
-            
-            let pkgDesc = `the package "${pkgName}"`;
-            if (depType === 'Transitive' && requiredBy) {
-                pkgDesc = `the transitive dependency package "${pkgName}" (which is required by ${requiredBy})`;
-            }
-            
-            let projectContext = "";
-            if (projName && projDir) {
-                projectContext = ` (name: ${projName} directory: ${projDir})`;
-            }
-            
-            let manifestContext = "";
-            if (manifestFile) {
-                manifestContext = `\nThe version is declared/configured in manifest file: "${manifestFile}"` + (manifestLine ? ` at line ${manifestLine}` : "");
-            }
-            
-            let taskList = "";
-            if (hasNewerVersion) {
-                taskList = `1. Critically analyze any potential 'Breaking Changes' or destructive impacts when upgrading from version "${currentVer}" to "${targetText}".
-2. Verify if the target version "${targetText}" safely resolves the issues and vulnerabilities described in the details above, or if a package migration to an alternative library (e.g., new groupId/artifactId) is advised in the advisory text.
-3. Provide a step-by-step action plan with the exact console commands and code/manifest updates to perform the upgrade or migration.
-4. Check if any other libraries or transitive dependencies will become obsolete, unused, or orphaned as a result of this upgrade, and suggest how to safely clean them up (e.g., pruning unused packages).`;
-            } else {
-                taskList = `1. Investigate if this package coordinate ("${pkgName}") is End-Of-Life (EOL), unmaintained, or deprecated, and determine if a migration to a replacement package/library (e.g., a successor library, new groupId/artifactId such as org.apache.logging.log4j:log4j-core for log4j, or alternative framework) is required or recommended.
-2. If a package migration is recommended (or mentioned in the advisory details above), provide the exact code/manifest changes to replace "${pkgName}" with the recommended replacement library.
-3. If no package migration is needed or available, provide step-by-step mitigation workarounds, code patches, or configuration changes to neutralize the vulnerabilities in version "${currentVer}".
-4. Check if any other libraries or transitive dependencies will become obsolete, unused, or orphaned as a result, and suggest how to safely clean them up.`;
-            }
-            
-            const promptTexto = `Act as a Senior AppSec Expert and Principal Software Engineer specialized in the ${ecosystem} ecosystem.
-
-I have ${pkgDesc} in my project${projectContext}, which is currently on version "${currentVer}".${manifestContext}
-An alert of type "${alertType}" has been detected.
-Detailed information/Associated alerts:
-${details}
-
-${tasksIntro}
-
-${taskList}`;
-
-            navigator.clipboard.writeText(promptTexto).then(() => {
-                let btn = null;
-                if (window.event) {
-                    btn = window.event.currentTarget || window.event.target;
-                }
-                if (!btn || btn.tagName !== 'BUTTON') {
-                    btn = document.activeElement;
-                }
-                if (btn && btn.tagName !== 'BUTTON') {
-                    btn = btn.closest('button');
-                }
-                if (btn) {
-                    const originalText = btn.innerHTML;
-                    btn.innerHTML = "Copied!";
-                    setTimeout(() => {
-                        btn.innerHTML = originalText;
-                    }, 2000);
-                }
-            }).catch(err => {
-                console.error('Failed to copy text to clipboard: ', err);
-                alert('Failed to copy to clipboard. Please check browser permissions.');
-            });
-        }
-    </script>
-    
-    <!-- Remediation Modal -->
-    <div id="modal-backdrop" class="modal-backdrop" onclick="closeRemediationModal()"></div>
-    <div id="remediation-modal" class="remediation-modal">
-        <div class="modal-header">
-            <h3>Remediation Recommendation</h3>
-            <button class="modal-close" onclick="closeRemediationModal()">&times;</button>
-        </div>
-        <div class="modal-body">
-            <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 6px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">Declaration Location</div>
-            <div class="modal-info-bar">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--primary); flex-shrink: 0; margin-right: 4px;">
-                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                    <polyline points="14 2 14 8 20 8"></polyline>
-                </svg>
-                <span id="modal-filepath"></span>
-            </div>
-            
-            <!-- Strategy & Level Tabs containers -->
-            <div id="modal-strategy-tabs-container" style="display: none; gap: 8px; margin-top: 14px; margin-bottom: 12px; flex-wrap: wrap;"></div>
-            <div id="modal-level-tabs-container" style="display: none; gap: 8px; margin-bottom: 16px; flex-wrap: wrap;"></div>
-            <div id="modal-tabs-container" class="modal-tabs" style="display: none;"></div>
-            
-            <div class="modal-diff-container">
-                <div class="diff-box">
-                    <div class="diff-box-title current">Current Code</div>
-                    <pre class="diff-code" id="modal-current-code"></pre>
-                </div>
-                <div class="diff-box">
-                    <div class="diff-box-title suggested">Suggested Change</div>
-                    <pre class="diff-code" id="modal-suggested-code"></pre>
-                </div>
-            </div>
-        </div>
-    </div>
-</body>
-</html>
-"""
+        # 2. Standalone / CI/CD fallback: decompress from embedded binary constant
+        cls._cached_template = gzip.decompress(
+            base64.b64decode(_HTML_TEMPLATE_GZIP_B64)
+        ).decode("utf-8")
+        return cls._cached_template
 
 
 def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
@@ -12947,12 +10697,12 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
 
         # Check if we should show the project path in the global header or per-card
         unique_project_paths = sorted(
-            list(set(r.get("project_path") for r in results if r.get("project_path")))
+            {r.get("project_path") for r in results if r.get("project_path")}
         )
         show_project_globally = len(unique_project_paths) <= 1
 
         unique_technologies = sorted(
-            list(set(r.get("technology") for r in results if r.get("technology")))
+            {r.get("technology") for r in results if r.get("technology")}
         )
 
         technology_dropdown_html = ""
@@ -12984,13 +10734,11 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
         if show_project_globally and unique_project_paths:
             single_path = unique_project_paths[0]
             techs = sorted(
-                list(
-                    set(
+                {
                         r.get("technology")
                         for r in results
                         if r.get("project_path") == single_path and r.get("technology")
-                    )
-                )
+                    }
             )
             tech_suffix = f" [{', '.join(techs)}]" if techs else ""
             project_path_header_html = f"<div>Path: <strong>{escape_html(single_path)}{escape_html(tech_suffix)}</strong></div>"
@@ -13758,11 +11506,6 @@ def run_scan_all(args, parser):
         )
         sys.exit(0)
 
-    combined_pkg_data = {
-        "dependencies": combined_dependencies,
-        "devDependencies": combined_devDependencies,
-        "all_direct": combined_all_direct,
-    }
 
     combined_results = sorted(combined_results, key=lambda x: x["name"].lower())
 
