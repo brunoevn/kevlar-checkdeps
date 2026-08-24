@@ -29,6 +29,7 @@ import xml.etree.ElementTree as ET
 import xml.parsers.expat
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
+from typing import Any, Dict, List, Optional, Set, Tuple, TypedDict, Union
 
 import tomllib
 
@@ -119,9 +120,6 @@ def _set_cached_registry_metadata(
     key = (tech, package_name.lower())
     with _CACHE_LOCK:
         _REGISTRY_METADATA_CACHE[key] = data
-
-
-from typing import Any, Dict, List, Optional, Set, Tuple, TypedDict, Union
 
 
 class CheckTarget(TypedDict, total=False):
