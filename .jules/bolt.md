@@ -8,3 +8,7 @@
 ## 2025-02-12 - Python Regular Expression Hot Loop Overhead
 **Learning:** Python's dynamic regex matching functions (`re.match`, `re.search`, `re.sub` passing a string pattern) incur observable cache lookup and function call overhead, which degrades performance when executed inside tight hot loops (like parsing manifest dependencies).
 **Action:** Always move static regexes into global module scope using `re.compile()` and directly call their corresponding methods (`.match()`, `.sub()`) during loops to bypass Python's dynamic evaluation overhead.
+
+## 2026-08-23 - re.compile module cache bypass for CVSS severity parsing
+**Learning:** In Python, `re.search()` with a string pattern requires a lookup in the `re` module's internal cache every time it's called. By using `re.compile()` at the module level and calling `.search()` directly on the compiled object, the code avoids this cache lookup, making execution slightly faster. This is a classic and highly effective micro-optimization for functions that are called repeatedly in a loop.
+**Action:** Move static regexes (using `re.compile()`) to the global module scope instead of caching them locally within frequently called functions or loops, as it bypasses cache lookup and function call overhead.

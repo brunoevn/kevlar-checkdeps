@@ -237,6 +237,11 @@ RE_NUM_START = re.compile(r"^(\d+)")
 RE_DECIMAL_VER = re.compile(r"\d+\.\d+(?:\.\d+)?(?:\.\d+)?")
 RE_DECIMAL_VER_STRICT = re.compile(r"^\d+\.\d+(?:\.\d+)?(?:\.\d+)?$")
 
+RE_CVSS4_SEV = re.compile(r"(CVSS:4\.[0-9a-zA-Z/:.]+)")
+RE_CVSS3_SEV = re.compile(r"(CVSS:3\.[0-9a-zA-Z/:.]+)")
+RE_CVSS2_SEV = re.compile(r"(CVSS:2\.[0-9a-zA-Z/:.]+)")
+RE_AV_SEV = re.compile(r"(AV:[NAL]/AC:[HML]/Au:[MSN]/C:[NPC]/I:[NPC]/A:[NPC])")
+
 SEMVER_REGEX = re.compile(
     r"^v?(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)"
     r"(?:-(?P<prerelease>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
@@ -534,7 +539,7 @@ def get_severity_level(vuln):
 
     # 2. CVSS score calculations
     if "CVSS" in sev_upper or "AV:" in sev_upper:
-        m4 = re.search(r"(CVSS:4\.[0-9a-zA-Z/:.]+)", sev_upper)
+        m4 = RE_CVSS4_SEV.search(sev_upper)
         if m4:
             vector = m4.group(1)
             score = calculate_cvss4_score_approx(vector)
@@ -548,7 +553,7 @@ def get_severity_level(vuln):
                 elif score >= 0.1:
                     return "low"
 
-        m3 = re.search(r"(CVSS:3\.[0-9a-zA-Z/:.]+)", sev_upper)
+        m3 = RE_CVSS3_SEV.search(sev_upper)
         if m3:
             vector = m3.group(1)
             score = calculate_cvss3_score(vector)
@@ -563,13 +568,11 @@ def get_severity_level(vuln):
                     return "low"
 
         vector2 = None
-        m2 = re.search(r"(CVSS:2\.[0-9a-zA-Z/:.]+)", sev_upper)
+        m2 = RE_CVSS2_SEV.search(sev_upper)
         if m2:
             vector2 = m2.group(1)
         elif "AV:" in sev_upper:
-            m_raw2 = re.search(
-                r"(AV:[NAL]/AC:[HML]/Au:[MSN]/C:[NPC]/I:[NPC]/A:[NPC])", sev_upper
-            )
+            m_raw2 = RE_AV_SEV.search(sev_upper)
             if m_raw2:
                 vector2 = m_raw2.group(1)
 
@@ -780,7 +783,7 @@ def _sanitize_error_message(exc, target_name):
     if isinstance(exc, urllib.error.HTTPError):
         if exc.code == 404:
             return "Registry returned not found (404)"
-        elif exc.code in (408, 504):
+        elif exc.code in {408, 504}:
             return "Registry communication timeout"
         elif exc.code >= 500:
             return "Internal server error on registry side"
@@ -6764,95 +6767,180 @@ def run_go_checker(args):
 
 
 def find_rust_files(path):
-    """Finds Cargo.toml and Cargo.lock files."""
+    """Finds Cargo.toml and Cargo.lock files, traversing parent directories for workspace Cargo.lock if needed."""
     toml_path = None
     lock_path = None
 
-    if os.path.exists(path):
-        if os.path.isdir(path):
-            t = os.path.join(path, "Cargo.toml")
-            l = os.path.join(path, "Cargo.lock")
+    abs_path = os.path.abspath(path)
+    search_dir = abs_path
+    if os.path.exists(abs_path):
+        if os.path.isdir(abs_path):
+            t = os.path.join(abs_path, "Cargo.toml")
+            l = os.path.join(abs_path, "Cargo.lock")
             if os.path.exists(t):
                 toml_path = t
             if os.path.exists(l):
                 lock_path = l
-        elif os.path.isfile(path):
-            if path.endswith("Cargo.toml"):
-                toml_path = path
-                l = os.path.join(os.path.dirname(path), "Cargo.lock")
+            search_dir = abs_path
+        elif os.path.isfile(abs_path):
+            if abs_path.endswith("Cargo.toml"):
+                toml_path = abs_path
+                l = os.path.join(os.path.dirname(abs_path), "Cargo.lock")
                 if os.path.exists(l):
                     lock_path = l
-            elif path.endswith("Cargo.lock"):
-                lock_path = path
-                t = os.path.join(os.path.dirname(path), "Cargo.toml")
+            elif abs_path.endswith("Cargo.lock"):
+                lock_path = abs_path
+                t = os.path.join(os.path.dirname(abs_path), "Cargo.toml")
                 if os.path.exists(t):
                     toml_path = t
+            search_dir = os.path.dirname(abs_path)
+
+        # If lock_path is not found in immediate directory, search upwards for workspace Cargo.lock
+        if not lock_path and search_dir:
+            curr = os.path.dirname(search_dir)
+            while curr and os.path.dirname(curr) != curr:
+                candidate = os.path.join(curr, "Cargo.lock")
+                if os.path.exists(candidate):
+                    lock_path = candidate
+                    break
+                curr = os.path.dirname(curr)
 
     return toml_path, lock_path
 
 
 def parse_cargo_toml(filepath):
-    """Parses Cargo.toml to extract direct dependency names."""
-    dependencies = set()
+    """Parses Cargo.toml to extract direct dependency names and declared version constraints.
+    Returns a dict {dep_name: version_spec} that supports membership checks ('name' in deps) and key iteration.
+    Supports Cargo workspaces and [workspace.dependencies].
+    """
+    dependencies = {}
     if not filepath or not os.path.exists(filepath):
         return dependencies
 
-    current_section = None
-    is_specific_pkg_section = False
+    # Look for workspace root Cargo.toml if this toml references workspace dependencies
+    workspace_deps = {}
+    curr = os.path.dirname(os.path.abspath(filepath))
+    while curr and os.path.dirname(curr) != curr:
+        ws_candidate = os.path.join(curr, "Cargo.toml")
+        if os.path.exists(ws_candidate) and os.path.abspath(ws_candidate) != os.path.abspath(filepath):
+            try:
+                with open(ws_candidate, "rb") as wf:
+                    ws_data = tomllib.load(wf)
+                if "workspace" in ws_data and isinstance(ws_data["workspace"], dict):
+                    raw_ws_deps = ws_data["workspace"].get("dependencies", {})
+                    if isinstance(raw_ws_deps, dict):
+                        for k, v in raw_ws_deps.items():
+                            if isinstance(v, str):
+                                workspace_deps[k] = v
+                            elif isinstance(v, dict) and "version" in v:
+                                workspace_deps[k] = str(v["version"])
+                    break
+            except Exception:
+                pass
+        curr = os.path.dirname(curr)
+
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
+        with open(filepath, "rb") as f:
+            data = tomllib.load(f)
 
-                # Detect sections, e.g. [dependencies], [dependencies.tokio], [target.'...'.dependencies.plist]
-                m_sec = re.match(r"^\[([^\]]+)\]", line)
-                if m_sec:
-                    current_section = m_sec.group(1).strip()
-                    is_specific_pkg_section = False
+        def _add_deps_table(table):
+            if not isinstance(table, dict):
+                return
+            for name, spec in table.items():
+                if isinstance(spec, str):
+                    dependencies[name] = spec
+                elif isinstance(spec, dict):
+                    if spec.get("workspace"):
+                        dependencies[name] = workspace_deps.get(name, "workspace")
+                    elif "version" in spec:
+                        dependencies[name] = str(spec["version"])
+                    elif "path" in spec:
+                        dependencies[name] = spec["path"]
+                    else:
+                        dependencies[name] = "*"
+                else:
+                    dependencies[name] = str(spec)
 
-                    # Extract package name from section header like [dependencies.clap] or [target.'...'.dependencies.clap]
-                    m_sub = re.search(
-                        r"(?:dependencies|dev-dependencies|build-dependencies)\.([a-zA-Z0-9_-]+)$",
-                        current_section,
+        for sec in ("dependencies", "dev-dependencies", "build-dependencies"):
+            if sec in data and isinstance(data[sec], dict):
+                _add_deps_table(data[sec])
+
+        if "target" in data and isinstance(data["target"], dict):
+            for _, t_val in data["target"].items():
+                if isinstance(t_val, dict):
+                    for sec in ("dependencies", "dev-dependencies", "build-dependencies"):
+                        if sec in t_val and isinstance(t_val[sec], dict):
+                            _add_deps_table(t_val[sec])
+
+        if "workspace" in data and isinstance(data["workspace"], dict):
+            ws_d = data["workspace"].get("dependencies")
+            if isinstance(ws_d, dict):
+                _add_deps_table(ws_d)
+
+    except Exception:
+        # Fallback to line-by-line regex parsing if tomllib fails
+        try:
+            current_section = None
+            is_specific_pkg_section = False
+            with open(filepath, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    m_sec = re.match(r"^\[([^\]]+)\]", line)
+                    if m_sec:
+                        current_section = m_sec.group(1).strip()
+                        is_specific_pkg_section = False
+                        m_sub = re.search(
+                            r"(?:dependencies|dev-dependencies|build-dependencies)\.([a-zA-Z0-9_-]+)$",
+                            current_section,
+                        )
+                        if m_sub:
+                            dependencies[m_sub.group(1)] = "*"
+                            is_specific_pkg_section = True
+                        continue
+
+                    is_dep_section = current_section in {
+                        "dependencies",
+                        "dev-dependencies",
+                        "build-dependencies",
+                    } or (
+                        current_section
+                        and (
+                            "dependencies" in current_section
+                            or "dev-dependencies" in current_section
+                            or "build-dependencies" in current_section
+                        )
                     )
-                    if m_sub:
-                        dependencies.add(m_sub.group(1))
-                        is_specific_pkg_section = True
-                    continue
-
-                # Check dependency sections
-                is_dep_section = current_section in {
-                    "dependencies",
-                    "dev-dependencies",
-                    "build-dependencies",
-                } or (
-                    current_section
-                    and (
-                        "dependencies" in current_section
-                        or "dev-dependencies" in current_section
-                        or "build-dependencies" in current_section
-                    )
-                )
-
-                if is_dep_section and not is_specific_pkg_section:
-                    # Match name = "version" or name = { ... }
-                    m_dep = re.match(r"^([a-zA-Z0-9_-]+)\s*=", line)
-                    if m_dep:
-                        dep_name = m_dep.group(1).strip()
-                        if dep_name not in {
-                            "version",
-                            "optional",
-                            "features",
-                            "default-features",
-                            "path",
-                        }:
-                            dependencies.add(dep_name)
-    except Exception as e:
-        print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Cargo.toml: {e}{COLOR_RESET}")
+                    if is_dep_section and not is_specific_pkg_section:
+                        m_dep = re.match(r"^([a-zA-Z0-9_-]+)\s*=\s*(.*)$", line)
+                        if m_dep:
+                            dep_name = m_dep.group(1).strip()
+                            dep_val = m_dep.group(2).strip().strip('"').strip("'")
+                            if dep_name not in {
+                                "version",
+                                "optional",
+                                "features",
+                                "default-features",
+                                "path",
+                            }:
+                                dependencies[dep_name] = dep_val or "*"
+        except Exception as e:
+            print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Cargo.toml: {e}{COLOR_RESET}")
 
     return dependencies
+
+
+class CargoLockResult(tuple):
+    """Subclass of tuple (resolved, parents) that also carries local_packages set for Cargo workspaces."""
+
+    def __new__(cls, resolved, parents, local_packages=None):
+        return super().__new__(cls, (resolved, parents))
+
+    def __init__(self, resolved, parents, local_packages=None):
+        self.resolved = resolved
+        self.parents = parents
+        self.local_packages = set(local_packages) if local_packages else set()
 
 
 def parse_cargo_lock(filepath):
@@ -6861,8 +6949,9 @@ def parse_cargo_lock(filepath):
     """
     resolved = {}
     parents = {}
+    local_packages = set()
     if not filepath or not os.path.exists(filepath):
-        return resolved, parents
+        return CargoLockResult(resolved, parents, local_packages)
 
     try:
         with open(filepath, "rb") as f:
@@ -6875,10 +6964,13 @@ def parse_cargo_lock(filepath):
                     continue
                 name = pkg.get("name")
                 version = pkg.get("version")
+                source = pkg.get("source")
                 if not name or not version:
                     continue
 
                 resolved.setdefault(name, set()).add(version)
+                if not source:
+                    local_packages.add(name)
 
                 deps = pkg.get("dependencies", [])
                 if isinstance(deps, list):
@@ -6894,7 +6986,7 @@ def parse_cargo_lock(filepath):
 
     resolved_clean = {k: list(v) for k, v in resolved.items()}
     parents_clean = {k: list(v) for k, v in parents.items()}
-    return resolved_clean, parents_clean
+    return CargoLockResult(resolved_clean, parents_clean, local_packages)
 
 
 def get_crates_index_url(crate_name):
@@ -6917,9 +7009,34 @@ def check_rust_package(target):
     name = target["name"]
     declared = target["declared"]
     installed_versions = target["installed"]
+    is_local = target.get("is_local", False) or (
+        declared
+        and str(declared).startswith((".", "/", "path:", "workspace:", "file:"))
+    )
 
     versions_to_check = installed_versions if installed_versions else [declared]
     results = []
+
+    # Handle local / path / internal workspace member crates without querying external registry
+    if is_local:
+        for ver_str in versions_to_check:
+            results.append(
+                {
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": "Local",
+                    "latest_same_major": None,
+                    "latest_absolute": None,
+                    "status": "local",
+                    "deprecated": None,
+                    "error": None,
+                    "repo_url": None,
+                    "compare_url": None,
+                    "releases_url": None,
+                }
+            )
+        return results
 
     try:
         all_versions = []
@@ -6948,6 +7065,27 @@ def check_rust_package(target):
                         pass
                 if all_versions:
                     fetched_index = True
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                # Private/internal crate not in public crates.io index
+                for ver_str in versions_to_check:
+                    results.append(
+                        {
+                            "name": name,
+                            "declared": declared,
+                            "installed": ver_str,
+                            "latest": "Local",
+                            "latest_same_major": None,
+                            "latest_absolute": None,
+                            "status": "local",
+                            "deprecated": None,
+                            "error": None,
+                            "repo_url": None,
+                            "compare_url": None,
+                            "releases_url": None,
+                        }
+                    )
+                return results
         except (urllib.error.URLError, OSError, TimeoutError):
             pass
 
@@ -7026,6 +7164,38 @@ def check_rust_package(target):
                     "releases_url": releases_url,
                 }
             )
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            for ver_str in versions_to_check:
+                results.append(
+                    {
+                        "name": name,
+                        "declared": declared,
+                        "installed": ver_str,
+                        "latest": "Local",
+                        "latest_same_major": None,
+                        "latest_absolute": None,
+                        "status": "local",
+                        "deprecated": None,
+                        "error": None,
+                        "repo_url": None,
+                        "compare_url": None,
+                        "releases_url": None,
+                    }
+                )
+        else:
+            for ver_str in versions_to_check:
+                results.append(
+                    {
+                        "name": name,
+                        "declared": ver_str,
+                        "installed": ver_str,
+                        "latest": "unknown",
+                        "status": "error",
+                        "deprecated": False,
+                        "error": _sanitize_error_message(e, name),
+                    }
+                )
     except Exception as e:
         for ver_str in versions_to_check:
             results.append(
@@ -7036,7 +7206,7 @@ def check_rust_package(target):
                     "latest": "unknown",
                     "status": "error",
                     "deprecated": False,
-                    "error": str(e),
+                    "error": _sanitize_error_message(e, name),
                 }
             )
 
@@ -7061,24 +7231,49 @@ def run_rust_checker(args):
         return None, None, 0
 
     print(f"{COLOR_GRAY}{ICON_INFO} Reading Cargo files...{COLOR_RESET}")
-    direct = parse_cargo_toml(toml_path)
-    resolved, parents = parse_cargo_lock(lock_path)
+    direct_deps = parse_cargo_toml(toml_path)
+    direct = set(direct_deps.keys()) if isinstance(direct_deps, dict) else set(direct_deps)
+    lock_result = parse_cargo_lock(lock_path)
+    resolved, parents = lock_result[0], lock_result[1]
+    local_packages = getattr(lock_result, "local_packages", set())
 
-    if not resolved and direct:
-        resolved = {name: ["0.0.0"] for name in direct}
+    if not resolved and direct_deps:
+        resolved = {
+            name: [
+                direct_deps.get(name)
+                if isinstance(direct_deps, dict)
+                and direct_deps.get(name)
+                and direct_deps.get(name) != "workspace"
+                and not str(direct_deps.get(name)).startswith(".")
+                else "0.0.0"
+            ]
+            for name in direct
+        }
 
-    pkg_data = {"all_direct": {name: name for name in direct}, "dependencies": resolved}
+    pkg_data = {
+        "all_direct": {
+            name: (direct_deps.get(name, name) if isinstance(direct_deps, dict) else name)
+            for name in direct
+        },
+        "dependencies": resolved,
+    }
 
     targets = []
     for name, versions in resolved.items():
         if not args.all and name not in direct:
             continue
-        declared = versions[0] if versions else None
+        declared = direct_deps.get(name) if isinstance(direct_deps, dict) else (versions[0] if versions else None)
+        is_local = (name in local_packages) or (
+            declared and str(declared).startswith((".", "/", "path:", "workspace:"))
+        )
+        if not declared or declared == "workspace" or str(declared).startswith("."):
+            declared = versions[0] if versions else "0.0.0"
         targets.append(
             {
                 "name": name,
                 "declared": declared,
                 "installed": versions if versions != ["0.0.0"] else [],
+                "is_local": is_local,
             }
         )
 
@@ -7109,6 +7304,10 @@ def run_rust_checker(args):
     for r in results:
         if r["name"] in direct:
             r["dep_type"] = "Direct"
+            if isinstance(direct_deps, dict) and direct_deps.get(r["name"]):
+                dec_val = direct_deps[r["name"]]
+                if dec_val != "workspace" and not str(dec_val).startswith("."):
+                    r["declared"] = dec_val
         else:
             r["dep_type"] = "Transitive"
             r["declared"] = None

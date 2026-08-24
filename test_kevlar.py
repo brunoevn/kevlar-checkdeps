@@ -3250,6 +3250,116 @@ class TestKevlar(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_cargo_workspace_resolution(self):
+        """Test Cargo workspace dependency resolution with root Cargo.lock and workspace.dependencies."""
+        import shutil
+        import tempfile
+        import types
+        from unittest.mock import MagicMock, patch
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            # 1. Setup workspace structure:
+            # temp_dir/Cargo.toml (workspace root)
+            # temp_dir/Cargo.lock (workspace lockfile)
+            # temp_dir/crates/sub_pkg/Cargo.toml (sub-crate referencing workspace)
+            root_toml_content = """
+            [workspace]
+            members = ["crates/sub_pkg"]
+
+            [workspace.dependencies]
+            serde = { version = "1.0.190", features = ["derive"] }
+            tokio = "1.32.0"
+            local_helper = { path = "crates/helper" }
+            """
+
+            root_lock_content = """
+            version = 3
+            [[package]]
+            name = "sub_pkg"
+            version = "0.1.0"
+            dependencies = ["serde", "tokio", "app_test_support"]
+
+            [[package]]
+            name = "serde"
+            version = "1.0.195"
+            source = "registry+https://github.com/rust-lang/crates.io-index"
+
+            [[package]]
+            name = "tokio"
+            version = "1.35.1"
+            source = "registry+https://github.com/rust-lang/crates.io-index"
+
+            [[package]]
+            name = "app_test_support"
+            version = "0.0.0"
+            """
+
+            sub_dir = os.path.join(temp_dir, "crates", "sub_pkg")
+            os.makedirs(sub_dir, exist_ok=True)
+
+            sub_toml_content = """
+            [package]
+            name = "sub_pkg"
+            version = "0.1.0"
+
+            [dependencies]
+            serde = { workspace = true }
+            tokio = { workspace = true }
+            app_test_support = { workspace = true }
+            """
+
+            root_toml_path = os.path.join(temp_dir, "Cargo.toml")
+            root_lock_path = os.path.join(temp_dir, "Cargo.lock")
+            sub_toml_path = os.path.join(sub_dir, "Cargo.toml")
+
+            with open(root_toml_path, "w", encoding="utf-8") as f:
+                f.write(root_toml_content)
+            with open(root_lock_path, "w", encoding="utf-8") as f:
+                f.write(root_lock_content)
+            with open(sub_toml_path, "w", encoding="utf-8") as f:
+                f.write(sub_toml_content)
+
+            # Test upward Cargo.lock discovery
+            found_toml, found_lock = kevlar.find_rust_files(sub_dir)
+            self.assertEqual(found_toml, sub_toml_path)
+            self.assertEqual(found_lock, root_lock_path)
+
+            # Test workspace.dependencies resolution in parse_cargo_toml
+            parsed_deps = kevlar.parse_cargo_toml(sub_toml_path)
+            self.assertIn("serde", parsed_deps)
+            self.assertIn("tokio", parsed_deps)
+            self.assertIn("app_test_support", parsed_deps)
+            self.assertEqual(parsed_deps["serde"], "1.0.190")
+            self.assertEqual(parsed_deps["tokio"], "1.32.0")
+
+            # Test run_rust_checker on sub-crate
+            sparse_lines = (
+                '{"name":"serde","vers":"1.0.195","yanked":false}\n'
+                '{"name":"tokio","vers":"1.35.1","yanked":false}\n'
+            )
+            args = types.SimpleNamespace(path=sub_dir, all=False, concurrent=2, vuls=False)
+            with patch("kevlar.safe_urlopen") as mock_url:
+                mock_resp = MagicMock()
+                mock_resp.read.return_value = sparse_lines.encode("utf-8")
+                mock_resp.__enter__.return_value = mock_resp
+                mock_url.return_value = mock_resp
+
+                results, pkg_data, _ = kevlar.run_rust_checker(args)
+                self.assertIsNotNone(results)
+                self.assertEqual(len(results), 3)
+                res_map = {r["name"]: r for r in results}
+                self.assertEqual(res_map["serde"]["declared"], "1.0.190")
+                self.assertEqual(res_map["serde"]["installed"], "1.0.195")
+                self.assertEqual(res_map["tokio"]["declared"], "1.32.0")
+                self.assertEqual(res_map["tokio"]["installed"], "1.35.1")
+                self.assertEqual(res_map["app_test_support"]["status"], "local")
+                self.assertEqual(res_map["app_test_support"]["latest"], "Local")
+                self.assertIsNone(res_map["app_test_support"]["error"])
+        finally:
+            shutil.rmtree(temp_dir)
+
+
     # --------------------------------------------------------------------------
     # PHP COMPOSER ECOSYSTEM TESTS
     # --------------------------------------------------------------------------
