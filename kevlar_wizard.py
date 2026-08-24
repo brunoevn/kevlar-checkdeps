@@ -1,15 +1,14 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
 """
 Kevlar Vulnerability Suppressions Configuration Wizard
 An interactive CLI utility to generate and maintain the kevlar-suppressions.json file.
 """
 
-import os
-import sys
 import json
+import os
 import re
-from datetime import datetime, date, timedelta
+import sys
+from datetime import date, datetime, timedelta
 
 
 # Safe terminal output wrapping to prevent UnicodeEncodeError on Windows
@@ -145,11 +144,10 @@ def prompt_string(
             )
             continue
 
-        if custom_validator:
-            if not custom_validator(val):
-                err = validator_err_msg or "Invalid input format."
-                print(f"{COLOR_RED}{ICON_ERROR} {err}{COLOR_RESET}")
-                continue
+        if custom_validator and not custom_validator(val):
+            err = validator_err_msg or "Invalid input format."
+            print(f"{COLOR_RED}{ICON_ERROR} {err}{COLOR_RESET}")
+            continue
 
         return val
 
@@ -207,7 +205,7 @@ def parse_selection(selection_str, max_val):
         else:
             return None
 
-    return sorted(list(indices))
+    return sorted(indices)
 
 
 def validate_suppressions_schema(data):
