@@ -9,6 +9,11 @@ import kevlar
 
 
 class TestKevlar(unittest.TestCase):
+    def setUp(self):
+        kevlar.clear_kevlar_cache()
+
+    def tearDown(self):
+        kevlar.clear_kevlar_cache()
 
     def test_parse_sln_path_traversal(self):
         import os
@@ -3792,6 +3797,124 @@ require (
             self.assertTrue(any("replace github.com/unknown/transitive =&gt; github.com/unknown/transitive v1.2.3" in item["html"] for item in override_diff["suggested_code"]))
         finally:
             shutil.rmtree(temp_dir)
+
+
+    # --------------------------------------------------------------------------
+    # MULTI-PROJECT IN-MEMORY CACHE TESTS
+    # --------------------------------------------------------------------------
+    def test_registry_metadata_and_target_cache(self):
+        """Test that identical targets and shared packages across projects use in-memory cache."""
+        import json
+        from unittest.mock import MagicMock, patch
+
+        target1 = {"name": "react", "declared": "^18.0.0", "installed": ["18.2.0"]}
+        target2 = {"name": "react", "declared": "^18.0.0", "installed": ["18.2.0"]}
+        target3 = {"name": "react", "declared": "^18.0.0", "installed": ["18.1.0"]}
+
+        npm_payload = {
+            "dist-tags": {"latest": "18.3.1"},
+            "versions": {
+                "18.1.0": {},
+                "18.2.0": {},
+                "18.3.1": {},
+            },
+        }
+
+        call_count = 0
+
+        def mock_urlopen(req, timeout=10):
+            nonlocal call_count
+            call_count += 1
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = json.dumps(npm_payload).encode("utf-8")
+            mock_resp.__enter__.return_value = mock_resp
+            return mock_resp
+
+        with patch("kevlar.safe_urlopen", side_effect=mock_urlopen):
+            # First call: populates both metadata cache and target cache
+            res1 = kevlar.check_npm_package(target1)
+            self.assertEqual(call_count, 1)
+            self.assertEqual(res1[0]["latest"], "18.3.1")
+            self.assertEqual(res1[0]["status"], "minor")
+
+            # Second call with identical target: uses target result cache (0 HTTP calls)
+            res2 = kevlar.check_npm_package(target2)
+            self.assertEqual(call_count, 1)
+            self.assertEqual(res2[0]["latest"], "18.3.1")
+
+            # Mutate res2 to verify cache isolation
+            res2[0]["status"] = "mutated"
+            res2_fresh = kevlar.check_npm_package(target2)
+            self.assertEqual(res2_fresh[0]["status"], "minor")
+
+            # Third call with different version: uses metadata cache (0 HTTP calls) and evaluates locally
+            res3 = kevlar.check_npm_package(target3)
+            self.assertEqual(call_count, 1)
+            self.assertEqual(res3[0]["installed"], "18.1.0")
+            self.assertEqual(res3[0]["status"], "minor")
+
+    def test_osv_vulnerabilities_cache_reusability(self):
+        """Test that OSV vulnerabilities batch querying reuses cached results across projects."""
+        import json
+        from unittest.mock import MagicMock, patch
+
+        targets_proj1 = [{"name": "lodash", "declared": "4.17.20", "installed": ["4.17.20"]}]
+        targets_proj2 = [{"name": "lodash", "declared": "4.17.20", "installed": ["4.17.20"]}]
+
+        batch_payload = {
+            "results": [
+                {
+                    "vulns": [
+                        {
+                            "id": "GHSA-cached-999",
+                            "summary": "Prototype pollution in lodash",
+                            "details": "Details...",
+                            "severity": [{"type": "CVSS_V3", "score": "9.8"}],
+                            "database_specific": {"severity": "CRITICAL"},
+                        }
+                    ]
+                }
+            ]
+        }
+
+        call_count = 0
+
+        def mock_urlopen(req, timeout=15):
+            nonlocal call_count
+            call_count += 1
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = json.dumps(batch_payload).encode("utf-8")
+            mock_resp.__enter__.return_value = mock_resp
+            return mock_resp
+
+        with patch("kevlar.safe_urlopen", side_effect=mock_urlopen):
+            # First run: queries OSV over network and caches result
+            res1 = kevlar.check_osv_vulnerabilities(targets_proj1, "npm", max_workers=2)
+            self.assertEqual(call_count, 1)
+            self.assertIn(("lodash", "4.17.20"), res1)
+            self.assertEqual(res1[("lodash", "4.17.20")][0]["id"], "GHSA-cached-999")
+
+            # Second run (simulating project 2): completely avoids network call
+            res2 = kevlar.check_osv_vulnerabilities(targets_proj2, "npm", max_workers=2)
+            self.assertEqual(call_count, 1)
+            self.assertIn(("lodash", "4.17.20"), res2)
+            self.assertEqual(res2[("lodash", "4.17.20")][0]["id"], "GHSA-cached-999")
+
+    def test_clear_kevlar_cache_flushes_all(self):
+        """Test that clear_kevlar_cache completely empties all in-memory cache stores."""
+        target = {"name": "serde", "declared": "1", "installed": ["1.0.228"]}
+        results = [{"name": "serde", "status": "up-to-date"}]
+
+        kevlar._set_cached_target_result("rust", target, results)
+        kevlar._set_cached_registry_metadata("rust", "serde", ["1.0.228"])
+
+        self.assertIsNotNone(kevlar._get_cached_target_result("rust", target))
+        self.assertIsNotNone(kevlar._get_cached_registry_metadata("rust", "serde"))
+
+        kevlar.clear_kevlar_cache()
+
+        self.assertIsNone(kevlar._get_cached_target_result("rust", target))
+        self.assertIsNone(kevlar._get_cached_registry_metadata("rust", "serde"))
 
 
 if __name__ == "__main__":

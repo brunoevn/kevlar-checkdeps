@@ -60,6 +60,67 @@ sys.stderr = SafeWriter(sys.stderr)
 # Global lock to protect concurrent console writes (sys.stdout, sys.stderr, print)
 console_lock = threading.Lock()
 
+# Multi-project cross-run in-memory caches
+_CACHE_LOCK = threading.Lock()
+_REGISTRY_METADATA_CACHE: Dict[Tuple[str, str], Any] = {}
+_TARGET_RESULTS_CACHE: Dict[
+    Tuple[str, str, Optional[str], Tuple[str, ...]], List[Dict[str, Any]]
+] = {}
+_OSV_VULNS_CACHE: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = {}
+_OSV_HYDRATED_DETAILS_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def clear_kevlar_cache():
+    """Clears all in-memory registry and vulnerability caches."""
+    with _CACHE_LOCK:
+        _REGISTRY_METADATA_CACHE.clear()
+        _TARGET_RESULTS_CACHE.clear()
+        _OSV_VULNS_CACHE.clear()
+        _OSV_HYDRATED_DETAILS_CACHE.clear()
+
+
+def _get_cached_target_result(
+    tech: str, target: Dict[str, Any]
+) -> Optional[List[Dict[str, Any]]]:
+    """Retrieves cached evaluated target result if available."""
+    name = str(target.get("name", "")).lower()
+    declared = target.get("declared")
+    installed = tuple(sorted(target.get("installed", [])))
+    key = (tech, name, declared, installed)
+    with _CACHE_LOCK:
+        if key in _TARGET_RESULTS_CACHE:
+            return [dict(item) for item in _TARGET_RESULTS_CACHE[key]]
+    return None
+
+
+def _set_cached_target_result(
+    tech: str, target: Dict[str, Any], results: List[Dict[str, Any]]
+) -> None:
+    """Caches evaluated target result."""
+    name = str(target.get("name", "")).lower()
+    declared = target.get("declared")
+    installed = tuple(sorted(target.get("installed", [])))
+    key = (tech, name, declared, installed)
+    with _CACHE_LOCK:
+        _TARGET_RESULTS_CACHE[key] = [dict(item) for item in results]
+
+
+def _get_cached_registry_metadata(tech: str, package_name: str) -> Optional[Any]:
+    """Retrieves cached package-level registry metadata."""
+    key = (tech, package_name.lower())
+    with _CACHE_LOCK:
+        return _REGISTRY_METADATA_CACHE.get(key)
+
+
+def _set_cached_registry_metadata(
+    tech: str, package_name: str, data: Any
+) -> None:
+    """Caches package-level registry metadata."""
+    key = (tech, package_name.lower())
+    with _CACHE_LOCK:
+        _REGISTRY_METADATA_CACHE[key] = data
+
+
 from typing import Any, Dict, List, Optional, Set, Tuple, TypedDict, Union
 
 
@@ -2478,6 +2539,10 @@ def find_direct_installed_version(
 
 def check_npm_package(target):
     """Queries npm registry for package metadata and checks target version."""
+    cached_res = _get_cached_target_result("npm", target)
+    if cached_res is not None:
+        return cached_res
+
     name = target["name"]
     declared = target["declared"]
     installed_versions = target["installed"]
@@ -2495,27 +2560,36 @@ def check_npm_package(target):
     results = []
 
     try:
-        # Properly URL-encode scoped packages (e.g. @babel/core -> @babel%2Fcore)
-        if name.startswith("@"):
-            parts = name.split("/")
-            if len(parts) == 2:
-                encoded_name = f"{parts[0]}%2F{parts[1]}"
+        # Check package-level metadata cache
+        cached_meta = _get_cached_registry_metadata("npm", name)
+        if cached_meta is not None:
+            latest_version, all_versions_meta = cached_meta
+            all_versions = list(all_versions_meta.keys())
+        else:
+            # Properly URL-encode scoped packages (e.g. @babel/core -> @babel%2Fcore)
+            if name.startswith("@"):
+                parts = name.split("/")
+                if len(parts) == 2:
+                    encoded_name = f"{parts[0]}%2F{parts[1]}"
+                else:
+                    encoded_name = urllib.parse.quote(name)
             else:
                 encoded_name = urllib.parse.quote(name)
-        else:
-            encoded_name = urllib.parse.quote(name)
 
-        url = f"{URL_NPM_REGISTRY}{encoded_name}"
-        req = urllib.request.Request(url)
-        # Use abbreviated metadata format header
-        req.add_header("Accept", "application/vnd.npm.install-v1+json")
+            url = f"{URL_NPM_REGISTRY}{encoded_name}"
+            req = urllib.request.Request(url)
+            # Use abbreviated metadata format header
+            req.add_header("Accept", "application/vnd.npm.install-v1+json")
 
-        with safe_urlopen(req, timeout=10) as response:
-            data = json.loads(response.read().decode("utf-8"))
+            with safe_urlopen(req, timeout=10) as response:
+                data = json.loads(response.read().decode("utf-8"))
 
-        latest_version = data.get("dist-tags", {}).get("latest")
-        all_versions_meta = data.get("versions", {})
-        all_versions = list(all_versions_meta.keys())
+            latest_version = data.get("dist-tags", {}).get("latest")
+            all_versions_meta = data.get("versions", {})
+            all_versions = list(all_versions_meta.keys())
+            _set_cached_registry_metadata(
+                "npm", name, (latest_version, all_versions_meta)
+            )
 
         for ver_str in versions_to_check:
             # If the version itself is explicitly local, we treat it as Local/local
@@ -2673,6 +2747,7 @@ def check_npm_package(target):
                 }
             )
 
+    _set_cached_target_result("npm", target, results)
     return results
 
 
@@ -2694,10 +2769,7 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
     """Checks vulnerabilities for all targets using OSV querybatch API.
     Returns a dict mapping (package_name, version) -> list of hydrated vulnerability dicts.
     """
-    print(
-        f"{COLOR_BOLD}{COLOR_CYAN}Querying OSV vulnerability database...{COLOR_RESET}\n"
-    )
-
+    final_package_to_vulns = {}
     queries = []
     query_mapping = []
 
@@ -2713,6 +2785,16 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
             if not clean_ver:
                 clean_ver = "0.0.0"
 
+            cache_key = (ecosystem, name.lower(), clean_ver)
+            with _CACHE_LOCK:
+                if cache_key in _OSV_VULNS_CACHE:
+                    cached_vulns = _OSV_VULNS_CACHE[cache_key]
+                    if cached_vulns:
+                        cached_copies = [dict(v) for v in cached_vulns]
+                        final_package_to_vulns[(name, ver_str)] = cached_copies
+                        final_package_to_vulns[(name, clean_ver)] = cached_copies
+                    continue
+
             queries.append(
                 {
                     "package": {"name": name, "ecosystem": ecosystem},
@@ -2722,7 +2804,11 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
             query_mapping.append((name, ver_str, clean_ver))
 
     if not queries:
-        return {}
+        return final_package_to_vulns
+
+    print(
+        f"{COLOR_BOLD}{COLOR_CYAN}Querying OSV vulnerability database...{COLOR_RESET}\n"
+    )
 
     results_list = []
     chunk_size = 1000
@@ -2756,6 +2842,9 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
 
     # Process batch results and collect vulnerability details
     hydrated_details = {}
+    with _CACHE_LOCK:
+        hydrated_details.update(_OSV_HYDRATED_DETAILS_CACHE)
+
     package_to_vuln_ids = {}
 
     total_results = len(results_list)
@@ -2801,7 +2890,12 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
                     vuln_id = vuln["id"]
                     ids.append(vuln_id)
                     hydrated_details[vuln_id] = vuln
+                    with _CACHE_LOCK:
+                        _OSV_HYDRATED_DETAILS_CACHE[vuln_id] = vuln
             package_to_vuln_ids[(name, clean_ver)] = ids
+        else:
+            # Explicitly store empty vuln list for clean packages
+            package_to_vuln_ids[(name, clean_ver)] = []
 
     # Clean current line after in-memory hydration
     sys.stdout.write("\r\033[K")
@@ -2851,12 +2945,13 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
 
                 vid_res, detail = future.result()
                 hydrated_details[vid_res] = detail
+                with _CACHE_LOCK:
+                    _OSV_HYDRATED_DETAILS_CACHE[vid_res] = detail
 
         sys.stdout.write("\r\033[K")
         sys.stdout.flush()
 
     # Map back to packages
-    package_to_vulns = {}
     for (name, clean_ver), vids in package_to_vuln_ids.items():
         vuln_list = []
         for vid in vids:
@@ -2946,9 +3041,21 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
         vuln_list.sort(
             key=lambda v: severity_order.get(get_severity_level(v), 0), reverse=True
         )
-        package_to_vulns[(name, clean_ver)] = vuln_list
 
-    return package_to_vulns
+        cache_key = (ecosystem, name.lower(), clean_ver)
+        with _CACHE_LOCK:
+            _OSV_VULNS_CACHE[cache_key] = vuln_list
+
+        if vuln_list:
+            final_package_to_vulns[(name, clean_ver)] = [dict(v) for v in vuln_list]
+
+    for name, ver_str, clean_ver in query_mapping:
+        if (name, clean_ver) in final_package_to_vulns:
+            final_package_to_vulns[(name, ver_str)] = final_package_to_vulns[
+                (name, clean_ver)
+            ]
+
+    return final_package_to_vulns
 
 
 def validate_suppressions_schema(data):
@@ -3788,6 +3895,10 @@ def parse_requirements_txt(filepath, seen_files=None, base_dir=None):
 
 def check_pypi_package(target):
     """Queries PyPI registry for package metadata and checks target version."""
+    cached_res = _get_cached_target_result("pip", target)
+    if cached_res is not None:
+        return cached_res
+
     name = target["name"]
     declared = target["declared"]
     installed_versions = target["installed"]
@@ -3796,17 +3907,51 @@ def check_pypi_package(target):
     results = []
 
     try:
-        encoded_name = urllib.parse.quote(name)
-        url = f"{URL_PYPI_REGISTRY}{encoded_name}/json"
+        cached_meta = _get_cached_registry_metadata("pip", name)
+        if cached_meta is not None:
+            latest_version, releases, repo_url_raw = cached_meta
+            all_versions = list(releases.keys())
+        else:
+            encoded_name = urllib.parse.quote(name)
+            url = f"{URL_PYPI_REGISTRY}{encoded_name}/json"
 
-        req = urllib.request.Request(url)
-        with safe_urlopen(req, timeout=10) as response:
-            data = json.loads(response.read().decode("utf-8"))
+            req = urllib.request.Request(url)
+            with safe_urlopen(req, timeout=10) as response:
+                data = json.loads(response.read().decode("utf-8"))
 
-        info = data.get("info", {})
-        latest_version = info.get("version")
-        releases = data.get("releases", {})
-        all_versions = list(releases.keys())
+            info = data.get("info", {})
+            latest_version = info.get("version")
+            releases = data.get("releases", {})
+            all_versions = list(releases.keys())
+
+            urls = info.get("project_urls") or {}
+            repo_url_raw = None
+            for key in ["Source", "Repository", "Code", "Homepage"]:
+                for k, v in urls.items():
+                    if (
+                        key.lower() in k.lower()
+                        and v
+                        and is_github_url(clean_repo_url(v))
+                    ):
+                        repo_url_raw = v
+                        break
+                if repo_url_raw:
+                    break
+            if not repo_url_raw:
+                hp = info.get("home_page")
+                if hp and is_github_url(clean_repo_url(hp)):
+                    repo_url_raw = hp
+            if not repo_url_raw:
+                for v in urls.values():
+                    if v and is_github_url(clean_repo_url(v)):
+                        repo_url_raw = v
+                        break
+            if not repo_url_raw:
+                repo_url_raw = info.get("home_page") or urls.get("Homepage")
+
+            _set_cached_registry_metadata(
+                "pip", name, (latest_version, releases, repo_url_raw)
+            )
 
         for ver_str in versions_to_check:
             # Clean version constraints prefixes
@@ -3842,31 +3987,7 @@ def check_pypi_package(target):
             compare_url = None
             releases_url = None
             if update_type in {"major", "minor-major", "patch-major"}:
-                urls = info.get("project_urls") or {}
-                raw_url = None
-                for key in ["Source", "Repository", "Code", "Homepage"]:
-                    for k, v in urls.items():
-                        if (
-                            key.lower() in k.lower()
-                            and v
-                            and is_github_url(clean_repo_url(v))
-                        ):
-                            raw_url = v
-                            break
-                    if raw_url:
-                        break
-                if not raw_url:
-                    hp = info.get("home_page")
-                    if hp and is_github_url(clean_repo_url(hp)):
-                        raw_url = hp
-                if not raw_url:
-                    for v in urls.values():
-                        if v and is_github_url(clean_repo_url(v)):
-                            raw_url = v
-                            break
-                if not raw_url:
-                    raw_url = info.get("home_page") or urls.get("Homepage")
-                repo_url = clean_repo_url(raw_url)
+                repo_url = clean_repo_url(repo_url_raw)
                 if repo_url:
                     compare_url = get_compare_url(repo_url, clean_ver, latest_absolute)
                     releases_url = (
@@ -3919,6 +4040,7 @@ def check_pypi_package(target):
                 }
             )
 
+    _set_cached_target_result("pip", target, results)
     return results
 
 
@@ -4622,6 +4744,10 @@ def parse_project_assets(filepath):
 
 def check_nuget_package(target):
     """Queries NuGet registry for package metadata and checks target version."""
+    cached_res = _get_cached_target_result("nuget", target)
+    if cached_res is not None:
+        return cached_res
+
     name = target["name"]
     declared = target["declared"]
     installed_versions = target["installed"]
@@ -4630,21 +4756,26 @@ def check_nuget_package(target):
     results = []
 
     try:
-        encoded_name = urllib.parse.quote(name.lower())
-        url = f"{URL_NUGET_REGISTRY}{encoded_name}/index.json"
+        cached_meta = _get_cached_registry_metadata("nuget", name)
+        if cached_meta is not None:
+            valid_versions = cached_meta
+        else:
+            encoded_name = urllib.parse.quote(name.lower())
+            url = f"{URL_NUGET_REGISTRY}{encoded_name}/index.json"
 
-        req = urllib.request.Request(url)
-        with safe_urlopen(req, timeout=10) as response:
-            data = json.loads(response.read().decode("utf-8"))
+            req = urllib.request.Request(url)
+            with safe_urlopen(req, timeout=10) as response:
+                data = json.loads(response.read().decode("utf-8"))
 
-        versions_list = data.get("versions", [])
+            versions_list = data.get("versions", [])
 
-        stable_versions = []
-        for v in versions_list:
-            if "-" not in v:
-                stable_versions.append(v)
+            stable_versions = []
+            for v in versions_list:
+                if "-" not in v:
+                    stable_versions.append(v)
 
-        valid_versions = stable_versions if stable_versions else versions_list
+            valid_versions = stable_versions if stable_versions else versions_list
+            _set_cached_registry_metadata("nuget", name, valid_versions)
 
         for ver_str in versions_to_check:
             clean_ver = RE_CLEAN_VER.sub("", ver_str) if ver_str else "0.0.0"
@@ -4718,6 +4849,7 @@ def check_nuget_package(target):
                 }
             )
 
+    _set_cached_target_result("nuget", target, results)
     return results
 
 
@@ -4911,6 +5043,10 @@ def parse_composer_lock(filepath):
 
 def check_composer_package(target):
     """Queries Packagist registry for composer package metadata."""
+    cached_res = _get_cached_target_result("php", target)
+    if cached_res is not None:
+        return cached_res
+
     name = target["name"]
     declared = target["declared"]
     installed_versions = target["installed"]
@@ -4919,31 +5055,36 @@ def check_composer_package(target):
     results = []
 
     try:
-        name_lower = name.lower()
-        url = f"{URL_PACKAGIST_REGISTRY}{name_lower}.json"
+        cached_meta = _get_cached_registry_metadata("php", name)
+        if cached_meta is not None:
+            valid_versions, pkg_data = cached_meta
+        else:
+            name_lower = name.lower()
+            url = f"{URL_PACKAGIST_REGISTRY}{name_lower}.json"
 
-        req = urllib.request.Request(url)
-        with safe_urlopen(req, timeout=10) as response:
-            data = json.loads(response.read().decode("utf-8"))
+            req = urllib.request.Request(url)
+            with safe_urlopen(req, timeout=10) as response:
+                data = json.loads(response.read().decode("utf-8"))
 
-        packages = data.get("packages", {})
-        pkg_data = packages.get(name_lower, [])
+            packages = data.get("packages", {})
+            pkg_data = packages.get(name_lower, [])
 
-        versions_list = []
-        for item in pkg_data:
-            v_str = item.get("version")
-            if v_str:
-                versions_list.append(v_str.lstrip("v"))
+            versions_list = []
+            for item in pkg_data:
+                v_str = item.get("version")
+                if v_str:
+                    versions_list.append(v_str.lstrip("v"))
 
-        stable_versions = []
-        for v in versions_list:
-            v_lower = v.lower()
-            if not any(
-                x in v_lower for x in ("-", "dev", "alpha", "beta", "rc", "patch")
-            ) and RE_DECIMAL_VER_STRICT.match(v):
-                stable_versions.append(v)
+            stable_versions = []
+            for v in versions_list:
+                v_lower = v.lower()
+                if not any(
+                    x in v_lower for x in ("-", "dev", "alpha", "beta", "rc", "patch")
+                ) and RE_DECIMAL_VER_STRICT.match(v):
+                    stable_versions.append(v)
 
-        valid_versions = stable_versions if stable_versions else versions_list
+            valid_versions = stable_versions if stable_versions else versions_list
+            _set_cached_registry_metadata("php", name, (valid_versions, pkg_data))
 
         for ver_str in versions_to_check:
             clean_ver = ver_str.lstrip("v") if ver_str else "0.0.0"
@@ -5029,6 +5170,7 @@ def check_composer_package(target):
                 }
             )
 
+    _set_cached_target_result("php", target, results)
     return results
 
 
@@ -5626,6 +5768,10 @@ def resolve_maven_transitive_dependencies(
 
 def check_maven_package(target):
     """Queries Maven Central Repository for package metadata."""
+    cached_res = _get_cached_target_result("maven", target)
+    if cached_res is not None:
+        return cached_res
+
     name = target["name"]
     declared = target["declared"]
     installed_versions = target["installed"]
@@ -5640,88 +5786,98 @@ def check_maven_package(target):
 
         group_id, artifact_id = name.split(":", 1)
         group_path = group_id.replace(".", "/")
-        use_google_maven = (
-            group_id.startswith(
-                ("androidx.", "com.google.android.", "com.android.", "android.arch.")
-            )
-            or "android" in group_id
-        )
 
-        xml_data = None
-        base_registries = (
-            [URL_GOOGLE_MAVEN, URL_MAVEN_REGISTRY]
-            if use_google_maven
-            else [URL_MAVEN_REGISTRY, URL_GOOGLE_MAVEN]
-        )
-        registries = []
-        if custom_registries:
-            for r in custom_registries:
+        cached_meta = _get_cached_registry_metadata("maven", name)
+        if cached_meta is not None:
+            valid_versions, successful_registry, group_path, artifact_id = cached_meta
+        else:
+            use_google_maven = (
+                group_id.startswith(
+                    ("androidx.", "com.google.android.", "com.android.", "android.arch.")
+                )
+                or "android" in group_id
+            )
+
+            xml_data = None
+            base_registries = (
+                [URL_GOOGLE_MAVEN, URL_MAVEN_REGISTRY]
+                if use_google_maven
+                else [URL_MAVEN_REGISTRY, URL_GOOGLE_MAVEN]
+            )
+            registries = []
+            if custom_registries:
+                for r in custom_registries:
+                    if r not in registries:
+                        registries.append(r)
+            for r in base_registries:
                 if r not in registries:
                     registries.append(r)
-        for r in base_registries:
-            if r not in registries:
-                registries.append(r)
 
-        last_error = None
-        successful_registry = URL_MAVEN_REGISTRY
-        for registry_url in registries:
-            url = f"{registry_url}{group_path}/{artifact_id}/maven-metadata.xml"
-            try:
-                req = urllib.request.Request(url)
-                req.add_header("User-Agent", f"Kevlar-CheckDeps/{VERSION}")
-                with safe_urlopen(req, timeout=10) as response:
-                    xml_data = response.read()
-                successful_registry = registry_url
-                break
-            except Exception as e:
-                last_error = e
-                continue
+            last_error = None
+            successful_registry = URL_MAVEN_REGISTRY
+            for registry_url in registries:
+                url = f"{registry_url}{group_path}/{artifact_id}/maven-metadata.xml"
+                try:
+                    req = urllib.request.Request(url)
+                    req.add_header("User-Agent", f"Kevlar-CheckDeps/{VERSION}")
+                    with safe_urlopen(req, timeout=10) as response:
+                        xml_data = response.read()
+                    successful_registry = registry_url
+                    break
+                except Exception as e:
+                    last_error = e
+                    continue
 
-        versions_list = []
-        if xml_data is not None:
-            root = safe_et_fromstring(xml_data)
-            versioning_elem = root.find("versioning")
-            if versioning_elem is not None:
-                versions_elem = versioning_elem.find("versions")
-                if versions_elem is not None:
-                    for v in versions_elem.findall("version"):
-                        if v.text:
-                            versions_list.append(v.text.strip())
-        else:
-            # Fallback to search.maven.org API for legacy packages lacking maven-metadata.xml
-            try:
-                solr_url = f"https://search.maven.org/solrsearch/select?q=g:%22{group_id}%22+AND+a:%22{artifact_id}%22&wt=json"
-                req = urllib.request.Request(solr_url)
-                req.add_header("User-Agent", f"Kevlar-CheckDeps/{VERSION}")
-                with safe_urlopen(req, timeout=10) as response:
-                    solr_data = json.loads(response.read().decode("utf-8"))
-                docs = solr_data.get("response", {}).get("docs", [])
-                for doc in docs:
-                    v_val = doc.get("v") or doc.get("latestVersion")
-                    if v_val:
-                        versions_list.append(str(v_val))
-            except Exception as solr_err:
-                last_error = solr_err
-
-        if not versions_list:
-            raise ValueError(
-                f"Failed to fetch metadata from Maven or Google registries: {last_error or 'Not found'}"
-            )
-
-        stable_versions = []
-        for v in versions_list:
-            v_lower = v.lower()
-            is_prerelease = False
-            if "snapshot" in v_lower:
-                is_prerelease = True
+            versions_list = []
+            if xml_data is not None:
+                root = safe_et_fromstring(xml_data)
+                versioning_elem = root.find("versioning")
+                if versioning_elem is not None:
+                    versions_elem = versioning_elem.find("versions")
+                    if versions_elem is not None:
+                        for v in versions_elem.findall("version"):
+                            if v.text:
+                                versions_list.append(v.text.strip())
             else:
-                m = RE_MAVEN_PRERELEASE.search(v_lower)
-                if m:
-                    is_prerelease = True
-            if not is_prerelease:
-                stable_versions.append(v)
+                # Fallback to search.maven.org API for legacy packages lacking maven-metadata.xml
+                try:
+                    solr_url = f"https://search.maven.org/solrsearch/select?q=g:%22{group_id}%22+AND+a:%22{artifact_id}%22&wt=json"
+                    req = urllib.request.Request(solr_url)
+                    req.add_header("User-Agent", f"Kevlar-CheckDeps/{VERSION}")
+                    with safe_urlopen(req, timeout=10) as response:
+                        solr_data = json.loads(response.read().decode("utf-8"))
+                    docs = solr_data.get("response", {}).get("docs", [])
+                    for doc in docs:
+                        v_val = doc.get("v") or doc.get("latestVersion")
+                        if v_val:
+                            versions_list.append(str(v_val))
+                except Exception as solr_err:
+                    last_error = solr_err
 
-        valid_versions = stable_versions if stable_versions else versions_list
+            if not versions_list:
+                raise ValueError(
+                    f"Failed to fetch metadata from Maven or Google registries: {last_error or 'Not found'}"
+                )
+
+            stable_versions = []
+            for v in versions_list:
+                v_lower = v.lower()
+                is_prerelease = False
+                if "snapshot" in v_lower:
+                    is_prerelease = True
+                else:
+                    m = RE_MAVEN_PRERELEASE.search(v_lower)
+                    if m:
+                        is_prerelease = True
+                if not is_prerelease:
+                    stable_versions.append(v)
+
+            valid_versions = stable_versions if stable_versions else versions_list
+            _set_cached_registry_metadata(
+                "maven",
+                name,
+                (valid_versions, successful_registry, group_path, artifact_id),
+            )
 
         for ver_str in versions_to_check:
             clean_ver = RE_CLEAN_VER.sub("", ver_str) if ver_str else "0.0.0"
@@ -5797,6 +5953,7 @@ def check_maven_package(target):
                 }
             )
 
+    _set_cached_target_result("maven", target, results)
     return results
 
 
@@ -6254,6 +6411,10 @@ def parse_go_mod(filepath):
 
 def check_go_package(target):
     """Queries proxy.golang.org for Go module versions list."""
+    cached_res = _get_cached_target_result("go", target)
+    if cached_res is not None:
+        return cached_res
+
     name = target["name"]
     declared = target["declared"]
     installed_versions = target["installed"]
@@ -6264,24 +6425,29 @@ def check_go_package(target):
     results = []
 
     try:
-        candidate_name = name
-        resp_data = None
+        cached_meta = _get_cached_registry_metadata("go", name)
+        if cached_meta is not None:
+            versions_list = cached_meta
+        else:
+            candidate_name = name
+            resp_data = None
 
-        while True:
-            try:
-                escaped_name = escape_go_module(candidate_name)
-                url = f"{URL_GO_PROXY}{escaped_name}/@v/list"
-                req = urllib.request.Request(url)
-                with safe_urlopen(req, timeout=10) as response:
-                    resp_data = response.read().decode("utf-8")
-                break
-            except urllib.error.HTTPError as err:
-                if err.code == 404 and "/" in candidate_name:
-                    candidate_name = candidate_name.rsplit("/", 1)[0]
-                else:
-                    raise
+            while True:
+                try:
+                    escaped_name = escape_go_module(candidate_name)
+                    url = f"{URL_GO_PROXY}{escaped_name}/@v/list"
+                    req = urllib.request.Request(url)
+                    with safe_urlopen(req, timeout=10) as response:
+                        resp_data = response.read().decode("utf-8")
+                    break
+                except urllib.error.HTTPError as err:
+                    if err.code == 404 and "/" in candidate_name:
+                        candidate_name = candidate_name.rsplit("/", 1)[0]
+                    else:
+                        raise
 
-        versions_list = [v.strip() for v in resp_data.split("\n") if v.strip()]
+            versions_list = [v.strip() for v in resp_data.split("\n") if v.strip()]
+            _set_cached_registry_metadata("go", name, versions_list)
 
         stable_versions = []
         for v in versions_list:
@@ -6386,6 +6552,7 @@ def check_go_package(target):
                 }
             )
 
+    _set_cached_target_result("go", target, results)
     return results
 
 
@@ -7006,6 +7173,10 @@ def get_crates_index_url(crate_name):
 
 def check_rust_package(target):
     """Queries crates.io index/API for crate metadata and checks target version."""
+    cached_res = _get_cached_target_result("rust", target)
+    if cached_res is not None:
+        return cached_res
+
     name = target["name"]
     declared = target["declared"]
     installed_versions = target["installed"]
@@ -7036,80 +7207,92 @@ def check_rust_package(target):
                     "releases_url": None,
                 }
             )
+        _set_cached_target_result("rust", target, results)
         return results
 
     try:
-        all_versions = []
-        yanked_versions = set()
-        repo_url_raw = None
-        latest_version = None
+        cached_meta = _get_cached_registry_metadata("rust", name)
+        if cached_meta is not None:
+            all_versions, yanked_versions, latest_version, repo_url_raw = cached_meta
+        else:
+            all_versions = []
+            yanked_versions = set()
+            repo_url_raw = None
+            latest_version = None
 
-        # 1. Primary: Fast official CDN Cargo sparse index (no rate limits)
-        url_index = get_crates_index_url(name)
-        req_index = urllib.request.Request(url_index)
-        fetched_index = False
-        try:
-            with safe_urlopen(req_index, timeout=10) as response:
-                content = response.read().decode("utf-8", errors="ignore")
-                for line in content.strip().split("\n"):
-                    if not line.strip():
-                        continue
-                    try:
-                        v_data = json.loads(line)
-                        v_num = v_data.get("vers")
-                        if v_num:
-                            all_versions.append(v_num)
-                            if v_data.get("yanked"):
-                                yanked_versions.add(v_num)
-                    except (json.JSONDecodeError, KeyError, ValueError):
-                        pass
-                if all_versions:
-                    fetched_index = True
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                # Private/internal crate not in public crates.io index
-                for ver_str in versions_to_check:
-                    results.append(
-                        {
-                            "name": name,
-                            "declared": declared,
-                            "installed": ver_str,
-                            "latest": "Local",
-                            "latest_same_major": None,
-                            "latest_absolute": None,
-                            "status": "local",
-                            "deprecated": None,
-                            "error": None,
-                            "repo_url": None,
-                            "compare_url": None,
-                            "releases_url": None,
-                        }
-                    )
-                return results
-        except (urllib.error.URLError, OSError, TimeoutError):
-            pass
+            # 1. Primary: Fast official CDN Cargo sparse index (no rate limits)
+            url_index = get_crates_index_url(name)
+            req_index = urllib.request.Request(url_index)
+            fetched_index = False
+            try:
+                with safe_urlopen(req_index, timeout=10) as response:
+                    content = response.read().decode("utf-8", errors="ignore")
+                    for line in content.strip().split("\n"):
+                        if not line.strip():
+                            continue
+                        try:
+                            v_data = json.loads(line)
+                            v_num = v_data.get("vers")
+                            if v_num:
+                                all_versions.append(v_num)
+                                if v_data.get("yanked"):
+                                    yanked_versions.add(v_num)
+                        except (json.JSONDecodeError, KeyError, ValueError):
+                            pass
+                    if all_versions:
+                        fetched_index = True
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    # Private/internal crate not in public crates.io index
+                    for ver_str in versions_to_check:
+                        results.append(
+                            {
+                                "name": name,
+                                "declared": declared,
+                                "installed": ver_str,
+                                "latest": "Local",
+                                "latest_same_major": None,
+                                "latest_absolute": None,
+                                "status": "local",
+                                "deprecated": None,
+                                "error": None,
+                                "repo_url": None,
+                                "compare_url": None,
+                                "releases_url": None,
+                            }
+                        )
+                    _set_cached_target_result("rust", target, results)
+                    return results
+            except (urllib.error.URLError, OSError, TimeoutError):
+                pass
 
-        # 2. Fallback: REST API if sparse index call failed or returned no versions
-        if not fetched_index:
-            url = f"{URL_RUST_REGISTRY}{urllib.parse.quote(name)}"
-            req = urllib.request.Request(url)
-            req.add_header("User-Agent", f"Kevlar-CheckDeps/{VERSION}")
+            # 2. Fallback: REST API if sparse index call failed or returned no versions
+            if not fetched_index:
+                url = f"{URL_RUST_REGISTRY}{urllib.parse.quote(name)}"
+                req = urllib.request.Request(url)
+                req.add_header("User-Agent", f"Kevlar-CheckDeps/{VERSION}")
 
-            with safe_urlopen(req, timeout=10) as response:
-                data = json.loads(response.read().decode("utf-8"))
+                with safe_urlopen(req, timeout=10) as response:
+                    data = json.loads(response.read().decode("utf-8"))
 
-            crate_info = data.get("crate", {})
-            latest_version = crate_info.get("max_stable_version") or crate_info.get(
-                "max_version"
+                crate_info = data.get("crate", {})
+                latest_version = crate_info.get("max_stable_version") or crate_info.get(
+                    "max_version"
+                )
+                repo_url_raw = crate_info.get("repository") or crate_info.get("homepage")
+
+                versions_meta = data.get("versions", [])
+                for v_meta in versions_meta:
+                    if v_meta.get("yanked"):
+                        yanked_versions.add(v_meta.get("num"))
+
+                all_versions = [v.get("num") for v in versions_meta if v.get("num")]
+
+            _set_cached_registry_metadata(
+                "rust",
+                name,
+                (all_versions, yanked_versions, latest_version, repo_url_raw),
             )
-            repo_url_raw = crate_info.get("repository") or crate_info.get("homepage")
-
-            versions_meta = data.get("versions", [])
-            for v_meta in versions_meta:
-                if v_meta.get("yanked"):
-                    yanked_versions.add(v_meta.get("num"))
-
-            all_versions = [v.get("num") for v in versions_meta if v.get("num")]
 
         for ver_str in versions_to_check:
             clean_ver = RE_CLEAN_VER.sub("", ver_str) if ver_str else "0.0.0"
@@ -7210,6 +7393,7 @@ def check_rust_package(target):
                 }
             )
 
+    _set_cached_target_result("rust", target, results)
     return results
 
 
@@ -7448,6 +7632,10 @@ def parse_gemfile_lock(filepath):
 
 def check_ruby_package(target):
     """Queries rubygems.org API for package metadata and checks target version."""
+    cached_res = _get_cached_target_result("ruby", target)
+    if cached_res is not None:
+        return cached_res
+
     name = target["name"]
     declared = target["declared"]
     installed_versions = target["installed"]
@@ -7456,46 +7644,61 @@ def check_ruby_package(target):
     results = []
 
     try:
-        try:
-            url_versions = (
-                f"https://rubygems.org/api/v1/versions/{urllib.parse.quote(name)}.json"
-            )
-            req_v = urllib.request.Request(url_versions)
-            with safe_urlopen(req_v, timeout=10) as response:
-                versions_data = json.loads(response.read().decode("utf-8"))
+        cached_meta = _get_cached_registry_metadata("ruby", name)
+        if cached_meta is not None:
+            valid_versions, repo_url_raw = cached_meta
+        else:
+            repo_url_raw = None
+            try:
+                url_versions = (
+                    f"https://rubygems.org/api/v1/versions/{urllib.parse.quote(name)}.json"
+                )
+                req_v = urllib.request.Request(url_versions)
+                with safe_urlopen(req_v, timeout=10) as response:
+                    versions_data = json.loads(response.read().decode("utf-8"))
 
-            stable_versions = []
-            all_versions = []
-            for item in versions_data:
-                v_num = item.get("number")
-                if v_num:
-                    all_versions.append(v_num)
-                    if not item.get("prerelease"):
-                        stable_versions.append(v_num)
-            valid_versions = stable_versions if stable_versions else all_versions
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                raise
-            try:
-                url_fallback = f"{URL_RUBY_REGISTRY}{urllib.parse.quote(name)}.json"
-                req_fb = urllib.request.Request(url_fallback)
-                with safe_urlopen(req_fb, timeout=10) as response:
-                    data_fb = json.loads(response.read().decode("utf-8"))
-                latest_version = data_fb.get("version")
-                valid_versions = [latest_version] if latest_version else []
+                stable_versions = []
+                all_versions = []
+                for item in versions_data:
+                    v_num = item.get("number")
+                    if v_num:
+                        all_versions.append(v_num)
+                        if not item.get("prerelease"):
+                            stable_versions.append(v_num)
+                valid_versions = stable_versions if stable_versions else all_versions
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    raise
+                try:
+                    url_fallback = f"{URL_RUBY_REGISTRY}{urllib.parse.quote(name)}.json"
+                    req_fb = urllib.request.Request(url_fallback)
+                    with safe_urlopen(req_fb, timeout=10) as response:
+                        data_fb = json.loads(response.read().decode("utf-8"))
+                    latest_version = data_fb.get("version")
+                    valid_versions = [latest_version] if latest_version else []
+                    repo_url_raw = data_fb.get("source_code_uri") or data_fb.get(
+                        "homepage_uri"
+                    )
+                except Exception:
+                    valid_versions = []
             except Exception:
-                valid_versions = []
-        except Exception:
-            # Fallback to single latest version endpoint
-            try:
-                url_fallback = f"{URL_RUBY_REGISTRY}{urllib.parse.quote(name)}.json"
-                req_fb = urllib.request.Request(url_fallback)
-                with safe_urlopen(req_fb, timeout=10) as response:
-                    data_fb = json.loads(response.read().decode("utf-8"))
-                latest_version = data_fb.get("version")
-                valid_versions = [latest_version] if latest_version else []
-            except Exception:
-                valid_versions = []
+                # Fallback to single latest version endpoint
+                try:
+                    url_fallback = f"{URL_RUBY_REGISTRY}{urllib.parse.quote(name)}.json"
+                    req_fb = urllib.request.Request(url_fallback)
+                    with safe_urlopen(req_fb, timeout=10) as response:
+                        data_fb = json.loads(response.read().decode("utf-8"))
+                    latest_version = data_fb.get("version")
+                    valid_versions = [latest_version] if latest_version else []
+                    repo_url_raw = data_fb.get("source_code_uri") or data_fb.get(
+                        "homepage_uri"
+                    )
+                except Exception:
+                    valid_versions = []
+
+            _set_cached_registry_metadata(
+                "ruby", name, (valid_versions, repo_url_raw)
+            )
 
         for ver_str in versions_to_check:
             clean_ver = RE_CLEAN_VER.sub("", ver_str) if ver_str else "0.0.0"
@@ -7516,26 +7719,27 @@ def check_ruby_package(target):
             compare_url = None
             releases_url = None
             if status in {"major", "minor-major", "patch-major"}:
-                try:
-                    url_gem = f"https://rubygems.org/api/v1/gems/{urllib.parse.quote(name)}.json"
-                    req_g = urllib.request.Request(url_gem)
-                    with safe_urlopen(req_g, timeout=5) as response:
-                        data_g = json.loads(response.read().decode("utf-8"))
-                    raw_url = data_g.get("source_code_uri") or data_g.get(
-                        "homepage_uri"
+                if not repo_url_raw:
+                    try:
+                        url_gem = f"https://rubygems.org/api/v1/gems/{urllib.parse.quote(name)}.json"
+                        req_g = urllib.request.Request(url_gem)
+                        with safe_urlopen(req_g, timeout=5) as response:
+                            data_g = json.loads(response.read().decode("utf-8"))
+                        repo_url_raw = data_g.get("source_code_uri") or data_g.get(
+                            "homepage_uri"
+                        )
+                    except (KeyError, ValueError, TypeError):
+                        pass
+                repo_url = clean_repo_url(repo_url_raw)
+                if repo_url:
+                    compare_url = get_compare_url(
+                        repo_url, clean_ver, latest_absolute
                     )
-                    repo_url = clean_repo_url(raw_url)
-                    if repo_url:
-                        compare_url = get_compare_url(
-                            repo_url, clean_ver, latest_absolute
-                        )
-                        releases_url = (
-                            f"{repo_url}/releases"
-                            if is_github_url(repo_url)
-                            else repo_url
-                        )
-                except (KeyError, ValueError, TypeError):
-                    pass
+                    releases_url = (
+                        f"{repo_url}/releases"
+                        if is_github_url(repo_url)
+                        else repo_url
+                    )
 
             display_latest = format_latest_versions(latest_same_major, latest_absolute)
             results.append(
@@ -7604,6 +7808,7 @@ def check_ruby_package(target):
                 }
             )
 
+    _set_cached_target_result("ruby", target, results)
     return results
 
 
