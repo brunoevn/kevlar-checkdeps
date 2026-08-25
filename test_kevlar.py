@@ -3916,9 +3916,150 @@ require (
         self.assertIsNone(kevlar._get_cached_target_result("rust", target))
         self.assertIsNone(kevlar._get_cached_registry_metadata("rust", "serde"))
 
+    def test_ruby_rails_core_gem_remediation(self):
+        """Test that SCA remediation for Rails core submodules (e.g. activestorage) targets the rails gem and produces bundle update commands."""
+        import shutil
+        import tempfile
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            gemfile_content = (
+                "source 'https://rubygems.org'\n\n"
+                "gem 'rails', '~> 7.2.2'\n"
+                "gem 'pg', '~> 1.1'\n"
+            )
+            gemfile_path = os.path.join(temp_dir, "Gemfile")
+            with open(gemfile_path, "w", encoding="utf-8") as f:
+                f.write(gemfile_content)
+
+            results = [
+                {
+                    "name": "rails",
+                    "declared": "~> 7.2.2",
+                    "installed": ["7.2.2.1"],
+                    "status": "minor",
+                    "technology": "ruby",
+                    "project_path": temp_dir,
+                    "dep_type": "Direct",
+                    "latest_patch": "7.2.2.2",
+                    "latest_same_major": "7.2.3.2",
+                    "latest_absolute": "8.0.1",
+                    "vulnerabilities": [],
+                    "deprecated": False,
+                },
+                {
+                    "name": "activestorage",
+                    "declared": "7.2.2.1",
+                    "installed": ["7.2.2.1"],
+                    "status": "minor",
+                    "technology": "ruby",
+                    "project_path": temp_dir,
+                    "dep_type": "Transitive",
+                    "required_by": ["rails"],
+                    "latest_patch": "7.2.2.2",
+                    "latest_same_major": "7.2.3.2",
+                    "latest_absolute": "8.0.1",
+                    "vulnerabilities": [{"id": "CVE-2026-9999"}],
+                    "deprecated": False,
+                },
+            ]
+
+            kevlar.populate_remediation_recommendations(results, temp_dir)
+
+            as_rem = results[1].get("remediation")
+            self.assertIsNotNone(as_rem)
+            strategies = as_rem.get("strategies", [])
+            self.assertTrue(any(s["id"] == "rails_upgrade" for s in strategies))
+
+            rails_st = next(s for s in strategies if s["id"] == "rails_upgrade")
+            self.assertTrue(rails_st.get("is_recommended"))
+            self.assertIn("bundle update rails activestorage", rails_st.get("command", ""))
+            self.assertIn("rails test", rails_st.get("validation", ""))
+            self.assertIn("version coupling", rails_st.get("diagnostic", ""))
+
+            # Verify safe diff targets rails line in Gemfile and does NOT append activestorage
+            safe_diff = as_rem.get("safe")
+            self.assertIsNotNone(safe_diff)
+            self.assertEqual(safe_diff.get("manifest_path"), gemfile_path)
+            self.assertFalse(safe_diff.get("is_addition", False))
+
+            suggested_code_lines = [
+                row.get("html", "") for row in safe_diff.get("suggested_code", [])
+            ]
+            # Must update 'rails', NOT append 'activestorage'
+            self.assertTrue(any("rails" in line and "7.2.2.2" in line for line in suggested_code_lines))
+            self.assertFalse(any("activestorage" in line for line in suggested_code_lines))
+
+            # Verify minor option targets rails 7.2.3.2
+            minor_opt = next(o for o in as_rem.get("options", []) if o.get("id") == "minor")
+            minor_suggested_lines = [
+                row.get("html", "") for row in minor_opt.get("diff", {}).get("suggested_code", [])
+            ]
+            self.assertTrue(any("rails" in line and "7.2.3.2" in line for line in minor_suggested_lines))
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_ruby_transitive_non_rails_gem_remediation(self):
+        """Test that SCA remediation for non-Rails transitive Ruby dependencies uses lockfile bundle update rather than loose additions."""
+        import shutil
+        import tempfile
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            gemfile_content = (
+                "source 'https://rubygems.org'\n\n"
+                "gem 'devise', '~> 4.9.0'\n"
+            )
+            gemfile_path = os.path.join(temp_dir, "Gemfile")
+            with open(gemfile_path, "w", encoding="utf-8") as f:
+                f.write(gemfile_content)
+
+            results = [
+                {
+                    "name": "devise",
+                    "declared": "~> 4.9.0",
+                    "installed": ["4.9.3"],
+                    "status": "up-to-date",
+                    "technology": "ruby",
+                    "project_path": temp_dir,
+                    "dep_type": "Direct",
+                    "vulnerabilities": [],
+                    "deprecated": False,
+                },
+                {
+                    "name": "zeitwerk",
+                    "declared": "2.6.0",
+                    "installed": ["2.6.0"],
+                    "status": "minor",
+                    "technology": "ruby",
+                    "project_path": temp_dir,
+                    "dep_type": "Transitive",
+                    "required_by": ["devise"],
+                    "latest_patch": None,
+                    "latest_same_major": "2.6.18",
+                    "latest_absolute": "2.7.0",
+                    "vulnerabilities": [{"id": "CVE-2026-1111"}],
+                    "deprecated": False,
+                },
+            ]
+
+            kevlar.populate_remediation_recommendations(results, temp_dir)
+
+            z_rem = results[1].get("remediation")
+            self.assertIsNotNone(z_rem)
+            strategies = z_rem.get("strategies", [])
+            self.assertTrue(any(s["id"] == "bundle_update" for s in strategies))
+
+            lock_st = next(s for s in strategies if s["id"] == "bundle_update")
+            self.assertIn("bundle update zeitwerk", lock_st.get("command", ""))
+            self.assertIn("transitive", lock_st.get("diagnostic", ""))
+        finally:
+            shutil.rmtree(temp_dir)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 
