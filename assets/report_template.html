@@ -1118,8 +1118,76 @@
             padding: 10px 16px;
             font-family: monospace;
             font-size: 14px;
-            margin-bottom: 20px;
+            margin-bottom: 12px;
             color: #e2e8f0;
+        }
+
+        .modal-diagnostic {
+            background-color: rgba(245, 158, 11, 0.1);
+            border: 1px solid rgba(245, 158, 11, 0.3);
+            border-radius: 8px;
+            padding: 12px 16px;
+            margin-bottom: 16px;
+            font-size: 13px;
+            line-height: 1.5;
+            color: #fef3c7;
+            display: flex;
+            gap: 10px;
+            align-items: flex-start;
+        }
+
+        .modal-command-box {
+            background-color: #0b0f19;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 10px 14px;
+            margin-bottom: 16px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .modal-command-code {
+            font-family: 'JetBrains Mono', Consolas, monospace;
+            font-size: 13px;
+            color: #38bdf8;
+            word-break: break-all;
+        }
+
+        .modal-copy-btn {
+            background-color: #1e293b;
+            border: 1px solid var(--border-color);
+            color: #94a3b8;
+            border-radius: 6px;
+            padding: 5px 10px;
+            font-size: 11px;
+            font-weight: 600;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            transition: all 0.2s;
+            flex-shrink: 0;
+        }
+
+        .modal-copy-btn:hover {
+            background-color: #334155;
+            color: #ffffff;
+            border-color: var(--primary);
+        }
+
+        .modal-validation-box {
+            background-color: rgba(16, 185, 129, 0.08);
+            border: 1px solid rgba(16, 185, 129, 0.25);
+            border-radius: 8px;
+            padding: 10px 14px;
+            margin-bottom: 16px;
+            font-size: 12px;
+            color: #a7f3d0;
+            display: flex;
+            align-items: center;
+            gap: 8px;
         }
         
         .modal-diff-container {
@@ -2437,6 +2505,17 @@
             const strategyContainer = document.getElementById('modal-strategy-tabs-container');
             const levelContainer = document.getElementById('modal-level-tabs-container');
             const legacyTabsContainer = document.getElementById('modal-tabs-container');
+            const diagContainer = document.getElementById('modal-diagnostic-container');
+            const diagText = document.getElementById('modal-diagnostic-text');
+            const cmdContainer = document.getElementById('modal-command-container');
+            const cmdText = document.getElementById('modal-command-text');
+            const valContainer = document.getElementById('modal-validation-container');
+            const valText = document.getElementById('modal-validation-text');
+            const locContainer = document.getElementById('modal-location-container');
+            const diffWrapper = document.getElementById('modal-diff-wrapper');
+
+            let activeSt = null;
+            let activeOpt = null;
 
             if (info.strategies && info.strategies.length > 0) {
                 legacyTabsContainer.style.display = 'none';
@@ -2444,7 +2523,7 @@
                 if (activeStrategyIndex >= info.strategies.length) {
                     activeStrategyIndex = 0;
                 }
-                const st = info.strategies[activeStrategyIndex];
+                activeSt = info.strategies[activeStrategyIndex];
 
                 // Render Strategy Tabs
                 if (info.strategies.length > 1) {
@@ -2459,7 +2538,7 @@
                 }
 
                 // Render Level Options for active strategy
-                const options = st.options || [];
+                const options = activeSt.options || [];
                 if (activeOptionIndex >= options.length) {
                     activeOptionIndex = 0;
                 }
@@ -2472,15 +2551,7 @@
                         const badgeHtml = '<span class="v-chip ' + bCls + '" style="font-size: 10px; padding: 2px 6px; margin-right: 4px;">' + escapeHtml(opt.badge || opt.id) + '</span>';
                         return '<button class="modal-level-tab' + activeCls + '" onclick="switchRemediationLevel(' + oIdx + ')">' + badgeHtml + ' ' + escapeHtml(opt.label) + '</button>';
                     }).join('');
-
-                    const activeOpt = options[activeOptionIndex];
-                    if (activeOpt && activeOpt.diff) {
-                        const filepathEl = document.getElementById('modal-filepath');
-                        if (filepathEl) {
-                            filepathEl.textContent = activeOpt.diff.display_path || (activeOpt.diff.manifest_path + ':' + activeOpt.diff.line_number);
-                        }
-                        renderDiff(activeOpt.diff);
-                    }
+                    activeOpt = options[activeOptionIndex];
                 } else {
                     levelContainer.style.display = 'none';
                 }
@@ -2489,48 +2560,109 @@
                 levelContainer.style.display = 'none';
                 legacyTabsContainer.style.display = 'flex';
                 
-                const firstValid = info.options[0].diff;
-                if (firstValid) {
-                    document.getElementById('modal-filepath').textContent = firstValid.display_path || (firstValid.manifest_path + ':' + firstValid.line_number);
-                }
-                
                 legacyTabsContainer.innerHTML = '';
                 info.options.forEach((opt, idx) => {
                     const btn = document.createElement('button');
-                    btn.className = 'modal-tab' + (idx === 0 ? ' active' : '');
+                    btn.className = 'modal-tab' + (idx === activeOptionIndex ? ' active' : '');
                     btn.textContent = opt.label;
                     btn.onclick = function() {
-                        const allTabs = legacyTabsContainer.querySelectorAll('.modal-tab');
-                        allTabs.forEach(t => t.classList.remove('active'));
-                        btn.classList.add('active');
-                        renderDiff(opt.diff);
+                        switchRemediationLevel(idx);
                     };
                     legacyTabsContainer.appendChild(btn);
                 });
-                renderDiff(info.options[0].diff);
+                activeOpt = info.options[activeOptionIndex] || info.options[0];
             } else {
                 strategyContainer.style.display = 'none';
                 levelContainer.style.display = 'none';
-                
-                const firstValid = info.safe || info.major;
-                if (firstValid) {
-                    document.getElementById('modal-filepath').textContent = firstValid.display_path || (firstValid.manifest_path + ':' + firstValid.line_number);
-                }
                 
                 if (info.safe && info.major) {
                     legacyTabsContainer.innerHTML = '<button id="tab-safe" class="modal-tab active" onclick="switchRemediationTab(&quot;safe&quot;)">Safe Update</button>' +
                                               '<button id="tab-major" class="modal-tab" onclick="switchRemediationTab(&quot;major&quot;)">Major Upgrade</button>';
                     legacyTabsContainer.style.display = 'flex';
-                    switchRemediationTab('safe');
                 } else {
                     legacyTabsContainer.style.display = 'none';
-                    if (info.safe) {
-                        renderDiff(info.safe);
-                    } else if (info.major) {
-                        renderDiff(info.major);
-                    }
                 }
             }
+
+            // 1. Diagnostic Callout
+            const diagnostic = (activeSt && activeSt.diagnostic) || info.diagnostic;
+            if (diagnostic && diagContainer && diagText) {
+                diagText.textContent = diagnostic;
+                diagContainer.style.display = 'flex';
+            } else if (diagContainer) {
+                diagContainer.style.display = 'none';
+            }
+
+            let stepCounter = 1;
+
+            // 2. Step: Update Manifest (Diff & Location)
+            const currentDiff = (activeOpt && activeOpt.diff) || (info.safe || info.major);
+            const diffSection = document.getElementById('modal-diff-section');
+            const stepManifestTitle = document.getElementById('modal-step-manifest-title');
+
+            if (currentDiff) {
+                if (diffSection) diffSection.style.display = 'block';
+                if (stepManifestTitle) stepManifestTitle.textContent = 'Step ' + stepCounter + ': Update Manifest';
+                stepCounter++;
+
+                const filepathEl = document.getElementById('modal-filepath');
+                if (filepathEl) {
+                    filepathEl.textContent = currentDiff.display_path || (currentDiff.manifest_path + ':' + currentDiff.line_number);
+                }
+                renderDiff(currentDiff);
+            } else {
+                if (diffSection) diffSection.style.display = 'none';
+            }
+
+            // 3. Step: Run Update Command (CLI)
+            const command = (activeOpt && activeOpt.command) || (activeSt && activeSt.command) || info.command;
+            const stepCmdTitle = document.getElementById('modal-step-command-title');
+            if (command && cmdContainer && cmdText) {
+                if (stepCmdTitle) stepCmdTitle.textContent = 'Step ' + stepCounter + ': Run Update Command';
+                stepCounter++;
+                cmdText.textContent = command;
+                cmdContainer.style.display = 'block';
+            } else if (cmdContainer) {
+                cmdContainer.style.display = 'none';
+            }
+
+            // 4. Step: Validation
+            const validation = (activeOpt && activeOpt.validation) || (activeSt && activeSt.validation) || info.validation;
+            const stepValTitle = document.getElementById('modal-step-validation-title');
+            if (validation && valContainer && valText) {
+                if (stepValTitle) stepValTitle.textContent = 'Step ' + stepCounter + ': Validate Changes';
+                stepCounter++;
+                valText.textContent = validation;
+                valContainer.style.display = 'block';
+            } else if (valContainer) {
+                valContainer.style.display = 'none';
+            }
+        }
+
+        function copyRemediationCommand(btn) {
+            const textEl = document.getElementById('modal-command-text');
+            if (!textEl || !textEl.textContent) return;
+            const cmd = textEl.textContent.trim();
+            navigator.clipboard.writeText(cmd).then(() => {
+                const origHtml = btn.innerHTML;
+                btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg> <span style="color:#10b981">Copied!</span>';
+                setTimeout(() => { btn.innerHTML = origHtml; }, 2000);
+            }).catch(err => {
+                console.error('Failed to copy text: ', err);
+            });
+        }
+
+        function copyValidationCommand(btn) {
+            const textEl = document.getElementById('modal-validation-text');
+            if (!textEl || !textEl.textContent) return;
+            const cmd = textEl.textContent.trim();
+            navigator.clipboard.writeText(cmd).then(() => {
+                const origHtml = btn.innerHTML;
+                btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg> <span style="color:#10b981">Copied!</span>';
+                setTimeout(() => { btn.innerHTML = origHtml; }, 2000);
+            }).catch(err => {
+                console.error('Failed to copy text: ', err);
+            });
         }
 
         function switchRemediationStrategy(idx) {
@@ -2721,28 +2853,79 @@ ${taskList}`;
             <button class="modal-close" onclick="closeRemediationModal()">&times;</button>
         </div>
         <div class="modal-body">
-            <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 6px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">Declaration Location</div>
-            <div class="modal-info-bar">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--primary); flex-shrink: 0; margin-right: 4px;">
-                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                    <polyline points="14 2 14 8 20 8"></polyline>
-                </svg>
-                <span id="modal-filepath"></span>
-            </div>
-            
             <!-- Strategy & Level Tabs containers -->
-            <div id="modal-strategy-tabs-container" style="display: none; gap: 8px; margin-top: 14px; margin-bottom: 12px; flex-wrap: wrap;"></div>
+            <div id="modal-strategy-tabs-container" style="display: none; gap: 8px; margin-bottom: 12px; flex-wrap: wrap;"></div>
             <div id="modal-level-tabs-container" style="display: none; gap: 8px; margin-bottom: 16px; flex-wrap: wrap;"></div>
             <div id="modal-tabs-container" class="modal-tabs" style="display: none;"></div>
-            
-            <div class="modal-diff-container">
-                <div class="diff-box">
-                    <div class="diff-box-title current">Current Code</div>
-                    <pre class="diff-code" id="modal-current-code"></pre>
+
+            <!-- Diagnostic Callout -->
+            <div id="modal-diagnostic-container" class="modal-diagnostic" style="display: none;">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0; margin-top: 1px;">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <line x1="12" y1="8" x2="12" y2="12"></line>
+                    <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                </svg>
+                <div id="modal-diagnostic-text"></div>
+            </div>
+
+            <!-- STEP 1: Declaration Location and Diff -->
+            <div id="modal-diff-section" style="margin-bottom: 20px;">
+                <div id="modal-step-manifest-title" style="font-size: 11px; color: var(--primary); margin-bottom: 6px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">Step 1: Update Manifest</div>
+                <div id="modal-location-container">
+                    <div class="modal-info-bar">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--primary); flex-shrink: 0; margin-right: 4px;">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                            <polyline points="14 2 14 8 20 8"></polyline>
+                        </svg>
+                        <span id="modal-filepath"></span>
+                    </div>
                 </div>
-                <div class="diff-box">
-                    <div class="diff-box-title suggested">Suggested Change</div>
-                    <pre class="diff-code" id="modal-suggested-code"></pre>
+                
+                <div id="modal-diff-wrapper" class="modal-diff-container">
+                    <div class="diff-box">
+                        <div class="diff-box-title current">Current Code</div>
+                        <pre class="diff-code" id="modal-current-code"></pre>
+                    </div>
+                    <div class="diff-box">
+                        <div class="diff-box-title suggested">Suggested Change</div>
+                        <pre class="diff-code" id="modal-suggested-code"></pre>
+                    </div>
+                </div>
+            </div>
+
+            <!-- STEP 2: CLI Command Box -->
+            <div id="modal-command-container" style="display: none; margin-bottom: 20px;">
+                <div id="modal-step-command-title" style="font-size: 11px; color: var(--primary); margin-bottom: 6px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">Step 2: Run Update Command</div>
+                <div class="modal-command-box">
+                    <span class="modal-command-code" id="modal-command-text"></span>
+                    <button class="modal-copy-btn" onclick="copyRemediationCommand(this)">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                        </svg>
+                        <span>Copy</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- STEP 3: Verification Steps Box -->
+            <div id="modal-validation-container" style="display: none;">
+                <div id="modal-step-validation-title" style="font-size: 11px; color: #10b981; margin-bottom: 6px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">Step 3: Validate Changes</div>
+                <div class="modal-command-box" style="border-color: rgba(16, 185, 129, 0.3);">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0;">
+                            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+                            <polyline points="22 4 12 14.01 9 11.01"></polyline>
+                        </svg>
+                        <span class="modal-command-code" id="modal-validation-text" style="color: #a7f3d0;"></span>
+                    </div>
+                    <button class="modal-copy-btn" onclick="copyValidationCommand(this)">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                        </svg>
+                        <span>Copy</span>
+                    </button>
                 </div>
             </div>
         </div>

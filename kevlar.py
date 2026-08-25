@@ -113,9 +113,7 @@ def _get_cached_registry_metadata(tech: str, package_name: str) -> Optional[Any]
         return _REGISTRY_METADATA_CACHE.get(key)
 
 
-def _set_cached_registry_metadata(
-    tech: str, package_name: str, data: Any
-) -> None:
+def _set_cached_registry_metadata(tech: str, package_name: str, data: Any) -> None:
     """Caches package-level registry metadata."""
     key = (tech, package_name.lower())
     with _CACHE_LOCK:
@@ -164,7 +162,7 @@ class ScanResultRow(TypedDict, total=False):
     remediation: Optional[Dict[str, Any]]
 
 
-VERSION = "1.10.10"
+VERSION = "1.10.11"
 
 # External APIs Configuration
 URL_NPM_REGISTRY = "https://registry.npmjs.org/"
@@ -2550,8 +2548,8 @@ def check_npm_package(target):
         if not ver_str:
             return False
         v = ver_str.strip()
-        return (
-            v.startswith(("file:", "link:", "portal:", "workspace:", "./", "../", "/"))
+        return v.startswith(
+            ("file:", "link:", "portal:", "workspace:", "./", "../", "/")
         )
 
     versions_to_check = installed_versions if installed_versions else [declared]
@@ -3284,9 +3282,12 @@ def find_direct_parents(name, parents_map, direct_packages):
     visited = set()
     direct_parents = set()
     queue = [name]
+    queue_idx = 0
 
-    while queue:
-        current = queue.pop(0)
+    # Optimization: Use a read pointer to achieve O(1) queue processing instead of O(n) queue.pop(0) in Python.
+    while queue_idx < len(queue):
+        current = queue[queue_idx]
+        queue_idx += 1
         if current in visited:
             continue
         visited.add(current)
@@ -5791,7 +5792,12 @@ def check_maven_package(target):
         else:
             use_google_maven = (
                 group_id.startswith(
-                    ("androidx.", "com.google.android.", "com.android.", "android.arch.")
+                    (
+                        "androidx.",
+                        "com.google.android.",
+                        "com.android.",
+                        "android.arch.",
+                    )
                 )
                 or "android" in group_id
             )
@@ -6325,7 +6331,8 @@ def parse_go_mod(filepath):
                 if left_pkg and right_parts:
                     target_path = right_parts[0]
                     is_local_path = (
-                        target_path.startswith((".", "/", "\\")) or len(right_parts) == 1
+                        target_path.startswith((".", "/", "\\"))
+                        or len(right_parts) == 1
                     )
                     if is_local_path:
                         local_replacements[left_pkg] = target_path
@@ -6480,12 +6487,8 @@ def check_go_package(target):
                 latest_same_major = latest_absolute
 
             clean_ver = ver_str.lstrip("v").split("+")[0] if ver_str else ""
-            (
-                latest_absolute.lstrip("v").split("+")[0] if latest_absolute else ""
-            )
-            (
-                latest_same_major.lstrip("v").split("+")[0] if latest_same_major else ""
-            )
+            (latest_absolute.lstrip("v").split("+")[0] if latest_absolute else "")
+            (latest_same_major.lstrip("v").split("+")[0] if latest_same_major else "")
             update_type = determine_update_type(
                 ver_str, latest_same_major, latest_absolute
             )
@@ -6987,7 +6990,9 @@ def parse_cargo_toml(filepath):
     curr = os.path.dirname(os.path.abspath(filepath))
     while curr and os.path.dirname(curr) != curr:
         ws_candidate = os.path.join(curr, "Cargo.toml")
-        if os.path.exists(ws_candidate) and os.path.abspath(ws_candidate) != os.path.abspath(filepath):
+        if os.path.exists(ws_candidate) and os.path.abspath(
+            ws_candidate
+        ) != os.path.abspath(filepath):
             try:
                 with open(ws_candidate, "rb") as wf:
                     ws_data = tomllib.load(wf)
@@ -7033,7 +7038,11 @@ def parse_cargo_toml(filepath):
         if "target" in data and isinstance(data["target"], dict):
             for _, t_val in data["target"].items():
                 if isinstance(t_val, dict):
-                    for sec in ("dependencies", "dev-dependencies", "build-dependencies"):
+                    for sec in (
+                        "dependencies",
+                        "dev-dependencies",
+                        "build-dependencies",
+                    ):
                         if sec in t_val and isinstance(t_val[sec], dict):
                             _add_deps_table(t_val[sec])
 
@@ -7091,7 +7100,9 @@ def parse_cargo_toml(filepath):
                             }:
                                 dependencies[dep_name] = dep_val or "*"
         except Exception as e:
-            print(f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Cargo.toml: {e}{COLOR_RESET}")
+            print(
+                f"{COLOR_YELLOW}{ICON_WARN} Warning parsing Cargo.toml: {e}{COLOR_RESET}"
+            )
 
     return dependencies
 
@@ -7277,7 +7288,9 @@ def check_rust_package(target):
                 latest_version = crate_info.get("max_stable_version") or crate_info.get(
                     "max_version"
                 )
-                repo_url_raw = crate_info.get("repository") or crate_info.get("homepage")
+                repo_url_raw = crate_info.get("repository") or crate_info.get(
+                    "homepage"
+                )
 
                 versions_meta = data.get("versions", [])
                 for v_meta in versions_meta:
@@ -7414,7 +7427,9 @@ def run_rust_checker(args):
 
     print(f"{COLOR_GRAY}{ICON_INFO} Reading Cargo files...{COLOR_RESET}")
     direct_deps = parse_cargo_toml(toml_path)
-    direct = set(direct_deps.keys()) if isinstance(direct_deps, dict) else set(direct_deps)
+    direct = (
+        set(direct_deps.keys()) if isinstance(direct_deps, dict) else set(direct_deps)
+    )
     lock_result = parse_cargo_lock(lock_path)
     resolved, parents = lock_result[0], lock_result[1]
     local_packages = getattr(lock_result, "local_packages", set())
@@ -7422,19 +7437,23 @@ def run_rust_checker(args):
     if not resolved and direct_deps:
         resolved = {
             name: [
-                direct_deps.get(name)
-                if isinstance(direct_deps, dict)
-                and direct_deps.get(name)
-                and direct_deps.get(name) != "workspace"
-                and not str(direct_deps.get(name)).startswith(".")
-                else "0.0.0"
+                (
+                    direct_deps.get(name)
+                    if isinstance(direct_deps, dict)
+                    and direct_deps.get(name)
+                    and direct_deps.get(name) != "workspace"
+                    and not str(direct_deps.get(name)).startswith(".")
+                    else "0.0.0"
+                )
             ]
             for name in direct
         }
 
     pkg_data = {
         "all_direct": {
-            name: (direct_deps.get(name, name) if isinstance(direct_deps, dict) else name)
+            name: (
+                direct_deps.get(name, name) if isinstance(direct_deps, dict) else name
+            )
             for name in direct
         },
         "dependencies": resolved,
@@ -7444,7 +7463,11 @@ def run_rust_checker(args):
     for name, versions in resolved.items():
         if not args.all and name not in direct:
             continue
-        declared = direct_deps.get(name) if isinstance(direct_deps, dict) else (versions[0] if versions else None)
+        declared = (
+            direct_deps.get(name)
+            if isinstance(direct_deps, dict)
+            else (versions[0] if versions else None)
+        )
         is_local = (name in local_packages) or (
             declared and str(declared).startswith((".", "/", "path:", "workspace:"))
         )
@@ -7648,9 +7671,7 @@ def check_ruby_package(target):
         else:
             repo_url_raw = None
             try:
-                url_versions = (
-                    f"https://rubygems.org/api/v1/versions/{urllib.parse.quote(name)}.json"
-                )
+                url_versions = f"https://rubygems.org/api/v1/versions/{urllib.parse.quote(name)}.json"
                 req_v = urllib.request.Request(url_versions)
                 with safe_urlopen(req_v, timeout=10) as response:
                     versions_data = json.loads(response.read().decode("utf-8"))
@@ -7694,9 +7715,7 @@ def check_ruby_package(target):
                 except Exception:
                     valid_versions = []
 
-            _set_cached_registry_metadata(
-                "ruby", name, (valid_versions, repo_url_raw)
-            )
+            _set_cached_registry_metadata("ruby", name, (valid_versions, repo_url_raw))
 
         for ver_str in versions_to_check:
             clean_ver = RE_CLEAN_VER.sub("", ver_str) if ver_str else "0.0.0"
@@ -7730,13 +7749,9 @@ def check_ruby_package(target):
                         pass
                 repo_url = clean_repo_url(repo_url_raw)
                 if repo_url:
-                    compare_url = get_compare_url(
-                        repo_url, clean_ver, latest_absolute
-                    )
+                    compare_url = get_compare_url(repo_url, clean_ver, latest_absolute)
                     releases_url = (
-                        f"{repo_url}/releases"
-                        if is_github_url(repo_url)
-                        else repo_url
+                        f"{repo_url}/releases" if is_github_url(repo_url) else repo_url
                     )
 
             display_latest = format_latest_versions(latest_same_major, latest_absolute)
@@ -8184,7 +8199,25 @@ def validate_configuration_drift(results):
 
         # Skip checking if declared constraint is a git URL, local path, workspace, patch, catalog reference, etc.
         if (
-            decl_str.startswith(("@", "git+", "git:", "http:", "https:", "ssh:", "file:", "workspace:", "patch:", "portal:", "link:", "catalog:", ".", "/")) or "github:" in decl_str.lower()
+            decl_str.startswith(
+                (
+                    "@",
+                    "git+",
+                    "git:",
+                    "http:",
+                    "https:",
+                    "ssh:",
+                    "file:",
+                    "workspace:",
+                    "patch:",
+                    "portal:",
+                    "link:",
+                    "catalog:",
+                    ".",
+                    "/",
+                )
+            )
+            or "github:" in decl_str.lower()
         ):
             continue
 
@@ -8312,19 +8345,31 @@ def _format_status_badge(r):
 def _print_table_notes_and_diffs(filtered_results):
     notes_to_print = []
     for r in filtered_results:
-        parent_suffix = f" (via {', '.join(r['required_by'])})" if r.get("required_by") else ""
+        parent_suffix = (
+            f" (via {', '.join(r['required_by'])})" if r.get("required_by") else ""
+        )
         if r["deprecated"]:
-            notes_to_print.append(f"  {COLOR_MAGENTA}{ICON_DEPRECATED} {r['name']}@{r['installed']}{parent_suffix}: {r['deprecated']}{COLOR_RESET}")
+            notes_to_print.append(
+                f"  {COLOR_MAGENTA}{ICON_DEPRECATED} {r['name']}@{r['installed']}{parent_suffix}: {r['deprecated']}{COLOR_RESET}"
+            )
         elif r["status"] == "error" and r["error"]:
-            notes_to_print.append(f"  {COLOR_RED}{ICON_ERROR} {r['name']}{parent_suffix}: {r['error']}{COLOR_RESET}")
+            notes_to_print.append(
+                f"  {COLOR_RED}{ICON_ERROR} {r['name']}{parent_suffix}: {r['error']}{COLOR_RESET}"
+            )
 
         if r.get("missing_checksum"):
-            notes_to_print.append(f"  {COLOR_YELLOW}{ICON_WARN} {r['name']}@{r['installed']}{parent_suffix}: Missing integrity checksum in lockfile{COLOR_RESET}")
+            notes_to_print.append(
+                f"  {COLOR_YELLOW}{ICON_WARN} {r['name']}@{r['installed']}{parent_suffix}: Missing integrity checksum in lockfile{COLOR_RESET}"
+            )
         elif r.get("weak_checksum"):
-            notes_to_print.append(f"  {COLOR_YELLOW}{ICON_WARN} {r['name']}@{r['installed']}{parent_suffix}: Weak checksum (SHA-1) in lockfile{COLOR_RESET}")
+            notes_to_print.append(
+                f"  {COLOR_YELLOW}{ICON_WARN} {r['name']}@{r['installed']}{parent_suffix}: Weak checksum (SHA-1) in lockfile{COLOR_RESET}"
+            )
 
         if r.get("mismatch_checksum"):
-            notes_to_print.append(f"  {COLOR_RED}{ICON_ERROR} {r['name']}@{r['installed']}{parent_suffix}: INTEGRITY MISMATCH! Lockfile checksum does not match official registry checksum.{COLOR_RESET}")
+            notes_to_print.append(
+                f"  {COLOR_RED}{ICON_ERROR} {r['name']}@{r['installed']}{parent_suffix}: INTEGRITY MISMATCH! Lockfile checksum does not match official registry checksum.{COLOR_RESET}"
+            )
 
     if notes_to_print:
         print(f"\n{COLOR_BOLD}Notes & Warnings:{COLOR_RESET}")
@@ -8333,8 +8378,12 @@ def _print_table_notes_and_diffs(filtered_results):
 
     major_diffs_to_print = []
     for r in filtered_results:
-        if r["status"] in {"major", "minor-major", "patch-major"} and r.get("compare_url"):
-            major_diffs_to_print.append(f"  {COLOR_BOLD}{r['name']}{COLOR_RESET}: {COLOR_CYAN}{r['compare_url']}{COLOR_RESET}")
+        if r["status"] in {"major", "minor-major", "patch-major"} and r.get(
+            "compare_url"
+        ):
+            major_diffs_to_print.append(
+                f"  {COLOR_BOLD}{r['name']}{COLOR_RESET}: {COLOR_CYAN}{r['compare_url']}{COLOR_RESET}"
+            )
 
     if major_diffs_to_print:
         print(f"\n{COLOR_BOLD}Major Update Diffs:{COLOR_RESET}")
@@ -8345,44 +8394,101 @@ def _print_table_notes_and_diffs(filtered_results):
 def _print_table_vulnerabilities(filtered_results):
     vuls_to_print = []
     suppressed_to_print = []
-    severity_order = {"malicious": 5, "critical": 4, "high": 3, "medium": 2, "low": 1, "unknown": 0}
+    severity_order = {
+        "malicious": 5,
+        "critical": 4,
+        "high": 3,
+        "medium": 2,
+        "low": 1,
+        "unknown": 0,
+    }
 
     for r in filtered_results:
         vuls_list = r.get("vulnerabilities", [])
         if vuls_list:
-            sorted_v = sorted(vuls_list, key=lambda v: severity_order.get(get_severity_level(v), 0), reverse=True)
-            vuls_to_print.append((r["name"], r["installed"] if r["installed"] else r["declared"], sorted_v, r.get("required_by", [])))
+            sorted_v = sorted(
+                vuls_list,
+                key=lambda v: severity_order.get(get_severity_level(v), 0),
+                reverse=True,
+            )
+            vuls_to_print.append(
+                (
+                    r["name"],
+                    r["installed"] if r["installed"] else r["declared"],
+                    sorted_v,
+                    r.get("required_by", []),
+                )
+            )
 
         suppressed_list = r.get("suppressed_vulnerabilities", [])
         if suppressed_list:
-            suppressed_to_print.append((r["name"], r["installed"] if r["installed"] else r["declared"], suppressed_list, r.get("required_by", [])))
+            suppressed_to_print.append(
+                (
+                    r["name"],
+                    r["installed"] if r["installed"] else r["declared"],
+                    suppressed_list,
+                    r.get("required_by", []),
+                )
+            )
 
     if vuls_to_print:
-        vuls_to_print.sort(key=lambda x: (
-            -max(severity_order.get(get_severity_level(v), 0) for v in x[2]) if x[2] else 1,
-            x[0].lower()
-        ))
-        print(f"\n{COLOR_BOLD}{COLOR_RED}{ICON_SHIELD} Security Vulnerabilities Details:{COLOR_RESET}")
+        vuls_to_print.sort(
+            key=lambda x: (
+                (
+                    -max(severity_order.get(get_severity_level(v), 0) for v in x[2])
+                    if x[2]
+                    else 1
+                ),
+                x[0].lower(),
+            )
+        )
+        print(
+            f"\n{COLOR_BOLD}{COLOR_RED}{ICON_SHIELD} Security Vulnerabilities Details:{COLOR_RESET}"
+        )
         for name, ver, v_list, required_by in vuls_to_print:
             parent_suffix = f" (via {', '.join(required_by)})" if required_by else ""
-            print(f"  {COLOR_BOLD}{name}@{ver}{parent_suffix}{COLOR_RESET} ({len(v_list)} vulnerabilities found):")
+            print(
+                f"  {COLOR_BOLD}{name}@{ver}{parent_suffix}{COLOR_RESET} ({len(v_list)} vulnerabilities found):"
+            )
             for vuln in v_list:
                 vid, severity, summary = vuln["id"], vuln["severity"], vuln["summary"]
                 level = get_severity_level(vuln)
-                sev_color = COLOR_RED + COLOR_BOLD if level == "malicious" else COLOR_RED if level in {"critical", "high"} else COLOR_YELLOW if level == "medium" else COLOR_CYAN if level == "low" else COLOR_GRAY
-                display_severity = "MALICIOUS CODE" if level == "malicious" else severity
-                print(f"    - {COLOR_BOLD}{vid}{COLOR_RESET} [{sev_color}{display_severity}{COLOR_RESET}]: {summary}")
+                sev_color = (
+                    COLOR_RED + COLOR_BOLD
+                    if level == "malicious"
+                    else (
+                        COLOR_RED
+                        if level in {"critical", "high"}
+                        else (
+                            COLOR_YELLOW
+                            if level == "medium"
+                            else COLOR_CYAN if level == "low" else COLOR_GRAY
+                        )
+                    )
+                )
+                display_severity = (
+                    "MALICIOUS CODE" if level == "malicious" else severity
+                )
+                print(
+                    f"    - {COLOR_BOLD}{vid}{COLOR_RESET} [{sev_color}{display_severity}{COLOR_RESET}]: {summary}"
+                )
 
     if suppressed_to_print:
-        print(f"\n{COLOR_BOLD}{COLOR_GRAY}{ICON_INFO} Suppressed Vulnerabilities (Ignored):{COLOR_RESET}")
+        print(
+            f"\n{COLOR_BOLD}{COLOR_GRAY}{ICON_INFO} Suppressed Vulnerabilities (Ignored):{COLOR_RESET}"
+        )
         for name, ver, s_list, required_by in suppressed_to_print:
             parent_suffix = f" (via {', '.join(required_by)})" if required_by else ""
-            print(f"  {COLOR_BOLD}{COLOR_GRAY}{name}@{ver}{parent_suffix}{COLOR_RESET} ({len(s_list)} suppressed):")
+            print(
+                f"  {COLOR_BOLD}{COLOR_GRAY}{name}@{ver}{parent_suffix}{COLOR_RESET} ({len(s_list)} suppressed):"
+            )
             for vuln in s_list:
                 vid = vuln["id"]
                 reason = vuln.get("suppressed_reason", "No reason provided")
                 summary = vuln["summary"]
-                print(f"    - {COLOR_BOLD}{COLOR_GRAY}{vid}{COLOR_RESET}: {summary} {COLOR_GRAY}(Reason: {reason}){COLOR_RESET}")
+                print(
+                    f"    - {COLOR_BOLD}{COLOR_GRAY}{vid}{COLOR_RESET}: {summary} {COLOR_GRAY}(Reason: {reason}){COLOR_RESET}"
+                )
 
 
 def print_results_table(
@@ -8394,15 +8500,34 @@ def print_results_table(
 
     filtered_results = _filter_table_results(results, show_all, vuls_enabled)
     if not filtered_results:
-        print(f"\n{COLOR_GREEN}{ICON_OK} All dependencies are up-to-date and secure!{COLOR_RESET}\n")
+        print(
+            f"\n{COLOR_GREEN}{ICON_OK} All dependencies are up-to-date and secure!{COLOR_RESET}\n"
+        )
         return
 
-    col_name, col_type, col_dec, col_inst, col_latest, col_status, col_vuls = "Package", "Type", "Declared", "Installed", "Latest", "Status", "Vuls"
+    col_name, col_type, col_dec, col_inst, col_latest, col_status, col_vuls = (
+        "Package",
+        "Type",
+        "Declared",
+        "Installed",
+        "Latest",
+        "Status",
+        "Vuls",
+    )
     w_name = max(len(col_name), max(len(r["name"]) for r in filtered_results)) + 2
     w_type = 12
-    w_dec = max(len(col_dec), max(len(r["declared"] or "N/A") for r in filtered_results)) + 2
-    w_inst = max(len(col_inst), max(len(r["installed"] or "N/A") for r in filtered_results)) + 2
-    w_latest = max(len(col_latest), max(len(r["latest"] or "N/A") for r in filtered_results)) + 2
+    w_dec = (
+        max(len(col_dec), max(len(r["declared"] or "N/A") for r in filtered_results))
+        + 2
+    )
+    w_inst = (
+        max(len(col_inst), max(len(r["installed"] or "N/A") for r in filtered_results))
+        + 2
+    )
+    w_latest = (
+        max(len(col_latest), max(len(r["latest"] or "N/A") for r in filtered_results))
+        + 2
+    )
     w_status = 15
     w_vuls = 8
     t = BORDER_CHARS
@@ -8426,9 +8551,13 @@ def print_results_table(
     hdr_vuls = TerminalTextFormatter.pad_string(col_vuls, w_vuls, align="center")
 
     if vuls_enabled:
-        print(f"{t['vertical']}{hdr_name}{t['vertical']}{hdr_type}{t['vertical']}{hdr_dec}{t['vertical']}{hdr_inst}{t['vertical']}{hdr_latest}{t['vertical']}{hdr_status}{t['vertical']}{hdr_vuls}{t['vertical']}")
+        print(
+            f"{t['vertical']}{hdr_name}{t['vertical']}{hdr_type}{t['vertical']}{hdr_dec}{t['vertical']}{hdr_inst}{t['vertical']}{hdr_latest}{t['vertical']}{hdr_status}{t['vertical']}{hdr_vuls}{t['vertical']}"
+        )
     else:
-        print(f"{t['vertical']}{hdr_name}{t['vertical']}{hdr_type}{t['vertical']}{hdr_dec}{t['vertical']}{hdr_inst}{t['vertical']}{hdr_latest}{t['vertical']}{hdr_status}{t['vertical']}")
+        print(
+            f"{t['vertical']}{hdr_name}{t['vertical']}{hdr_type}{t['vertical']}{hdr_dec}{t['vertical']}{hdr_inst}{t['vertical']}{hdr_latest}{t['vertical']}{hdr_status}{t['vertical']}"
+        )
 
     print(border_mid)
 
@@ -8447,21 +8576,45 @@ def print_results_table(
                     dep_type = "Direct"
 
         styled_status = _format_status_badge(r)
-        name_cell = TerminalTextFormatter.pad_string(f" {r['name']}", w_name, align="left")
+        name_cell = TerminalTextFormatter.pad_string(
+            f" {r['name']}", w_name, align="left"
+        )
         type_cell = TerminalTextFormatter.pad_string(dep_type, w_type, align="center")
-        dec_cell = TerminalTextFormatter.pad_string(r["declared"] or "N/A", w_dec, align="center")
-        inst_cell = TerminalTextFormatter.pad_string(r["installed"] or "N/A", w_inst, align="center")
-        latest_cell = TerminalTextFormatter.pad_string(r["latest"] or "N/A", w_latest, align="center")
-        status_cell = TerminalTextFormatter.pad_string(styled_status, w_status, align="center")
+        dec_cell = TerminalTextFormatter.pad_string(
+            r["declared"] or "N/A", w_dec, align="center"
+        )
+        inst_cell = TerminalTextFormatter.pad_string(
+            r["installed"] or "N/A", w_inst, align="center"
+        )
+        latest_cell = TerminalTextFormatter.pad_string(
+            r["latest"] or "N/A", w_latest, align="center"
+        )
+        status_cell = TerminalTextFormatter.pad_string(
+            styled_status, w_status, align="center"
+        )
 
         if vuls_enabled:
             vuls_list = r.get("vulnerabilities", [])
             vuls_count = len(vuls_list)
-            styled_vuls = f"{COLOR_RED}{COLOR_BOLD}{vuls_count}{COLOR_RESET}" if vuls_count > 0 else (f"{COLOR_GREEN}{ICON_OK}{COLOR_RESET}" if ICON_OK == "✔" else f"{COLOR_GREEN}0{COLOR_RESET}")
-            vuls_cell = TerminalTextFormatter.pad_string(styled_vuls, w_vuls, align="center")
-            print(f"{t['vertical']}{name_cell}{t['vertical']}{type_cell}{t['vertical']}{dec_cell}{t['vertical']}{inst_cell}{t['vertical']}{latest_cell}{t['vertical']}{status_cell}{t['vertical']}{vuls_cell}{t['vertical']}")
+            styled_vuls = (
+                f"{COLOR_RED}{COLOR_BOLD}{vuls_count}{COLOR_RESET}"
+                if vuls_count > 0
+                else (
+                    f"{COLOR_GREEN}{ICON_OK}{COLOR_RESET}"
+                    if ICON_OK == "✔"
+                    else f"{COLOR_GREEN}0{COLOR_RESET}"
+                )
+            )
+            vuls_cell = TerminalTextFormatter.pad_string(
+                styled_vuls, w_vuls, align="center"
+            )
+            print(
+                f"{t['vertical']}{name_cell}{t['vertical']}{type_cell}{t['vertical']}{dec_cell}{t['vertical']}{inst_cell}{t['vertical']}{latest_cell}{t['vertical']}{status_cell}{t['vertical']}{vuls_cell}{t['vertical']}"
+            )
         else:
-            print(f"{t['vertical']}{name_cell}{t['vertical']}{type_cell}{t['vertical']}{dec_cell}{t['vertical']}{inst_cell}{t['vertical']}{latest_cell}{t['vertical']}{status_cell}{t['vertical']}")
+            print(
+                f"{t['vertical']}{name_cell}{t['vertical']}{type_cell}{t['vertical']}{dec_cell}{t['vertical']}{inst_cell}{t['vertical']}{latest_cell}{t['vertical']}{status_cell}{t['vertical']}"
+            )
 
     print(border_bot)
     _print_table_notes_and_diffs(filtered_results)
@@ -9096,9 +9249,13 @@ def get_upgraded_constraint(declared_ver, latest_ver):
     return latest_ver
 
 
+@functools.lru_cache(maxsize=1024)
+def _get_npm_php_regex(pkg_lower):
+    return re.compile(r'"' + re.escape(pkg_lower) + r'"\s*:')
+
+
 def _match_npm_php(line_lower, pkg_lower):
-    pattern = r'"' + re.escape(pkg_lower) + r'"\s*:'
-    return re.search(pattern, line_lower) is not None
+    return _get_npm_php_regex(pkg_lower).search(line_lower) is not None
 
 
 def _match_pip(line_lower, pkg_lower):
@@ -9117,53 +9274,79 @@ def _match_pip(line_lower, pkg_lower):
     )
 
 
+@functools.lru_cache(maxsize=1024)
+def _get_nuget_regex(pkg_lower):
+    return re.compile(r'(include|update)\s*=\s*[\'"]' + re.escape(pkg_lower) + r'[\'"]')
+
+
 def _match_nuget(line_lower, pkg_lower):
-    pattern = r'(include|update)\s*=\s*[\'"]' + re.escape(pkg_lower) + r'[\'"]'
-    return re.search(pattern, line_lower) is not None
+    return _get_nuget_regex(pkg_lower).search(line_lower) is not None
+
+
+@functools.lru_cache(maxsize=1024)
+def _get_maven_regex(pkg_lower):
+    parts = pkg_lower.split(":")
+    artifact = parts[-1]
+    return re.compile(r"<artifactid>\s*" + re.escape(artifact) + r"\s*</artifactid>")
 
 
 def _match_maven(line_lower, pkg_lower):
-    parts = pkg_lower.split(":")
-    artifact = parts[-1]
-    pattern = r"<artifactid>\s*" + re.escape(artifact) + r"\s*</artifactid>"
-    return re.search(pattern, line_lower) is not None
+    return _get_maven_regex(pkg_lower).search(line_lower) is not None
+
+
+@functools.lru_cache(maxsize=1024)
+def _get_go_regex(pkg_lower):
+    return re.compile(re.escape(pkg_lower) + r"\s+v\d+")
 
 
 def _match_go(line_lower, pkg_lower):
-    pattern = re.escape(pkg_lower) + r"\s+v\d+"
-    return re.search(pattern, line_lower) is not None
+    return _get_go_regex(pkg_lower).search(line_lower) is not None
 
 
-def _match_rust(line_lower, pkg_lower):
-    pattern_eq = r"^\s*" + re.escape(pkg_lower) + r"\s*=\s*"
-    pattern_sec = (
+@functools.lru_cache(maxsize=1024)
+def _get_rust_regexes(pkg_lower):
+    pattern_eq = re.compile(r"^\s*" + re.escape(pkg_lower) + r"\s*=\s*")
+    pattern_sec = re.compile(
         r"\[\s*(?:target\.[^\]]+\.)?(?:dependencies|dev-dependencies|build-dependencies)\."
         + re.escape(pkg_lower)
         + r"\s*\]"
     )
-    return (
-        re.search(pattern_eq, line_lower) is not None
-        or re.search(pattern_sec, line_lower) is not None
-    )
+    return pattern_eq, pattern_sec
+
+
+def _match_rust(line_lower, pkg_lower):
+    eq, sec = _get_rust_regexes(pkg_lower)
+    return eq.search(line_lower) is not None or sec.search(line_lower) is not None
+
+
+@functools.lru_cache(maxsize=1024)
+def _get_ruby_regex(pkg_lower):
+    return re.compile(r'gem\s+[\'"]' + re.escape(pkg_lower) + r'[\'"]')
 
 
 def _match_ruby(line_lower, pkg_lower):
-    pattern = r'gem\s+[\'"]' + re.escape(pkg_lower) + r'[\'"]'
-    return re.search(pattern, line_lower) is not None
+    return _get_ruby_regex(pkg_lower).search(line_lower) is not None
 
 
-def _match_gradle(line_lower, pkg_lower):
+@functools.lru_cache(maxsize=1024)
+def _get_gradle_regexes(pkg_lower):
     parts = pkg_lower.split(":")
     if len(parts) > 1:
         group, name_part = parts[0], parts[1]
-        pattern_build = re.escape(group) + r":" + re.escape(name_part)
-        return re.search(pattern_build, line_lower) is not None
+        return re.compile(re.escape(group) + r":" + re.escape(name_part)), None, None
     else:
-        pattern_toml = r"^\s*" + re.escape(pkg_lower) + r"\s*=\s*"
-        pattern_name = r'name\s*=\s*[\'"]' + re.escape(pkg_lower) + r'[\'"]'
+        pattern_toml = re.compile(r"^\s*" + re.escape(pkg_lower) + r"\s*=\s*")
+        pattern_name = re.compile(r'name\s*=\s*[\'"]' + re.escape(pkg_lower) + r'[\'"]')
+        return None, pattern_toml, pattern_name
+
+
+def _match_gradle(line_lower, pkg_lower):
+    build, toml, name = _get_gradle_regexes(pkg_lower)
+    if build is not None:
+        return build.search(line_lower) is not None
+    else:
         return (
-            re.search(pattern_toml, line_lower) is not None
-            or re.search(pattern_name, line_lower) is not None
+            toml.search(line_lower) is not None or name.search(line_lower) is not None
         )
 
 
@@ -9245,7 +9428,24 @@ def find_manifest_files(project_path, technology):
     return manifest_files
 
 
-def _find_target_version_line(lines, search_range, declared_ver, tech, package_name, fallback_idx):
+RE_MAVEN_VERSION = re.compile(r"<version>\s*(.*?)\s*</version>", re.IGNORECASE)
+RE_GRADLE_VER_REF = re.compile(r'version\.ref\s*=\s*["\']([^"\']+)["\']')
+RE_GRADLE_VER_EQ = re.compile(r'version\s*=\s*["\']([^"\']+)["\']')
+RE_GRADLE_VER_COLON = re.compile(r'version:\s*["\']([^"\']+)["\']')
+RE_NUGET_VERSION = re.compile(r'Version\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
+RE_QUOTES = re.compile(r'["\']([^"\']+)["\']')
+
+import functools
+
+
+@functools.lru_cache(maxsize=1024)
+def _get_gradle_pkg_regex(package_name):
+    return re.compile(re.escape(package_name) + r':([^\'"]+)')
+
+
+def _find_target_version_line(
+    lines, search_range, declared_ver, tech, package_name, fallback_idx
+):
     """Finds the line index and target text to replace in the manifest lines."""
     if declared_ver:
         for i in search_range:
@@ -9254,28 +9454,27 @@ def _find_target_version_line(lines, search_range, declared_ver, tech, package_n
 
     if tech == "maven":
         for i in search_range:
-            m = re.search(r"<version>\s*(.*?)\s*</version>", lines[i], re.IGNORECASE)
+            m = RE_MAVEN_VERSION.search(lines[i])
             if m:
                 return i, m.group(1)
     elif tech == "gradle":
         for i in search_range:
-            m_ref = re.search(r'version\.ref\s*=\s*["\']([^"\']+)["\']', lines[i])
+            m_ref = RE_GRADLE_VER_REF.search(lines[i])
             if m_ref:
                 return i, m_ref.group(1)
-            m_eq = re.search(r'version\s*=\s*["\']([^"\']+)["\']', lines[i])
+            m_eq = RE_GRADLE_VER_EQ.search(lines[i])
             if m_eq:
                 return i, m_eq.group(1)
-            m_colon = re.search(r'version:\s*["\']([^"\']+)["\']', lines[i])
+            m_colon = RE_GRADLE_VER_COLON.search(lines[i])
             if m_colon:
                 return i, m_colon.group(1)
             if package_name:
-                pattern = re.escape(package_name) + r':([^\'"]+)'
-                m_str = re.search(pattern, lines[i])
+                m_str = _get_gradle_pkg_regex(package_name).search(lines[i])
                 if m_str:
                     return i, m_str.group(1)
     elif tech == "nuget":
         for i in search_range:
-            m = re.search(r'Version\s*=\s*["\']([^"\']+)["\']', lines[i], re.IGNORECASE)
+            m = RE_NUGET_VERSION.search(lines[i])
             if m:
                 return i, m.group(1)
 
@@ -9292,28 +9491,50 @@ def _find_target_version_line(lines, search_range, declared_ver, tech, package_n
     if ver_pattern:
         target_text = ver_pattern.group(0)
     else:
-        quotes_match = re.search(r'["\']([^"\']+)["\']', lines[fallback_idx])
+        quotes_match = RE_QUOTES.search(lines[fallback_idx])
         if quotes_match:
-            quoted_vals = re.findall(r'["\']([^"\']+)["\']', lines[fallback_idx])
+            quoted_vals = RE_QUOTES.findall(lines[fallback_idx])
             if quoted_vals:
                 target_text = quoted_vals[-1]
 
     return fallback_idx, target_text
 
 
-def _resolve_property_placeholder(manifest_path, target_text, tech, lines, line_idx_to_change, declared_ver):
+def _resolve_property_placeholder(
+    manifest_path, target_text, tech, lines, line_idx_to_change, declared_ver
+):
     """Resolves Maven/Gradle/NuGet property placeholders to concrete files and line numbers."""
+
+    @functools.lru_cache(maxsize=1024)
+    def _get_maven_nuget_prop_regex(prop_name_val):
+        return re.compile(
+            r"<\s*"
+            + re.escape(prop_name_val)
+            + r"\s*>\s*(.*?)\s*<\s*/\s*"
+            + re.escape(prop_name_val)
+            + r"\s*>",
+            re.IGNORECASE,
+        )
+
+    @functools.lru_cache(maxsize=1024)
+    def _get_gradle_prop_regex(prop_name_val):
+        return re.compile(
+            r"^\s*([a-zA-Z0-9_.-]+)?\s*"
+            + re.escape(prop_name_val)
+            + r'\s*=\s*["\']([^"\']+)["\']'
+        )
+
     def _search_lines_for_property(lines_list, prop_name_val, tech_type):
         if tech_type in ("maven", "nuget"):
-            pattern = r"<\s*" + re.escape(prop_name_val) + r"\s*>\s*(.*?)\s*<\s*/\s*" + re.escape(prop_name_val) + r"\s*>"
+            pattern = _get_maven_nuget_prop_regex(prop_name_val)
             for idx_p, line_p in enumerate(lines_list):
-                m_p = re.search(pattern, line_p, re.IGNORECASE)
+                m_p = pattern.search(line_p)
                 if m_p:
                     return idx_p + 1, m_p.group(1)
         elif tech_type == "gradle":
-            pattern = r"^\s*([a-zA-Z0-9_.-]+)?\s*" + re.escape(prop_name_val) + r'\s*=\s*["\']([^"\']+)["\']'
+            pattern = _get_gradle_prop_regex(prop_name_val)
             for idx_p, line_p in enumerate(lines_list):
-                m_p = re.search(pattern, line_p)
+                m_p = pattern.search(line_p)
                 if m_p:
                     return idx_p + 1, m_p.group(2)
         return None, None
@@ -9325,7 +9546,9 @@ def _resolve_property_placeholder(manifest_path, target_text, tech, lines, line_
         except Exception:
             return None, None, None
 
-        line_idx_p, val_p = _search_lines_for_property(lines_list, prop_name_val, tech_type)
+        line_idx_p, val_p = _search_lines_for_property(
+            lines_list, prop_name_val, tech_type
+        )
         if line_idx_p is not None:
             return current_path, line_idx_p, val_p
 
@@ -9339,9 +9562,13 @@ def _resolve_property_placeholder(manifest_path, target_text, tech, lines, line_
                 parent_pom = os.path.join(parent_dir_p, "pom.xml")
                 if os.path.exists(parent_pom):
                     try:
-                        with open(parent_pom, "r", encoding="utf-8", errors="ignore") as f_p:
+                        with open(
+                            parent_pom, "r", encoding="utf-8", errors="ignore"
+                        ) as f_p:
                             parent_lines = f_p.readlines()
-                        line_idx_p, val_p = _search_lines_for_property(parent_lines, prop_name_val, tech_type)
+                        line_idx_p, val_p = _search_lines_for_property(
+                            parent_lines, prop_name_val, tech_type
+                        )
                         if line_idx_p is not None:
                             return parent_pom, line_idx_p, val_p
                     except (OSError, UnicodeDecodeError):
@@ -9354,7 +9581,11 @@ def _resolve_property_placeholder(manifest_path, target_text, tech, lines, line_
     is_placeholder = False
     prop_name = None
     if tech == "maven":
-        m = re.match(r"^\s*\$\SafeWriter?\{\s*(.*?)\s*\}\s*$", target_text) if hasattr(re, 'match') else None
+        m = (
+            re.match(r"^\s*\$\SafeWriter?\{\s*(.*?)\s*\}\s*$", target_text)
+            if hasattr(re, "match")
+            else None
+        )
         m = re.match(r"^\s*\$\{\s*(.*?)\s*\}\s*$", target_text)
         if m:
             is_placeholder = True
@@ -9379,7 +9610,9 @@ def _resolve_property_placeholder(manifest_path, target_text, tech, lines, line_
     new_lines = lines
 
     if is_placeholder and prop_name:
-        resolved_path, resolved_line_idx, current_val = find_property_definition(manifest_path, prop_name, tech)
+        resolved_path, resolved_line_idx, current_val = find_property_definition(
+            manifest_path, prop_name, tech
+        )
         if resolved_path and resolved_line_idx:
             new_path = resolved_path
             try:
@@ -9392,18 +9625,25 @@ def _resolve_property_placeholder(manifest_path, target_text, tech, lines, line_
 
     if declared_ver and resolved_ver:
         is_val_placeholder = (
-            (tech == "maven" and "${" in resolved_ver) or
-            (tech == "nuget" and "$(" in resolved_ver) or
-            (tech == "gradle" and "$" in resolved_ver)
+            (tech == "maven" and "${" in resolved_ver)
+            or (tech == "nuget" and "$(" in resolved_ver)
+            or (tech == "gradle" and "$" in resolved_ver)
         )
         if not is_val_placeholder:
+
             def clean_ver(v):
                 v = v.strip().lower().removeprefix("v")
                 return RE_OPERATOR_PREFIX.sub("", v)
 
             def is_version_compatible(v1, v2):
                 c1, c2 = clean_ver(v1), clean_ver(v2)
-                if not c1 or not c2 or c1 == c2 or c1.startswith(c2) or c2.startswith(c1):
+                if (
+                    not c1
+                    or not c2
+                    or c1 == c2
+                    or c1.startswith(c2)
+                    or c2.startswith(c1)
+                ):
                     return True
                 m1, m2 = RE_NUM_START.match(c1), RE_NUM_START.match(c2)
                 return bool(m1 and m2 and m1.group(1) == m2.group(1))
@@ -9414,7 +9654,9 @@ def _resolve_property_placeholder(manifest_path, target_text, tech, lines, line_
     return new_path, new_idx, resolved_ver, new_lines
 
 
-def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ver, tech, package_name=None):
+def generate_remediation_diff(
+    manifest_path, line_index, declared_ver, latest_ver, tech, package_name=None
+):
     """Generates remediation diff showing current vs suggested change."""
     try:
         with open(manifest_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -9427,7 +9669,9 @@ def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ve
         return None
 
     search_range = range(idx, min(idx + 4, len(lines)))
-    line_idx_to_change, target_text = _find_target_version_line(lines, search_range, declared_ver, tech, package_name, idx)
+    line_idx_to_change, target_text = _find_target_version_line(
+        lines, search_range, declared_ver, tech, package_name, idx
+    )
 
     if (
         target_text
@@ -9507,12 +9751,20 @@ def generate_remediation_diff(manifest_path, line_index, declared_ver, latest_ve
             else:
                 html_new = escaped_new
 
-            current_block.append({"line_num": line_num, "html": html_orig, "is_changed": True})
-            suggested_block.append({"line_num": line_num, "html": html_new, "is_changed": True})
+            current_block.append(
+                {"line_num": line_num, "html": html_orig, "is_changed": True}
+            )
+            suggested_block.append(
+                {"line_num": line_num, "html": html_new, "is_changed": True}
+            )
         else:
             escaped_orig = escape_html(orig_line)
-            current_block.append({"line_num": line_num, "html": escaped_orig, "is_changed": False})
-            suggested_block.append({"line_num": line_num, "html": escaped_orig, "is_changed": False})
+            current_block.append(
+                {"line_num": line_num, "html": escaped_orig, "is_changed": False}
+            )
+            suggested_block.append(
+                {"line_num": line_num, "html": escaped_orig, "is_changed": False}
+            )
 
     return {
         "manifest_path": manifest_path,
@@ -9541,15 +9793,21 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
     clean_numeric = raw_ver.lstrip("^~>=<! v")
 
     if tech in {"npm", "pnpm", "yarn"}:
-        clean_target = f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
+        clean_target = (
+            f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
+        )
         deps_match_idx = None
         dev_deps_match_idx = None
         root_open_idx = None
+
+        re_deps = re.compile(r'"dependencies"\s*:\s*\{')
+        re_dev_deps = re.compile(r'"devDependencies"\s*:\s*\{')
+
         for idx, line in enumerate(lines):
-            if re.search(r'"dependencies"\s*:\s*\{', line):
+            if re_deps.search(line):
                 deps_match_idx = idx
                 break
-            elif re.search(r'"devDependencies"\s*:\s*\{', line):
+            elif re_dev_deps.search(line):
                 dev_deps_match_idx = idx
             elif root_open_idx is None and "{" in line:
                 root_open_idx = idx
@@ -9564,10 +9822,13 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
             insert_line_idx = root_open_idx + 1
             line_to_add = f'{indent}"dependencies": {{\n{indent}  "{package_name}": "{clean_target}"\n{indent}}},'
     elif tech == "php":
-        clean_target = f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
+        clean_target = (
+            f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
+        )
         deps_match_idx = None
+        re_require = re.compile(r'"require"\s*:\s*\{')
         for idx, line in enumerate(lines):
-            if re.search(r'"require"\s*:\s*\{', line):
+            if re_require.search(line):
                 deps_match_idx = idx
                 break
         if deps_match_idx is not None:
@@ -9581,10 +9842,12 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
         go_ver = RE_OPERATOR_PREFIX.sub("", go_ver)
         req_open_idx = None
         req_close_idx = None
+        re_go_req_open = re.compile(r"^\s*require\s*\(")
+        re_go_req_close = re.compile(r"^\s*\)")
         for idx, line in enumerate(lines):
-            if re.match(r"^\s*require\s*\(", line):
+            if re_go_req_open.match(line):
                 req_open_idx = idx
-            elif req_open_idx is not None and re.match(r"^\s*\)", line):
+            elif req_open_idx is not None and re_go_req_close.match(line):
                 req_close_idx = idx
                 break
         if req_close_idx is not None:
@@ -9598,8 +9861,9 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
         line_to_add = f"{package_name}>={clean_numeric}"
     elif tech == "rust":
         dep_sec_idx = None
+        re_rust_dep = re.compile(r"^\[dependencies\]")
         for idx, line in enumerate(lines):
-            if re.search(r"^\[dependencies\]", line.strip()):
+            if re_rust_dep.search(line.strip()):
                 dep_sec_idx = idx
                 break
         if dep_sec_idx is not None:
@@ -9686,10 +9950,13 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
     line_to_add = ""
 
     if tech in {"npm", "pnpm"}:
-        clean_target = f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
+        clean_target = (
+            f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
+        )
         overrides_line_idx = None
+        re_overrides = re.compile(r'"overrides"\s*:\s*\{')
         for idx, line in enumerate(lines):
-            if re.search(r'"overrides"\s*:\s*\{', line):
+            if re_overrides.search(line):
                 overrides_line_idx = idx
                 break
 
@@ -9705,10 +9972,13 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
             insert_line_idx = (root_open_idx + 1) if root_open_idx is not None else 1
             line_to_add = f'{indent}"overrides": {{\n{indent}  "{package_name}": "{clean_target}"\n{indent}}},'
     elif tech == "yarn":
-        clean_target = f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
+        clean_target = (
+            f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
+        )
         resolutions_line_idx = None
+        re_resolutions = re.compile(r'"resolutions"\s*:\s*\{')
         for idx, line in enumerate(lines):
-            if re.search(r'"resolutions"\s*:\s*\{', line):
+            if re_resolutions.search(line):
                 resolutions_line_idx = idx
                 break
         if resolutions_line_idx is not None:
@@ -9729,8 +9999,9 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
         line_to_add = f"replace {package_name} => {package_name} {go_ver}"
     elif tech == "rust":
         patch_sec_idx = None
+        re_rust_patch = re.compile(r"^\[patch\.crates-io\]")
         for idx, line in enumerate(lines):
-            if re.search(r"^\[patch\.crates-io\]", line.strip()):
+            if re_rust_patch.search(line.strip()):
                 patch_sec_idx = idx
                 break
         if patch_sec_idx is not None:
@@ -9739,6 +10010,8 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
         else:
             insert_line_idx = len(lines)
             line_to_add = f'\n[patch.crates-io]\n{package_name} = "{clean_numeric}"'
+    elif tech == "ruby":
+        return None
     else:
         return generate_addition_remediation_diff(
             manifest_path, package_name, target_ver, tech
@@ -9791,6 +10064,214 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
     }
 
 
+RAILS_CORE_GEMS = {
+    "actioncable",
+    "actionmailbox",
+    "actionmailer",
+    "actionpack",
+    "actiontext",
+    "actionview",
+    "activejob",
+    "activemodel",
+    "activerecord",
+    "activestorage",
+    "activesupport",
+    "railties",
+}
+
+
+def _populate_rails_remediation_strategies(
+    r,
+    results,
+    manifest_path,
+    lines,
+    name,
+    get_line_idx_fn,
+    latest_patch,
+    latest_sm,
+    latest_abs,
+):
+    """Generates remediation strategies for Rails core components by targeting the 'rails' gem in Gemfile."""
+    strategies = []
+    project_path = r.get("project_path")
+
+    # Find the 'rails' gem in results
+    rails_candidate = next(
+        (
+            item
+            for item in results
+            if item.get("name") == "rails"
+            and item.get("project_path") == project_path
+        ),
+        None,
+    )
+
+    rails_decl = rails_candidate.get("declared") if rails_candidate else None
+    rails_line_idx = get_line_idx_fn(
+        manifest_path,
+        lines,
+        "rails",
+        "ruby",
+        rails_decl,
+        False,
+    )
+
+    if rails_line_idx is None:
+        return strategies
+
+    # Target versions for rails (matching sub-gem fix version or rails candidate version)
+    r_patch = latest_patch or (
+        rails_candidate.get("latest_patch") if rails_candidate else None
+    )
+    r_sm = latest_sm or (
+        rails_candidate.get("latest_same_major") if rails_candidate else None
+    )
+    r_abs = latest_abs or (
+        (rails_candidate.get("latest_absolute") or rails_candidate.get("latest"))
+        if rails_candidate
+        else None
+    )
+
+    rails_inst = (
+        rails_candidate.get("installed") if rails_candidate else r.get("installed")
+    )
+    rails_clean_inst = (
+        rails_inst[0] if (isinstance(rails_inst, list) and rails_inst) else rails_inst
+    )
+    clean_inst_v = _clean_version_str(rails_clean_inst)
+    clean_decl_v = _clean_version_str(rails_decl)
+
+    if r_patch and _clean_version_str(r_patch) in (clean_inst_v, clean_decl_v):
+        r_patch = None
+    if r_sm and (
+        _clean_version_str(r_sm) in (clean_inst_v, clean_decl_v)
+        or _clean_version_str(r_sm) == _clean_version_str(r_patch)
+    ):
+        r_sm = None
+    if r_abs and (
+        _clean_version_str(r_abs) in (clean_inst_v, clean_decl_v)
+        or _clean_version_str(r_abs) == _clean_version_str(r_sm)
+        or _clean_version_str(r_abs) == _clean_version_str(r_patch)
+    ):
+        r_abs = None
+
+    rails_options = []
+    cmd_subpkg = f"rails {name}" if name != "rails" else "rails"
+
+    if r_patch:
+        diff_patch = generate_remediation_diff(
+            manifest_path, rails_line_idx, rails_decl, r_patch, "ruby", "rails"
+        )
+        if diff_patch:
+            rails_options.append(
+                {
+                    "id": "patch",
+                    "label": f"Patch rails: v{_clean_version_str(r_patch)}",
+                    "badge": "Patch / Bugfix",
+                    "badge_class": "v-chip-ok",
+                    "command": f"bundle update {cmd_subpkg}",
+                    "validation": "bundle exec rails test",
+                    "diff": diff_patch,
+                }
+            )
+
+    if r_sm:
+        diff_sm = generate_remediation_diff(
+            manifest_path, rails_line_idx, rails_decl, r_sm, "ruby", "rails"
+        )
+        if diff_sm:
+            rails_options.append(
+                {
+                    "id": "minor",
+                    "label": f"Minor rails: v{_clean_version_str(r_sm)}",
+                    "badge": "Minor / Feature",
+                    "badge_class": "v-chip-safe",
+                    "command": f"bundle update {cmd_subpkg}",
+                    "validation": "bundle exec rails test",
+                    "diff": diff_sm,
+                }
+            )
+
+    if r_abs and " or " not in str(r_abs):
+        diff_abs = generate_remediation_diff(
+            manifest_path, rails_line_idx, rails_decl, r_abs, "ruby", "rails"
+        )
+        if diff_abs:
+            rails_options.append(
+                {
+                    "id": "major",
+                    "label": f"Major rails: v{_clean_version_str(r_abs)}",
+                    "badge": "Major / Breaking",
+                    "badge_class": "v-chip-major",
+                    "command": f"bundle update {cmd_subpkg}",
+                    "validation": "bundle exec rails test",
+                    "diff": diff_abs,
+                }
+            )
+
+    diagnostic_msg = (
+        f"'{name}' is a core Ruby on Rails component with strict version coupling to the 'rails' framework. "
+        "Do not add loose sub-gems directly to Gemfile in isolation, as this causes Bundler version resolution conflicts. "
+        f"Update the 'rails' gem in Gemfile and run 'bundle update {cmd_subpkg}' to safely resolve all framework components."
+    )
+
+    if rails_options:
+        strategies.append(
+            {
+                "id": "rails_upgrade",
+                "title": (
+                    f"Upgrade Rails Framework (rails)"
+                    if name == "rails"
+                    else f"Upgrade Rails Framework ({name} via rails)"
+                ),
+                "description": f"Recommended. Updates 'rails' in Gemfile to resolve '{name}'.",
+                "is_recommended": True,
+                "diagnostic": diagnostic_msg,
+                "command": f"bundle update {cmd_subpkg}",
+                "validation": "bundle exec rails test",
+                "options": rails_options,
+            }
+        )
+
+    return strategies
+
+
+def _populate_ruby_lockfile_strategies(
+    name, target_ver_str, has_prior_strategies, parent_name=None
+):
+    """Generates lockfile resolution strategy for Ruby transitive dependencies using Bundler."""
+    clean_v = _clean_version_str(target_ver_str)
+    cmd = f"bundle update {name}"
+    val_cmd = "bundle exec rails test" if parent_name == "rails" else "bundle check"
+    diagnostic_msg = (
+        f"'{name}' is a transitive dependency. Bundler manages transitive versions inside Gemfile.lock. "
+        f"Running '{cmd}' will update '{name}' within the constraints of your direct gems without modifying Gemfile."
+    )
+
+    return [
+        {
+            "id": "bundle_update",
+            "title": f"Resolve in Lockfile (bundle update {name})",
+            "description": f"Updates '{name}' in Gemfile.lock without altering Gemfile.",
+            "is_recommended": not has_prior_strategies,
+            "diagnostic": diagnostic_msg,
+            "command": cmd,
+            "validation": val_cmd,
+            "options": [
+                {
+                    "id": "bundle_update",
+                    "label": f"Run: {cmd}",
+                    "badge": "Lockfile Update",
+                    "badge_class": "v-chip-ok",
+                    "command": cmd,
+                    "validation": val_cmd,
+                    "diff": None,
+                }
+            ],
+        }
+    ]
+
+
 def format_remediation_option_label(ver_str: str) -> str:
     """Formats a version/constraint string into a user-friendly tab label.
     Examples:
@@ -9833,97 +10314,166 @@ def _clean_version_str(v):
     return RE_OPERATOR_PREFIX.sub("", v)
 
 
-def _populate_direct_strategies(r, manifest_path, found_line_idx, name, declared, tech, latest_patch, latest_sm, latest_abs):
+def _populate_direct_strategies(
+    r,
+    manifest_path,
+    found_line_idx,
+    name,
+    declared,
+    tech,
+    latest_patch,
+    latest_sm,
+    latest_abs,
+):
     direct_options = []
-    target_string = latest_abs or (r.get("latest") if r.get("name") == name else "") or ""
+    target_string = (
+        latest_abs or (r.get("latest") if r.get("name") == name else "") or ""
+    )
+    cmd_direct = f"bundle update {name}" if tech == "ruby" else None
+    val_direct = (
+        ("bundle exec rails test" if "rails" in (r.get("required_by") or []) else "bundle check")
+        if tech == "ruby"
+        else None
+    )
+
     if " or " in target_string:
         parts = [p.strip() for p in target_string.split(" or ") if p.strip()]
         if len(parts) >= 2:
             for p in parts:
                 diff_p = (
-                    generate_remediation_diff(manifest_path, found_line_idx, declared, p, tech, name)
+                    generate_remediation_diff(
+                        manifest_path, found_line_idx, declared, p, tech, name
+                    )
                     if found_line_idx
-                    else generate_addition_remediation_diff(manifest_path, name, p, tech)
+                    else generate_addition_remediation_diff(
+                        manifest_path, name, p, tech
+                    )
                 )
                 if diff_p:
-                    direct_options.append({
-                        "id": f"option_{p}",
-                        "label": format_remediation_option_label(p),
-                        "badge": "Option",
-                        "badge_class": "v-chip-safe",
-                        "diff": diff_p,
-                    })
+                    direct_options.append(
+                        {
+                            "id": f"option_{p}",
+                            "label": format_remediation_option_label(p),
+                            "badge": "Option",
+                            "badge_class": "v-chip-safe",
+                            "command": cmd_direct,
+                            "validation": val_direct,
+                            "diff": diff_p,
+                        }
+                    )
             diff_comb = (
-                generate_remediation_diff(manifest_path, found_line_idx, declared, target_string, tech, name)
+                generate_remediation_diff(
+                    manifest_path, found_line_idx, declared, target_string, tech, name
+                )
                 if found_line_idx
-                else generate_addition_remediation_diff(manifest_path, name, target_string, tech)
+                else generate_addition_remediation_diff(
+                    manifest_path, name, target_string, tech
+                )
             )
             if diff_comb:
-                direct_options.append({
-                    "id": f"option_{target_string}",
-                    "label": format_remediation_option_label(target_string),
-                    "badge": "Option",
-                    "badge_class": "v-chip-major",
-                    "diff": diff_comb,
-                })
+                direct_options.append(
+                    {
+                        "id": f"option_{target_string}",
+                        "label": format_remediation_option_label(target_string),
+                        "badge": "Option",
+                        "badge_class": "v-chip-major",
+                        "command": cmd_direct,
+                        "validation": val_direct,
+                        "diff": diff_comb,
+                    }
+                )
 
     if latest_patch:
         diff_patch = (
-            generate_remediation_diff(manifest_path, found_line_idx, declared, latest_patch, tech, name)
+            generate_remediation_diff(
+                manifest_path, found_line_idx, declared, latest_patch, tech, name
+            )
             if found_line_idx
-            else generate_addition_remediation_diff(manifest_path, name, latest_patch, tech)
+            else generate_addition_remediation_diff(
+                manifest_path, name, latest_patch, tech
+            )
         )
         if diff_patch:
-            direct_options.append({
-                "id": "patch",
-                "label": f"Patch: v{_clean_version_str(latest_patch)}",
-                "badge": "Patch / Bugfix",
-                "badge_class": "v-chip-ok",
-                "diff": diff_patch,
-            })
+            direct_options.append(
+                {
+                    "id": "patch",
+                    "label": f"Patch: v{_clean_version_str(latest_patch)}",
+                    "badge": "Patch / Bugfix",
+                    "badge_class": "v-chip-ok",
+                    "command": cmd_direct,
+                    "validation": val_direct,
+                    "diff": diff_patch,
+                }
+            )
 
     if latest_sm:
         diff_sm = (
-            generate_remediation_diff(manifest_path, found_line_idx, declared, latest_sm, tech, name)
+            generate_remediation_diff(
+                manifest_path, found_line_idx, declared, latest_sm, tech, name
+            )
             if found_line_idx
-            else generate_addition_remediation_diff(manifest_path, name, latest_sm, tech)
+            else generate_addition_remediation_diff(
+                manifest_path, name, latest_sm, tech
+            )
         )
         if diff_sm:
-            direct_options.append({
-                "id": "minor",
-                "label": f"Minor: v{_clean_version_str(latest_sm)}",
-                "badge": "Minor / Feature",
-                "badge_class": "v-chip-safe",
-                "diff": diff_sm,
-            })
+            direct_options.append(
+                {
+                    "id": "minor",
+                    "label": f"Minor: v{_clean_version_str(latest_sm)}",
+                    "badge": "Minor / Feature",
+                    "badge_class": "v-chip-safe",
+                    "command": cmd_direct,
+                    "validation": val_direct,
+                    "diff": diff_sm,
+                }
+            )
 
     if latest_abs and " or " not in str(latest_abs):
         diff_abs = (
-            generate_remediation_diff(manifest_path, found_line_idx, declared, latest_abs, tech, name)
+            generate_remediation_diff(
+                manifest_path, found_line_idx, declared, latest_abs, tech, name
+            )
             if found_line_idx
-            else generate_addition_remediation_diff(manifest_path, name, latest_abs, tech)
+            else generate_addition_remediation_diff(
+                manifest_path, name, latest_abs, tech
+            )
         )
         if diff_abs:
-            direct_options.append({
-                "id": "major",
-                "label": f"Major: v{_clean_version_str(latest_abs)}",
-                "badge": "Major / Breaking",
-                "badge_class": "v-chip-major",
-                "diff": diff_abs,
-            })
+            direct_options.append(
+                {
+                    "id": "major",
+                    "label": f"Major: v{_clean_version_str(latest_abs)}",
+                    "badge": "Major / Breaking",
+                    "badge_class": "v-chip-major",
+                    "command": cmd_direct,
+                    "validation": val_direct,
+                    "diff": diff_abs,
+                }
+            )
 
     if direct_options:
-        return [{
-            "id": "direct_upgrade",
-            "title": f"Update Dependency ({name})" if r.get("dep_type") == "Transitive" else f"Update Direct Dependency ({name})",
-            "description": f"Updates '{name}' in manifest file.",
-            "is_recommended": True,
-            "options": direct_options,
-        }]
+        return [
+            {
+                "id": "direct_upgrade",
+                "title": (
+                    f"Update Dependency ({name})"
+                    if r.get("dep_type") == "Transitive"
+                    else f"Update Direct Dependency ({name})"
+                ),
+                "description": f"Updates '{name}' in manifest file.",
+                "is_recommended": True,
+                "command": cmd_direct,
+                "validation": val_direct,
+                "options": direct_options,
+            }
+        ]
     return []
 
 
-def _populate_parent_strategies(r, results, manifest_path, lines, tech, name, get_line_idx_fn):
+def _populate_parent_strategies(
+    r, results, manifest_path, lines, tech, name, get_line_idx_fn
+):
     strategies = []
     if not r.get("required_by"):
         return strategies
@@ -9941,7 +10491,14 @@ def _populate_parent_strategies(r, results, manifest_path, lines, tech, name, ge
         if not parent_candidate:
             continue
 
-        parent_line_idx = get_line_idx_fn(manifest_path, lines, parent_name, tech, parent_candidate.get("declared"), False)
+        parent_line_idx = get_line_idx_fn(
+            manifest_path,
+            lines,
+            parent_name,
+            tech,
+            parent_candidate.get("declared"),
+            False,
+        )
         if parent_line_idx is None:
             continue
 
@@ -9951,7 +10508,9 @@ def _populate_parent_strategies(r, results, manifest_path, lines, tech, name, ge
         p_decl = parent_candidate.get("declared")
         p_patch = parent_candidate.get("latest_patch")
         p_sm = parent_candidate.get("latest_same_major")
-        p_abs = parent_candidate.get("latest_absolute") or parent_candidate.get("latest")
+        p_abs = parent_candidate.get("latest_absolute") or parent_candidate.get(
+            "latest"
+        )
 
         p_clean_inst_v = _clean_version_str(p_clean_inst)
         p_clean_decl_v = _clean_version_str(p_decl)
@@ -9971,75 +10530,123 @@ def _populate_parent_strategies(r, results, manifest_path, lines, tech, name, ge
             p_abs = None
 
         parent_options = []
+        cmd_parent = f"bundle update {p_name} {name}" if tech == "ruby" else None
+        val_parent = "bundle exec rails test" if tech == "ruby" else None
+
         if p_patch:
-            p_diff = generate_remediation_diff(manifest_path, parent_line_idx, p_decl, p_patch, tech, p_name)
+            p_diff = generate_remediation_diff(
+                manifest_path, parent_line_idx, p_decl, p_patch, tech, p_name
+            )
             if p_diff:
-                parent_options.append({
-                    "id": "patch",
-                    "label": f"Patch {p_name}: v{_clean_version_str(p_patch)}",
-                    "badge": "Patch / Bugfix",
-                    "badge_class": "v-chip-ok",
-                    "diff": p_diff,
-                })
+                parent_options.append(
+                    {
+                        "id": "patch",
+                        "label": f"Patch {p_name}: v{_clean_version_str(p_patch)}",
+                        "badge": "Patch / Bugfix",
+                        "badge_class": "v-chip-ok",
+                        "command": cmd_parent,
+                        "validation": val_parent,
+                        "diff": p_diff,
+                    }
+                )
         if p_sm:
-            p_diff = generate_remediation_diff(manifest_path, parent_line_idx, p_decl, p_sm, tech, p_name)
+            p_diff = generate_remediation_diff(
+                manifest_path, parent_line_idx, p_decl, p_sm, tech, p_name
+            )
             if p_diff:
-                parent_options.append({
-                    "id": "minor",
-                    "label": f"Minor {p_name}: v{_clean_version_str(p_sm)}",
-                    "badge": "Minor / Feature",
-                    "badge_class": "v-chip-safe",
-                    "diff": p_diff,
-                })
+                parent_options.append(
+                    {
+                        "id": "minor",
+                        "label": f"Minor {p_name}: v{_clean_version_str(p_sm)}",
+                        "badge": "Minor / Feature",
+                        "badge_class": "v-chip-safe",
+                        "command": cmd_parent,
+                        "validation": val_parent,
+                        "diff": p_diff,
+                    }
+                )
         if p_abs:
-            p_diff = generate_remediation_diff(manifest_path, parent_line_idx, p_decl, p_abs, tech, p_name)
+            p_diff = generate_remediation_diff(
+                manifest_path, parent_line_idx, p_decl, p_abs, tech, p_name
+            )
             if p_diff:
-                parent_options.append({
-                    "id": "major",
-                    "label": f"Major {p_name}: v{_clean_version_str(p_abs)}",
-                    "badge": "Major / Breaking",
-                    "badge_class": "v-chip-major",
-                    "diff": p_diff,
-                })
+                parent_options.append(
+                    {
+                        "id": "major",
+                        "label": f"Major {p_name}: v{_clean_version_str(p_abs)}",
+                        "badge": "Major / Breaking",
+                        "badge_class": "v-chip-major",
+                        "command": cmd_parent,
+                        "validation": val_parent,
+                        "diff": p_diff,
+                    }
+                )
 
         if parent_options:
-            strategies.append({
-                "id": "parent_upgrade",
-                "title": f"Upgrade Parent Package ({p_name})",
-                "description": f"Recommended. Upgrades parent package '{p_name}' which requires '{name}'.",
-                "is_recommended": True,
-                "options": parent_options,
-            })
+            strategies.append(
+                {
+                    "id": "parent_upgrade",
+                    "title": f"Upgrade Parent Package ({p_name})",
+                    "description": f"Recommended. Upgrades parent package '{p_name}' which requires '{name}'.",
+                    "is_recommended": True,
+                    "command": cmd_parent,
+                    "validation": val_parent,
+                    "options": parent_options,
+                }
+            )
             break
 
     return strategies
 
 
-def _populate_override_strategies(manifest_path, name, tech, latest_patch, latest_sm, latest_abs, clean_installed, has_prior_strategies):
+def _populate_override_strategies(
+    manifest_path,
+    name,
+    tech,
+    latest_patch,
+    latest_sm,
+    latest_abs,
+    clean_installed,
+    has_prior_strategies,
+):
     target_ver_str = latest_patch or latest_sm or latest_abs or clean_installed
     if not target_ver_str:
         return []
 
-    ov_diff = generate_override_remediation_diff(manifest_path, name, target_ver_str, tech)
+    ov_diff = generate_override_remediation_diff(
+        manifest_path, name, target_ver_str, tech
+    )
     if not ov_diff:
         return []
 
-    ov_badge = "Patch" if target_ver_str == latest_patch else "Minor" if target_ver_str == latest_sm else "Major"
-    ov_badge_class = "v-chip-ok" if ov_badge == "Patch" else "v-chip-safe" if ov_badge == "Minor" else "v-chip-major"
+    ov_badge = (
+        "Patch"
+        if target_ver_str == latest_patch
+        else "Minor" if target_ver_str == latest_sm else "Major"
+    )
+    ov_badge_class = (
+        "v-chip-ok"
+        if ov_badge == "Patch"
+        else "v-chip-safe" if ov_badge == "Minor" else "v-chip-major"
+    )
 
-    return [{
-        "id": "override",
-        "title": f"Force Transitive Override ({name})",
-        "description": f"Adds explicit override / resolution for '{name}' in manifest.",
-        "is_recommended": not has_prior_strategies,
-        "options": [{
+    return [
+        {
             "id": "override",
-            "label": f"Override {name}: v{_clean_version_str(target_ver_str)}",
-            "badge": ov_badge,
-            "badge_class": ov_badge_class,
-            "diff": ov_diff,
-        }],
-    }]
+            "title": f"Force Transitive Override ({name})",
+            "description": f"Adds explicit override / resolution for '{name}' in manifest.",
+            "is_recommended": not has_prior_strategies,
+            "options": [
+                {
+                    "id": "override",
+                    "label": f"Override {name}: v{_clean_version_str(target_ver_str)}",
+                    "badge": ov_badge,
+                    "badge_class": ov_badge_class,
+                    "diff": ov_diff,
+                }
+            ],
+        }
+    ]
 
 
 def _build_final_remediation(strategies, manifest_missing):
@@ -10050,16 +10657,50 @@ def _build_final_remediation(strategies, manifest_missing):
     for st in strategies:
         all_flat_options.extend(st.get("options", []))
 
-    remediation_safe = next((opt["diff"] for opt in all_flat_options if opt["id"] in {"patch", "minor"}), None)
-    remediation_major = next((opt["diff"] for opt in all_flat_options if opt["id"] == "major"), None)
+    remediation_safe = next(
+        (
+            opt["diff"]
+            for opt in all_flat_options
+            if opt.get("id") in {"patch", "minor"} and opt.get("diff")
+        ),
+        None,
+    )
+    remediation_major = next(
+        (
+            opt["diff"]
+            for opt in all_flat_options
+            if opt.get("id") == "major" and opt.get("diff")
+        ),
+        None,
+    )
     remediation_options = (
-        [{"label": opt["label"], "diff": opt["diff"]} for opt in all_flat_options]
+        [
+            {
+                "id": opt.get("id"),
+                "label": opt["label"],
+                "badge": opt.get("badge"),
+                "badge_class": opt.get("badge_class"),
+                "command": opt.get("command"),
+                "validation": opt.get("validation"),
+                "diff": opt.get("diff"),
+            }
+            for opt in all_flat_options
+        ]
         if all_flat_options
         else None
     )
 
-    first_diff = all_flat_options[0]["diff"] if all_flat_options else None
-    last_diff = all_flat_options[-1]["diff"] if all_flat_options else None
+    first_diff = next(
+        (opt["diff"] for opt in all_flat_options if opt.get("diff")), None
+    )
+    last_diff = next(
+        (opt["diff"] for opt in reversed(all_flat_options) if opt.get("diff")), None
+    )
+
+    rec_st = next((st for st in strategies if st.get("is_recommended")), strategies[0])
+    diagnostic = rec_st.get("diagnostic")
+    command = rec_st.get("command")
+    validation = rec_st.get("validation")
 
     return {
         "safe": remediation_safe or first_diff,
@@ -10067,6 +10708,9 @@ def _build_final_remediation(strategies, manifest_missing):
         "options": remediation_options,
         "manifest_missing": manifest_missing,
         "strategies": strategies,
+        "diagnostic": diagnostic,
+        "command": command,
+        "validation": validation,
     }
 
 
@@ -10092,13 +10736,25 @@ def populate_remediation_recommendations(results, default_project_path):
 
         found_line_idx = None
         best_score = -1
+        re_digits = re.compile(r"\d+\.\d+")
+        declared_digits_match = re_digits.search(str(declared)) if declared else None
+        declared_digits = (
+            declared_digits_match.group(0) if declared_digits_match else None
+        )
+        declared_str = str(declared).strip() if declared else None
+
         for idx, line in enumerate(lines):
-            matched = (f'"{pkg_name}"' in line or '"engines"' in line) if is_engine else match_line_for_dependency(line, pkg_name, tech)
+            matched = (
+                (f'"{pkg_name}"' in line or '"engines"' in line)
+                if is_engine
+                else match_line_for_dependency(line, pkg_name, tech)
+            )
             if matched:
                 score = 1
                 if declared:
-                    ver_digits = re.search(r"\d+\.\d+", str(declared))
-                    if ver_digits and ver_digits.group(0) in line or str(declared).strip() in line:
+                    if (declared_digits and declared_digits in line) or (
+                        declared_str and declared_str in line
+                    ):
                         score = 2
                 if score > best_score:
                     best_score = score
@@ -10115,7 +10771,9 @@ def populate_remediation_recommendations(results, default_project_path):
         if cache_key not in manifest_files_cache:
             if is_engine:
                 pkg_json = os.path.join(p_path, "package.json")
-                manifest_files_cache[cache_key] = [pkg_json] if os.path.exists(pkg_json) else []
+                manifest_files_cache[cache_key] = (
+                    [pkg_json] if os.path.exists(pkg_json) else []
+                )
             else:
                 manifest_files_cache[cache_key] = find_manifest_files(p_path, tech)
         return manifest_files_cache[cache_key]
@@ -10135,7 +10793,13 @@ def populate_remediation_recommendations(results, default_project_path):
 
         r["remediation"] = None
 
-        is_outdated = r.get("status") in {"major", "minor", "patch", "minor-major", "patch-major"}
+        is_outdated = r.get("status") in {
+            "major",
+            "minor",
+            "patch",
+            "minor-major",
+            "patch-major",
+        }
         has_vulns = bool(r.get("vulnerabilities"))
         is_depr = bool(r.get("deprecated"))
 
@@ -10152,7 +10816,9 @@ def populate_remediation_recommendations(results, default_project_path):
         installed = r.get("installed")
         dep_type = r.get("dep_type")
 
-        clean_installed = installed[0] if (isinstance(installed, list) and installed) else installed
+        clean_installed = (
+            installed[0] if (isinstance(installed, list) and installed) else installed
+        )
         latest_patch = r.get("latest_patch")
         latest_sm = r.get("latest_same_major")
         latest_abs = r.get("latest_absolute") or r.get("latest")
@@ -10160,21 +10826,30 @@ def populate_remediation_recommendations(results, default_project_path):
         clean_inst_v = _clean_version_str(clean_installed)
         clean_decl_v = _clean_version_str(declared)
 
-        if latest_patch and _clean_version_str(latest_patch) in (clean_inst_v, clean_decl_v):
+        if latest_patch and _clean_version_str(latest_patch) in (
+            clean_inst_v,
+            clean_decl_v,
+        ):
             latest_patch = None
         if latest_sm and (
             _clean_version_str(latest_sm) in (clean_inst_v, clean_decl_v)
             or _clean_version_str(latest_sm) == _clean_version_str(latest_patch)
         ):
             latest_sm = None
-        if latest_abs and " or " not in str(latest_abs) and (
-            _clean_version_str(latest_abs) in (clean_inst_v, clean_decl_v)
-            or _clean_version_str(latest_abs) == _clean_version_str(latest_sm)
-            or _clean_version_str(latest_abs) == _clean_version_str(latest_patch)
+        if (
+            latest_abs
+            and " or " not in str(latest_abs)
+            and (
+                _clean_version_str(latest_abs) in (clean_inst_v, clean_decl_v)
+                or _clean_version_str(latest_abs) == _clean_version_str(latest_sm)
+                or _clean_version_str(latest_abs) == _clean_version_str(latest_patch)
+            )
         ):
             latest_abs = None
 
-        manifest_files = _get_manifest_files(project_path, tech, r.get("is_engine", False))
+        manifest_files = _get_manifest_files(
+            project_path, tech, r.get("is_engine", False)
+        )
         if not manifest_files:
             continue
 
@@ -10183,21 +10858,82 @@ def populate_remediation_recommendations(results, default_project_path):
         if not lines:
             continue
 
-        found_line_idx = _find_line_idx(manifest_path, lines, name, tech, declared, r.get("is_engine", False))
-        manifest_missing = (found_line_idx is None and dep_type != "Transitive" and not r.get("required_by"))
+        found_line_idx = _find_line_idx(
+            manifest_path, lines, name, tech, declared, r.get("is_engine", False)
+        )
+        manifest_missing = (
+            found_line_idx is None
+            and dep_type != "Transitive"
+            and not r.get("required_by")
+        )
 
         strategies = []
 
-        if dep_type != "Transitive" or found_line_idx is not None:
-            strategies.extend(_populate_direct_strategies(
-                r, manifest_path, found_line_idx, name, declared, tech, latest_patch, latest_sm, latest_abs
-            ))
+        is_rails_core = tech == "ruby" and (name in RAILS_CORE_GEMS or name == "rails")
 
-        if dep_type == "Transitive" and found_line_idx is None:
-            strategies.extend(_populate_parent_strategies(r, results, manifest_path, lines, tech, name, _find_line_idx))
-            strategies.extend(_populate_override_strategies(
-                manifest_path, name, tech, latest_patch, latest_sm, latest_abs, clean_installed, bool(strategies)
-            ))
+        if is_rails_core:
+            rails_strategies = _populate_rails_remediation_strategies(
+                r,
+                results,
+                manifest_path,
+                lines,
+                name,
+                _find_line_idx,
+                latest_patch,
+                latest_sm,
+                latest_abs,
+            )
+            strategies.extend(rails_strategies)
+
+        if not strategies:
+            if dep_type != "Transitive" or found_line_idx is not None:
+                strategies.extend(
+                    _populate_direct_strategies(
+                        r,
+                        manifest_path,
+                        found_line_idx,
+                        name,
+                        declared,
+                        tech,
+                        latest_patch,
+                        latest_sm,
+                        latest_abs,
+                    )
+                )
+
+            if dep_type == "Transitive" and found_line_idx is None:
+                strategies.extend(
+                    _populate_parent_strategies(
+                        r, results, manifest_path, lines, tech, name, _find_line_idx
+                    )
+                )
+                if tech == "ruby":
+                    target_ver_str = (
+                        latest_patch or latest_sm or latest_abs or clean_installed
+                    )
+                    if target_ver_str:
+                        primary_parent = (r.get("required_by") or [None])[0]
+                        strategies.extend(
+                            _populate_ruby_lockfile_strategies(
+                                name,
+                                target_ver_str,
+                                bool(strategies),
+                                primary_parent,
+                            )
+                        )
+                else:
+                    strategies.extend(
+                        _populate_override_strategies(
+                            manifest_path,
+                            name,
+                            tech,
+                            latest_patch,
+                            latest_sm,
+                            latest_abs,
+                            clean_installed,
+                            bool(strategies),
+                        )
+                    )
 
         remed_dict = _build_final_remediation(strategies, manifest_missing)
         if remed_dict:
@@ -10216,271 +10952,287 @@ def populate_remediation_recommendations(results, default_project_path):
 # To edit the template with full IDE support, modify 'assets/report_template.html'
 # and run 'python scripts/pack_template.py' to update this string.
 _HTML_TEMPLATE_GZIP_B64 = (
-    "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"
-    "AA=="
+    "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"
 )
 
 
@@ -10735,10 +11487,10 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             single_path = unique_project_paths[0]
             techs = sorted(
                 {
-                        r.get("technology")
-                        for r in results
-                        if r.get("project_path") == single_path and r.get("technology")
-                    }
+                    r.get("technology")
+                    for r in results
+                    if r.get("project_path") == single_path and r.get("technology")
+                }
             )
             tech_suffix = f" [{', '.join(techs)}]" if techs else ""
             project_path_header_html = f"<div>Path: <strong>{escape_html(single_path)}{escape_html(tech_suffix)}</strong></div>"
@@ -11505,7 +12257,6 @@ def run_scan_all(args, parser):
             f"{COLOR_YELLOW}{ICON_WARN} No dependency check results collected from projects.{COLOR_RESET}"
         )
         sys.exit(0)
-
 
     combined_results = sorted(combined_results, key=lambda x: x["name"].lower())
 
