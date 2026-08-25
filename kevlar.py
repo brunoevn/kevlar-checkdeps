@@ -162,7 +162,7 @@ class ScanResultRow(TypedDict, total=False):
     remediation: Optional[Dict[str, Any]]
 
 
-VERSION = "1.10.10"
+VERSION = "1.10.11"
 
 # External APIs Configuration
 URL_NPM_REGISTRY = "https://registry.npmjs.org/"
