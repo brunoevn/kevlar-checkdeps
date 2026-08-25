@@ -9249,9 +9249,13 @@ def get_upgraded_constraint(declared_ver, latest_ver):
     return latest_ver
 
 
+@functools.lru_cache(maxsize=1024)
+def _get_npm_php_regex(pkg_lower):
+    return re.compile(r'"' + re.escape(pkg_lower) + r'"\s*:')
+
+
 def _match_npm_php(line_lower, pkg_lower):
-    pattern = r'"' + re.escape(pkg_lower) + r'"\s*:'
-    return re.search(pattern, line_lower) is not None
+    return _get_npm_php_regex(pkg_lower).search(line_lower) is not None
 
 
 def _match_pip(line_lower, pkg_lower):
@@ -9270,53 +9274,79 @@ def _match_pip(line_lower, pkg_lower):
     )
 
 
+@functools.lru_cache(maxsize=1024)
+def _get_nuget_regex(pkg_lower):
+    return re.compile(r'(include|update)\s*=\s*[\'"]' + re.escape(pkg_lower) + r'[\'"]')
+
+
 def _match_nuget(line_lower, pkg_lower):
-    pattern = r'(include|update)\s*=\s*[\'"]' + re.escape(pkg_lower) + r'[\'"]'
-    return re.search(pattern, line_lower) is not None
+    return _get_nuget_regex(pkg_lower).search(line_lower) is not None
+
+
+@functools.lru_cache(maxsize=1024)
+def _get_maven_regex(pkg_lower):
+    parts = pkg_lower.split(":")
+    artifact = parts[-1]
+    return re.compile(r"<artifactid>\s*" + re.escape(artifact) + r"\s*</artifactid>")
 
 
 def _match_maven(line_lower, pkg_lower):
-    parts = pkg_lower.split(":")
-    artifact = parts[-1]
-    pattern = r"<artifactid>\s*" + re.escape(artifact) + r"\s*</artifactid>"
-    return re.search(pattern, line_lower) is not None
+    return _get_maven_regex(pkg_lower).search(line_lower) is not None
+
+
+@functools.lru_cache(maxsize=1024)
+def _get_go_regex(pkg_lower):
+    return re.compile(re.escape(pkg_lower) + r"\s+v\d+")
 
 
 def _match_go(line_lower, pkg_lower):
-    pattern = re.escape(pkg_lower) + r"\s+v\d+"
-    return re.search(pattern, line_lower) is not None
+    return _get_go_regex(pkg_lower).search(line_lower) is not None
 
 
-def _match_rust(line_lower, pkg_lower):
-    pattern_eq = r"^\s*" + re.escape(pkg_lower) + r"\s*=\s*"
-    pattern_sec = (
+@functools.lru_cache(maxsize=1024)
+def _get_rust_regexes(pkg_lower):
+    pattern_eq = re.compile(r"^\s*" + re.escape(pkg_lower) + r"\s*=\s*")
+    pattern_sec = re.compile(
         r"\[\s*(?:target\.[^\]]+\.)?(?:dependencies|dev-dependencies|build-dependencies)\."
         + re.escape(pkg_lower)
         + r"\s*\]"
     )
-    return (
-        re.search(pattern_eq, line_lower) is not None
-        or re.search(pattern_sec, line_lower) is not None
-    )
+    return pattern_eq, pattern_sec
+
+
+def _match_rust(line_lower, pkg_lower):
+    eq, sec = _get_rust_regexes(pkg_lower)
+    return eq.search(line_lower) is not None or sec.search(line_lower) is not None
+
+
+@functools.lru_cache(maxsize=1024)
+def _get_ruby_regex(pkg_lower):
+    return re.compile(r'gem\s+[\'"]' + re.escape(pkg_lower) + r'[\'"]')
 
 
 def _match_ruby(line_lower, pkg_lower):
-    pattern = r'gem\s+[\'"]' + re.escape(pkg_lower) + r'[\'"]'
-    return re.search(pattern, line_lower) is not None
+    return _get_ruby_regex(pkg_lower).search(line_lower) is not None
 
 
-def _match_gradle(line_lower, pkg_lower):
+@functools.lru_cache(maxsize=1024)
+def _get_gradle_regexes(pkg_lower):
     parts = pkg_lower.split(":")
     if len(parts) > 1:
         group, name_part = parts[0], parts[1]
-        pattern_build = re.escape(group) + r":" + re.escape(name_part)
-        return re.search(pattern_build, line_lower) is not None
+        return re.compile(re.escape(group) + r":" + re.escape(name_part)), None, None
     else:
-        pattern_toml = r"^\s*" + re.escape(pkg_lower) + r"\s*=\s*"
-        pattern_name = r'name\s*=\s*[\'"]' + re.escape(pkg_lower) + r'[\'"]'
+        pattern_toml = re.compile(r"^\s*" + re.escape(pkg_lower) + r"\s*=\s*")
+        pattern_name = re.compile(r'name\s*=\s*[\'"]' + re.escape(pkg_lower) + r'[\'"]')
+        return None, pattern_toml, pattern_name
+
+
+def _match_gradle(line_lower, pkg_lower):
+    build, toml, name = _get_gradle_regexes(pkg_lower)
+    if build is not None:
+        return build.search(line_lower) is not None
+    else:
         return (
-            re.search(pattern_toml, line_lower) is not None
-            or re.search(pattern_name, line_lower) is not None
+            toml.search(line_lower) is not None or name.search(line_lower) is not None
         )
 
 
@@ -9398,6 +9428,21 @@ def find_manifest_files(project_path, technology):
     return manifest_files
 
 
+RE_MAVEN_VERSION = re.compile(r"<version>\s*(.*?)\s*</version>", re.IGNORECASE)
+RE_GRADLE_VER_REF = re.compile(r'version\.ref\s*=\s*["\']([^"\']+)["\']')
+RE_GRADLE_VER_EQ = re.compile(r'version\s*=\s*["\']([^"\']+)["\']')
+RE_GRADLE_VER_COLON = re.compile(r'version:\s*["\']([^"\']+)["\']')
+RE_NUGET_VERSION = re.compile(r'Version\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
+RE_QUOTES = re.compile(r'["\']([^"\']+)["\']')
+
+import functools
+
+
+@functools.lru_cache(maxsize=1024)
+def _get_gradle_pkg_regex(package_name):
+    return re.compile(re.escape(package_name) + r':([^\'"]+)')
+
+
 def _find_target_version_line(
     lines, search_range, declared_ver, tech, package_name, fallback_idx
 ):
@@ -9409,28 +9454,27 @@ def _find_target_version_line(
 
     if tech == "maven":
         for i in search_range:
-            m = re.search(r"<version>\s*(.*?)\s*</version>", lines[i], re.IGNORECASE)
+            m = RE_MAVEN_VERSION.search(lines[i])
             if m:
                 return i, m.group(1)
     elif tech == "gradle":
         for i in search_range:
-            m_ref = re.search(r'version\.ref\s*=\s*["\']([^"\']+)["\']', lines[i])
+            m_ref = RE_GRADLE_VER_REF.search(lines[i])
             if m_ref:
                 return i, m_ref.group(1)
-            m_eq = re.search(r'version\s*=\s*["\']([^"\']+)["\']', lines[i])
+            m_eq = RE_GRADLE_VER_EQ.search(lines[i])
             if m_eq:
                 return i, m_eq.group(1)
-            m_colon = re.search(r'version:\s*["\']([^"\']+)["\']', lines[i])
+            m_colon = RE_GRADLE_VER_COLON.search(lines[i])
             if m_colon:
                 return i, m_colon.group(1)
             if package_name:
-                pattern = re.escape(package_name) + r':([^\'"]+)'
-                m_str = re.search(pattern, lines[i])
+                m_str = _get_gradle_pkg_regex(package_name).search(lines[i])
                 if m_str:
                     return i, m_str.group(1)
     elif tech == "nuget":
         for i in search_range:
-            m = re.search(r'Version\s*=\s*["\']([^"\']+)["\']', lines[i], re.IGNORECASE)
+            m = RE_NUGET_VERSION.search(lines[i])
             if m:
                 return i, m.group(1)
 
@@ -9447,9 +9491,9 @@ def _find_target_version_line(
     if ver_pattern:
         target_text = ver_pattern.group(0)
     else:
-        quotes_match = re.search(r'["\']([^"\']+)["\']', lines[fallback_idx])
+        quotes_match = RE_QUOTES.search(lines[fallback_idx])
         if quotes_match:
-            quoted_vals = re.findall(r'["\']([^"\']+)["\']', lines[fallback_idx])
+            quoted_vals = RE_QUOTES.findall(lines[fallback_idx])
             if quoted_vals:
                 target_text = quoted_vals[-1]
 
@@ -9461,27 +9505,36 @@ def _resolve_property_placeholder(
 ):
     """Resolves Maven/Gradle/NuGet property placeholders to concrete files and line numbers."""
 
+    @functools.lru_cache(maxsize=1024)
+    def _get_maven_nuget_prop_regex(prop_name_val):
+        return re.compile(
+            r"<\s*"
+            + re.escape(prop_name_val)
+            + r"\s*>\s*(.*?)\s*<\s*/\s*"
+            + re.escape(prop_name_val)
+            + r"\s*>",
+            re.IGNORECASE,
+        )
+
+    @functools.lru_cache(maxsize=1024)
+    def _get_gradle_prop_regex(prop_name_val):
+        return re.compile(
+            r"^\s*([a-zA-Z0-9_.-]+)?\s*"
+            + re.escape(prop_name_val)
+            + r'\s*=\s*["\']([^"\']+)["\']'
+        )
+
     def _search_lines_for_property(lines_list, prop_name_val, tech_type):
         if tech_type in ("maven", "nuget"):
-            pattern = (
-                r"<\s*"
-                + re.escape(prop_name_val)
-                + r"\s*>\s*(.*?)\s*<\s*/\s*"
-                + re.escape(prop_name_val)
-                + r"\s*>"
-            )
+            pattern = _get_maven_nuget_prop_regex(prop_name_val)
             for idx_p, line_p in enumerate(lines_list):
-                m_p = re.search(pattern, line_p, re.IGNORECASE)
+                m_p = pattern.search(line_p)
                 if m_p:
                     return idx_p + 1, m_p.group(1)
         elif tech_type == "gradle":
-            pattern = (
-                r"^\s*([a-zA-Z0-9_.-]+)?\s*"
-                + re.escape(prop_name_val)
-                + r'\s*=\s*["\']([^"\']+)["\']'
-            )
+            pattern = _get_gradle_prop_regex(prop_name_val)
             for idx_p, line_p in enumerate(lines_list):
-                m_p = re.search(pattern, line_p)
+                m_p = pattern.search(line_p)
                 if m_p:
                     return idx_p + 1, m_p.group(2)
         return None, None
@@ -9746,11 +9799,15 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
         deps_match_idx = None
         dev_deps_match_idx = None
         root_open_idx = None
+
+        re_deps = re.compile(r'"dependencies"\s*:\s*\{')
+        re_dev_deps = re.compile(r'"devDependencies"\s*:\s*\{')
+
         for idx, line in enumerate(lines):
-            if re.search(r'"dependencies"\s*:\s*\{', line):
+            if re_deps.search(line):
                 deps_match_idx = idx
                 break
-            elif re.search(r'"devDependencies"\s*:\s*\{', line):
+            elif re_dev_deps.search(line):
                 dev_deps_match_idx = idx
             elif root_open_idx is None and "{" in line:
                 root_open_idx = idx
@@ -9769,8 +9826,9 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
             f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
         )
         deps_match_idx = None
+        re_require = re.compile(r'"require"\s*:\s*\{')
         for idx, line in enumerate(lines):
-            if re.search(r'"require"\s*:\s*\{', line):
+            if re_require.search(line):
                 deps_match_idx = idx
                 break
         if deps_match_idx is not None:
@@ -9784,10 +9842,12 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
         go_ver = RE_OPERATOR_PREFIX.sub("", go_ver)
         req_open_idx = None
         req_close_idx = None
+        re_go_req_open = re.compile(r"^\s*require\s*\(")
+        re_go_req_close = re.compile(r"^\s*\)")
         for idx, line in enumerate(lines):
-            if re.match(r"^\s*require\s*\(", line):
+            if re_go_req_open.match(line):
                 req_open_idx = idx
-            elif req_open_idx is not None and re.match(r"^\s*\)", line):
+            elif req_open_idx is not None and re_go_req_close.match(line):
                 req_close_idx = idx
                 break
         if req_close_idx is not None:
@@ -9801,8 +9861,9 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
         line_to_add = f"{package_name}>={clean_numeric}"
     elif tech == "rust":
         dep_sec_idx = None
+        re_rust_dep = re.compile(r"^\[dependencies\]")
         for idx, line in enumerate(lines):
-            if re.search(r"^\[dependencies\]", line.strip()):
+            if re_rust_dep.search(line.strip()):
                 dep_sec_idx = idx
                 break
         if dep_sec_idx is not None:
@@ -9893,8 +9954,9 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
             f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
         )
         overrides_line_idx = None
+        re_overrides = re.compile(r'"overrides"\s*:\s*\{')
         for idx, line in enumerate(lines):
-            if re.search(r'"overrides"\s*:\s*\{', line):
+            if re_overrides.search(line):
                 overrides_line_idx = idx
                 break
 
@@ -9914,8 +9976,9 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
             f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
         )
         resolutions_line_idx = None
+        re_resolutions = re.compile(r'"resolutions"\s*:\s*\{')
         for idx, line in enumerate(lines):
-            if re.search(r'"resolutions"\s*:\s*\{', line):
+            if re_resolutions.search(line):
                 resolutions_line_idx = idx
                 break
         if resolutions_line_idx is not None:
@@ -9936,8 +9999,9 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
         line_to_add = f"replace {package_name} => {package_name} {go_ver}"
     elif tech == "rust":
         patch_sec_idx = None
+        re_rust_patch = re.compile(r"^\[patch\.crates-io\]")
         for idx, line in enumerate(lines):
-            if re.search(r"^\[patch\.crates-io\]", line.strip()):
+            if re_rust_patch.search(line.strip()):
                 patch_sec_idx = idx
                 break
         if patch_sec_idx is not None:
@@ -10400,6 +10464,13 @@ def populate_remediation_recommendations(results, default_project_path):
 
         found_line_idx = None
         best_score = -1
+        re_digits = re.compile(r"\d+\.\d+")
+        declared_digits_match = re_digits.search(str(declared)) if declared else None
+        declared_digits = (
+            declared_digits_match.group(0) if declared_digits_match else None
+        )
+        declared_str = str(declared).strip() if declared else None
+
         for idx, line in enumerate(lines):
             matched = (
                 (f'"{pkg_name}"' in line or '"engines"' in line)
@@ -10409,11 +10480,8 @@ def populate_remediation_recommendations(results, default_project_path):
             if matched:
                 score = 1
                 if declared:
-                    ver_digits = re.search(r"\d+\.\d+", str(declared))
-                    if (
-                        ver_digits
-                        and ver_digits.group(0) in line
-                        or str(declared).strip() in line
+                    if (declared_digits and declared_digits in line) or (
+                        declared_str and declared_str in line
                     ):
                         score = 2
                 if score > best_score:
