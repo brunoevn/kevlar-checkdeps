@@ -3284,9 +3284,13 @@ def find_direct_parents(name, parents_map, direct_packages):
     visited = set()
     direct_parents = set()
     queue = [name]
+    # Optimization: Use read pointer instead of list.pop(0) for O(1) dequeue performance
+    head = 0
 
-    while queue:
-        current = queue.pop(0)
+    while head < len(queue):
+        current = queue[head]
+        head += 1
+
         if current in visited:
             continue
         visited.add(current)

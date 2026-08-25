@@ -12,3 +12,6 @@
 ## 2026-08-23 - re.compile module cache bypass for CVSS severity parsing
 **Learning:** In Python, `re.search()` with a string pattern requires a lookup in the `re` module's internal cache every time it's called. By using `re.compile()` at the module level and calling `.search()` directly on the compiled object, the code avoids this cache lookup, making execution slightly faster. This is a classic and highly effective micro-optimization for functions that are called repeatedly in a loop.
 **Action:** Move static regexes (using `re.compile()`) to the global module scope instead of caching them locally within frequently called functions or loops, as it bypasses cache lookup and function call overhead.
+## 2026-08-25 - Optimize BFS Traversal Dequeue Operation
+**Learning:** In Python, `list.pop(0)` is an O(N) operation because it shifts all subsequent elements. When used inside a loop like a BFS queue processor, it turns an O(N) algorithm into an O(N^2) bottleneck. Using a read index tracking pointer achieves O(1) dequeue performance without requiring external imports like `collections.deque`.
+**Action:** Whenever implementing a queue with a standard Python list, use a read pointer (e.g. `head = 0`, `item = queue[head]`, `head += 1`) or import `collections.deque` instead of using `list.pop(0)` to maintain optimal performance.
