@@ -329,6 +329,14 @@ RE_GRADLE_MAP2 = re.compile(
     r'group\s*=\s*[\'"]([^\'"]+)[\'"]\s*,\s*name\s*=\s*[\'"]([^\'"]+)[\'"]\s*,\s*version\s*=\s*[\'"]([^\'"]+)[\'"]'
 )
 
+# Optimization: Use global compiled regexes to avoid cache lookup and call overhead in hot loops
+RE_CARGO_SECTION = re.compile(r"^\[([^\]]+)\]")
+RE_CARGO_SUB_DEP = re.compile(
+    r"(?:dependencies|dev-dependencies|build-dependencies)\.([a-zA-Z0-9_-]+)$"
+)
+RE_CARGO_DEP = re.compile(r"^([a-zA-Z0-9_-]+)\s*=\s*(.*)$")
+RE_VERSION_CLEAN = re.compile(r"(?:>=|>|<=|<|~|\^|v)?\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?")
+
 
 def init_colors_and_encoding():
     """Enable ANSI escape sequences and adjust icons for stdout encoding compatibility."""
@@ -7061,14 +7069,11 @@ def parse_cargo_toml(filepath):
                     line = line.strip()
                     if not line or line.startswith("#"):
                         continue
-                    m_sec = re.match(r"^\[([^\]]+)\]", line)
+                    m_sec = RE_CARGO_SECTION.match(line)
                     if m_sec:
                         current_section = m_sec.group(1).strip()
                         is_specific_pkg_section = False
-                        m_sub = re.search(
-                            r"(?:dependencies|dev-dependencies|build-dependencies)\.([a-zA-Z0-9_-]+)$",
-                            current_section,
-                        )
+                        m_sub = RE_CARGO_SUB_DEP.search(current_section)
                         if m_sub:
                             dependencies[m_sub.group(1)] = "*"
                             is_specific_pkg_section = True
@@ -7087,7 +7092,7 @@ def parse_cargo_toml(filepath):
                         )
                     )
                     if is_dep_section and not is_specific_pkg_section:
-                        m_dep = re.match(r"^([a-zA-Z0-9_-]+)\s*=\s*(.*)$", line)
+                        m_dep = RE_CARGO_DEP.match(line)
                         if m_dep:
                             dep_name = m_dep.group(1).strip()
                             dep_val = m_dep.group(2).strip().strip('"').strip("'")
@@ -10100,8 +10105,7 @@ def _populate_rails_remediation_strategies(
         (
             item
             for item in results
-            if item.get("name") == "rails"
-            and item.get("project_path") == project_path
+            if item.get("name") == "rails" and item.get("project_path") == project_path
         ),
         None,
     )
@@ -10284,7 +10288,7 @@ def format_remediation_option_label(ver_str: str) -> str:
 
     def _clean_single_ver(s: str) -> str:
         s = s.strip()
-        m = re.search(r"(?:>=|>|<=|<|~|\^|v)?\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?", s)
+        m = RE_VERSION_CLEAN.search(s)
         if m:
             major = m.group(1)
             minor = m.group(2)
@@ -10331,7 +10335,11 @@ def _populate_direct_strategies(
     )
     cmd_direct = f"bundle update {name}" if tech == "ruby" else None
     val_direct = (
-        ("bundle exec rails test" if "rails" in (r.get("required_by") or []) else "bundle check")
+        (
+            "bundle exec rails test"
+            if "rails" in (r.get("required_by") or [])
+            else "bundle check"
+        )
         if tech == "ruby"
         else None
     )
