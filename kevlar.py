@@ -315,6 +315,19 @@ RE_MARKER_TOKEN = re.compile(
     r"[a-zA-Z_][a-zA-Z0-9_]*"
     r")\s*"
 )
+
+# Optimization: Global regexes for fast file scanning and remediation
+RE_DEPS_MATCH = re.compile(r'"dependencies"\s*:\s*\{')
+RE_DEV_DEPS_MATCH = re.compile(r'"devDependencies"\s*:\s*\{')
+RE_REQUIRE_MATCH = re.compile(r'"require"\s*:\s*\{')
+RE_GO_REQ_OPEN = re.compile(r"^\s*require\s*\(")
+RE_GO_REQ_CLOSE = re.compile(r"^\s*\)")
+RE_RUST_DEP = re.compile(r"^\[dependencies\]")
+RE_OVERRIDES_MATCH = re.compile(r'"overrides"\s*:\s*\{')
+RE_RESOLUTIONS_MATCH = re.compile(r'"resolutions"\s*:\s*\{')
+RE_RUST_PATCH = re.compile(r"^\[patch\.crates-io\]")
+RE_VERSION_DIGITS = re.compile(r"\d+\.\d+")
+
 RE_CSPROJ_SLN = re.compile(r'Project\([^)]+\)\s*=\s*"[^"]+"\s*,\s*"([^"]+)"')
 RE_MAVEN_PRERELEASE = re.compile(
     r"[-.]?(alpha|beta|rc|cr|m|preview|dev|snapshot|milestone)\d*\b", re.IGNORECASE
@@ -9525,7 +9538,8 @@ def _resolve_property_placeholder(
         )
 
     def _search_lines_for_property(lines_list, prop_name_val, tech_type):
-        if tech_type in ("maven", "nuget"):
+        # Optimization: Use sets for O(1) membership lookups
+        if tech_type in {"maven", "nuget"}:
             pattern = _get_maven_nuget_prop_regex(prop_name_val)
             for idx_p, line_p in enumerate(lines_list):
                 m_p = pattern.search(line_p)
@@ -9800,14 +9814,11 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
         dev_deps_match_idx = None
         root_open_idx = None
 
-        re_deps = re.compile(r'"dependencies"\s*:\s*\{')
-        re_dev_deps = re.compile(r'"devDependencies"\s*:\s*\{')
-
         for idx, line in enumerate(lines):
-            if re_deps.search(line):
+            if RE_DEPS_MATCH.search(line):
                 deps_match_idx = idx
                 break
-            elif re_dev_deps.search(line):
+            elif RE_DEV_DEPS_MATCH.search(line):
                 dev_deps_match_idx = idx
             elif root_open_idx is None and "{" in line:
                 root_open_idx = idx
@@ -9826,9 +9837,8 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
             f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
         )
         deps_match_idx = None
-        re_require = re.compile(r'"require"\s*:\s*\{')
         for idx, line in enumerate(lines):
-            if re_require.search(line):
+            if RE_REQUIRE_MATCH.search(line):
                 deps_match_idx = idx
                 break
         if deps_match_idx is not None:
@@ -9842,12 +9852,10 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
         go_ver = RE_OPERATOR_PREFIX.sub("", go_ver)
         req_open_idx = None
         req_close_idx = None
-        re_go_req_open = re.compile(r"^\s*require\s*\(")
-        re_go_req_close = re.compile(r"^\s*\)")
         for idx, line in enumerate(lines):
-            if re_go_req_open.match(line):
+            if RE_GO_REQ_OPEN.match(line):
                 req_open_idx = idx
-            elif req_open_idx is not None and re_go_req_close.match(line):
+            elif req_open_idx is not None and RE_GO_REQ_CLOSE.match(line):
                 req_close_idx = idx
                 break
         if req_close_idx is not None:
@@ -9861,9 +9869,8 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
         line_to_add = f"{package_name}>={clean_numeric}"
     elif tech == "rust":
         dep_sec_idx = None
-        re_rust_dep = re.compile(r"^\[dependencies\]")
         for idx, line in enumerate(lines):
-            if re_rust_dep.search(line.strip()):
+            if RE_RUST_DEP.search(line.strip()):
                 dep_sec_idx = idx
                 break
         if dep_sec_idx is not None:
@@ -9954,9 +9961,8 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
             f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
         )
         overrides_line_idx = None
-        re_overrides = re.compile(r'"overrides"\s*:\s*\{')
         for idx, line in enumerate(lines):
-            if re_overrides.search(line):
+            if RE_OVERRIDES_MATCH.search(line):
                 overrides_line_idx = idx
                 break
 
@@ -9976,9 +9982,8 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
             f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
         )
         resolutions_line_idx = None
-        re_resolutions = re.compile(r'"resolutions"\s*:\s*\{')
         for idx, line in enumerate(lines):
-            if re_resolutions.search(line):
+            if RE_RESOLUTIONS_MATCH.search(line):
                 resolutions_line_idx = idx
                 break
         if resolutions_line_idx is not None:
@@ -9999,9 +10004,8 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
         line_to_add = f"replace {package_name} => {package_name} {go_ver}"
     elif tech == "rust":
         patch_sec_idx = None
-        re_rust_patch = re.compile(r"^\[patch\.crates-io\]")
         for idx, line in enumerate(lines):
-            if re_rust_patch.search(line.strip()):
+            if RE_RUST_PATCH.search(line.strip()):
                 patch_sec_idx = idx
                 break
         if patch_sec_idx is not None:
@@ -10736,8 +10740,7 @@ def populate_remediation_recommendations(results, default_project_path):
 
         found_line_idx = None
         best_score = -1
-        re_digits = re.compile(r"\d+\.\d+")
-        declared_digits_match = re_digits.search(str(declared)) if declared else None
+        declared_digits_match = RE_VERSION_DIGITS.search(str(declared)) if declared else None
         declared_digits = (
             declared_digits_match.group(0) if declared_digits_match else None
         )
