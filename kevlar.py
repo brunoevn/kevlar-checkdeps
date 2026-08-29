@@ -329,6 +329,18 @@ RE_GRADLE_MAP2 = re.compile(
     r'group\s*=\s*[\'"]([^\'"]+)[\'"]\s*,\s*name\s*=\s*[\'"]([^\'"]+)[\'"]\s*,\s*version\s*=\s*[\'"]([^\'"]+)[\'"]'
 )
 
+# Optimization: Move static regexes to global scope for O(1) compiled pattern lookups to avoid instantiation overhead in hot loops
+RE_DEPS_BLOCK = re.compile(r'"dependencies"\s*:\s*\{')
+RE_DEV_DEPS_BLOCK = re.compile(r'"devDependencies"\s*:\s*\{')
+RE_REQUIRE_BLOCK = re.compile(r'"require"\s*:\s*\{')
+RE_GO_REQ_OPEN = re.compile(r"^\s*require\s*\(")
+RE_GO_REQ_CLOSE = re.compile(r"^\s*\)")
+RE_RUST_DEP = re.compile(r"^\[dependencies\]")
+RE_OVERRIDES_BLOCK = re.compile(r'"overrides"\s*:\s*\{')
+RE_RESOLUTIONS_BLOCK = re.compile(r'"resolutions"\s*:\s*\{')
+RE_RUST_PATCH = re.compile(r"^\[patch\.crates-io\]")
+RE_DIGITS_VER = re.compile(r"\d+\.\d+")
+
 
 def init_colors_and_encoding():
     """Enable ANSI escape sequences and adjust icons for stdout encoding compatibility."""
@@ -9800,8 +9812,8 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
         dev_deps_match_idx = None
         root_open_idx = None
 
-        re_deps = re.compile(r'"dependencies"\s*:\s*\{')
-        re_dev_deps = re.compile(r'"devDependencies"\s*:\s*\{')
+        re_deps = RE_DEPS_BLOCK
+        re_dev_deps = RE_DEV_DEPS_BLOCK
 
         for idx, line in enumerate(lines):
             if re_deps.search(line):
@@ -9826,7 +9838,7 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
             f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
         )
         deps_match_idx = None
-        re_require = re.compile(r'"require"\s*:\s*\{')
+        re_require = RE_REQUIRE_BLOCK
         for idx, line in enumerate(lines):
             if re_require.search(line):
                 deps_match_idx = idx
@@ -9842,8 +9854,8 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
         go_ver = RE_OPERATOR_PREFIX.sub("", go_ver)
         req_open_idx = None
         req_close_idx = None
-        re_go_req_open = re.compile(r"^\s*require\s*\(")
-        re_go_req_close = re.compile(r"^\s*\)")
+        re_go_req_open = RE_GO_REQ_OPEN
+        re_go_req_close = RE_GO_REQ_CLOSE
         for idx, line in enumerate(lines):
             if re_go_req_open.match(line):
                 req_open_idx = idx
@@ -9861,7 +9873,7 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
         line_to_add = f"{package_name}>={clean_numeric}"
     elif tech == "rust":
         dep_sec_idx = None
-        re_rust_dep = re.compile(r"^\[dependencies\]")
+        re_rust_dep = RE_RUST_DEP
         for idx, line in enumerate(lines):
             if re_rust_dep.search(line.strip()):
                 dep_sec_idx = idx
@@ -9954,7 +9966,7 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
             f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
         )
         overrides_line_idx = None
-        re_overrides = re.compile(r'"overrides"\s*:\s*\{')
+        re_overrides = RE_OVERRIDES_BLOCK
         for idx, line in enumerate(lines):
             if re_overrides.search(line):
                 overrides_line_idx = idx
@@ -9976,7 +9988,7 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
             f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
         )
         resolutions_line_idx = None
-        re_resolutions = re.compile(r'"resolutions"\s*:\s*\{')
+        re_resolutions = RE_RESOLUTIONS_BLOCK
         for idx, line in enumerate(lines):
             if re_resolutions.search(line):
                 resolutions_line_idx = idx
@@ -9999,7 +10011,7 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
         line_to_add = f"replace {package_name} => {package_name} {go_ver}"
     elif tech == "rust":
         patch_sec_idx = None
-        re_rust_patch = re.compile(r"^\[patch\.crates-io\]")
+        re_rust_patch = RE_RUST_PATCH
         for idx, line in enumerate(lines):
             if re_rust_patch.search(line.strip()):
                 patch_sec_idx = idx
@@ -10100,8 +10112,7 @@ def _populate_rails_remediation_strategies(
         (
             item
             for item in results
-            if item.get("name") == "rails"
-            and item.get("project_path") == project_path
+            if item.get("name") == "rails" and item.get("project_path") == project_path
         ),
         None,
     )
@@ -10331,7 +10342,11 @@ def _populate_direct_strategies(
     )
     cmd_direct = f"bundle update {name}" if tech == "ruby" else None
     val_direct = (
-        ("bundle exec rails test" if "rails" in (r.get("required_by") or []) else "bundle check")
+        (
+            "bundle exec rails test"
+            if "rails" in (r.get("required_by") or [])
+            else "bundle check"
+        )
         if tech == "ruby"
         else None
     )
@@ -10736,7 +10751,7 @@ def populate_remediation_recommendations(results, default_project_path):
 
         found_line_idx = None
         best_score = -1
-        re_digits = re.compile(r"\d+\.\d+")
+        re_digits = RE_DIGITS_VER
         declared_digits_match = re_digits.search(str(declared)) if declared else None
         declared_digits = (
             declared_digits_match.group(0) if declared_digits_match else None
