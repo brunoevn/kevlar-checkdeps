@@ -293,6 +293,18 @@ RE_OPERATOR_START = re.compile(r"^[~^>=<!]")
 RE_NUM_START = re.compile(r"^(\d+)")
 RE_DECIMAL_VER = re.compile(r"\d+\.\d+(?:\.\d+)?(?:\.\d+)?")
 RE_DECIMAL_VER_STRICT = re.compile(r"^\d+\.\d+(?:\.\d+)?(?:\.\d+)?$")
+RE_DIGITS = re.compile(r"\d+\.\d+")
+RE_DEPS = re.compile(r'"dependencies"\s*:\s*\{')
+RE_DEV_DEPS = re.compile(r'"devDependencies"\s*:\s*\{')
+RE_REQUIRE = re.compile(r'"require"\s*:\s*\{')
+RE_GO_REQ_OPEN = re.compile(r"^\s*require\s*\(")
+RE_GO_REQ_CLOSE = re.compile(r"^\s*\)")
+RE_RUST_DEP = re.compile(r"^\[dependencies\]")
+RE_OVERRIDES = re.compile(r'"overrides"\s*:\s*\{')
+RE_RESOLUTIONS = re.compile(r'"resolutions"\s*:\s*\{')
+RE_RUST_PATCH = re.compile(r"^\[patch\.crates-io\]")
+RE_SINGLE_VER = re.compile(r"(?:>=|>|<=|<|~|\^|v)?\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?")
+RE_XML_ENCODING = re.compile(r'<\?xml\s+[^>]*encoding\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
 
 RE_CVSS4_SEV = re.compile(r"(CVSS:4\.[0-9a-zA-Z/:.]+)")
 RE_CVSS3_SEV = re.compile(r"(CVSS:3\.[0-9a-zA-Z/:.]+)")
@@ -750,11 +762,8 @@ def parse_secure_xml(content, max_depth=15, max_expanded_size=10 * 1024 * 1024):
         encoding = _detect_xml_encoding(content)
         try:
             prefix = content[:1024].decode("latin-1", errors="ignore")
-            m = re.search(
-                r'<\?xml\s+[^>]*encoding\s*=\s*["\']([^"\']+)["\']',
-                prefix,
-                re.IGNORECASE,
-            )
+            # Optimization: Use global compiled regex instead of local compilation
+            m = RE_XML_ENCODING.search(prefix)
             if m:
                 encoding = m.group(1)
         except (UnicodeError, IndexError, AttributeError):
@@ -766,11 +775,8 @@ def parse_secure_xml(content, max_depth=15, max_expanded_size=10 * 1024 * 1024):
             encoding = "latin-1"
     else:
         content_str = content
-        m = re.search(
-            r'<\?xml\s+[^>]*encoding\s*=\s*["\']([^"\']+)["\']',
-            content_str[:1024],
-            re.IGNORECASE,
-        )
+        # Optimization: Use global compiled regex instead of local compilation
+        m = RE_XML_ENCODING.search(content_str[:1024])
         if m:
             encoding = m.group(1)
 
@@ -9800,14 +9806,12 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
         dev_deps_match_idx = None
         root_open_idx = None
 
-        re_deps = re.compile(r'"dependencies"\s*:\s*\{')
-        re_dev_deps = re.compile(r'"devDependencies"\s*:\s*\{')
-
+        # Optimization: Use global compiled regex instead of local compilation
         for idx, line in enumerate(lines):
-            if re_deps.search(line):
+            if RE_DEPS.search(line):
                 deps_match_idx = idx
                 break
-            elif re_dev_deps.search(line):
+            elif RE_DEV_DEPS.search(line):
                 dev_deps_match_idx = idx
             elif root_open_idx is None and "{" in line:
                 root_open_idx = idx
@@ -9826,9 +9830,9 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
             f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
         )
         deps_match_idx = None
-        re_require = re.compile(r'"require"\s*:\s*\{')
+        # Optimization: Use global compiled regex instead of local compilation
         for idx, line in enumerate(lines):
-            if re_require.search(line):
+            if RE_REQUIRE.search(line):
                 deps_match_idx = idx
                 break
         if deps_match_idx is not None:
@@ -9842,12 +9846,11 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
         go_ver = RE_OPERATOR_PREFIX.sub("", go_ver)
         req_open_idx = None
         req_close_idx = None
-        re_go_req_open = re.compile(r"^\s*require\s*\(")
-        re_go_req_close = re.compile(r"^\s*\)")
+        # Optimization: Use global compiled regex instead of local compilation
         for idx, line in enumerate(lines):
-            if re_go_req_open.match(line):
+            if RE_GO_REQ_OPEN.match(line):
                 req_open_idx = idx
-            elif req_open_idx is not None and re_go_req_close.match(line):
+            elif req_open_idx is not None and RE_GO_REQ_CLOSE.match(line):
                 req_close_idx = idx
                 break
         if req_close_idx is not None:
@@ -9861,9 +9864,9 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
         line_to_add = f"{package_name}>={clean_numeric}"
     elif tech == "rust":
         dep_sec_idx = None
-        re_rust_dep = re.compile(r"^\[dependencies\]")
+        # Optimization: Use global compiled regex instead of local compilation
         for idx, line in enumerate(lines):
-            if re_rust_dep.search(line.strip()):
+            if RE_RUST_DEP.search(line.strip()):
                 dep_sec_idx = idx
                 break
         if dep_sec_idx is not None:
@@ -9954,9 +9957,9 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
             f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
         )
         overrides_line_idx = None
-        re_overrides = re.compile(r'"overrides"\s*:\s*\{')
+        # Optimization: Use global compiled regex instead of local compilation
         for idx, line in enumerate(lines):
-            if re_overrides.search(line):
+            if RE_OVERRIDES.search(line):
                 overrides_line_idx = idx
                 break
 
@@ -9976,9 +9979,9 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
             f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
         )
         resolutions_line_idx = None
-        re_resolutions = re.compile(r'"resolutions"\s*:\s*\{')
+        # Optimization: Use global compiled regex instead of local compilation
         for idx, line in enumerate(lines):
-            if re_resolutions.search(line):
+            if RE_RESOLUTIONS.search(line):
                 resolutions_line_idx = idx
                 break
         if resolutions_line_idx is not None:
@@ -9999,9 +10002,9 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
         line_to_add = f"replace {package_name} => {package_name} {go_ver}"
     elif tech == "rust":
         patch_sec_idx = None
-        re_rust_patch = re.compile(r"^\[patch\.crates-io\]")
+        # Optimization: Use global compiled regex instead of local compilation
         for idx, line in enumerate(lines):
-            if re_rust_patch.search(line.strip()):
+            if RE_RUST_PATCH.search(line.strip()):
                 patch_sec_idx = idx
                 break
         if patch_sec_idx is not None:
@@ -10284,7 +10287,8 @@ def format_remediation_option_label(ver_str: str) -> str:
 
     def _clean_single_ver(s: str) -> str:
         s = s.strip()
-        m = re.search(r"(?:>=|>|<=|<|~|\^|v)?\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?", s)
+        # Optimization: Use global compiled regex instead of local compilation
+        m = RE_SINGLE_VER.search(s)
         if m:
             major = m.group(1)
             minor = m.group(2)
@@ -10736,8 +10740,8 @@ def populate_remediation_recommendations(results, default_project_path):
 
         found_line_idx = None
         best_score = -1
-        re_digits = re.compile(r"\d+\.\d+")
-        declared_digits_match = re_digits.search(str(declared)) if declared else None
+        # Optimization: Use global compiled regex instead of local compilation
+        declared_digits_match = RE_DIGITS.search(str(declared)) if declared else None
         declared_digits = (
             declared_digits_match.group(0) if declared_digits_match else None
         )
