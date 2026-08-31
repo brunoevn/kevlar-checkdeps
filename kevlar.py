@@ -8781,16 +8781,26 @@ def generate_sarif_run(results):
 
                         lines = manifest_lines_cache[path]
                         best_score = -1
+                        # Optimization: Pre-extract version digits and stripped declared string outside loop using global RE_VERSION_DIGITS
+                        declared_digits_match = (
+                            RE_VERSION_DIGITS.search(str(declared))
+                            if declared
+                            else None
+                        )
+                        declared_digits = (
+                            declared_digits_match.group(0)
+                            if declared_digits_match
+                            else None
+                        )
+                        declared_str = str(declared).strip() if declared else None
+
                         for idx, line in enumerate(lines):
                             if match_line_for_dependency(line, name, tech):
                                 score = 1
                                 if declared:
-                                    ver_digits = re.search(r"\d+\.\d+", str(declared))
                                     if (
-                                        ver_digits
-                                        and ver_digits.group(0) in line
-                                        or str(declared).strip() in line
-                                    ):
+                                        declared_digits and declared_digits in line
+                                    ) or (declared_str and declared_str in line):
                                         score = 2
                                 if score > best_score:
                                     best_score = score
