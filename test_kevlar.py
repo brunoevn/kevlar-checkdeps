@@ -807,6 +807,114 @@ class TestKevlar(unittest.TestCase):
         self.assertTrue(kevlar.check_semver_satisfies("1.8.0", "~1"))
         self.assertFalse(kevlar.check_semver_satisfies("2.0.0", "~1"))
 
+    def test_check_semver_satisfies_caching(self):
+        """Validates that check_semver_satisfies leverages LRU caching and that clear_kevlar_cache flushes it."""
+        kevlar.clear_kevlar_cache()
+        initial_info = kevlar.check_semver_satisfies.cache_info()
+        self.assertEqual(initial_info.currsize, 0)
+        self.assertEqual(initial_info.hits, 0)
+
+        # First call -> cache miss
+        res1 = kevlar.check_semver_satisfies("1.2.3", ">=1.0.0 <2.0.0")
+        self.assertTrue(res1)
+        info1 = kevlar.check_semver_satisfies.cache_info()
+        self.assertEqual(info1.currsize, 1)
+        self.assertEqual(info1.hits, 0)
+        self.assertEqual(info1.misses, initial_info.misses + 1)
+
+        # Second call with identical arguments -> cache hit
+        res2 = kevlar.check_semver_satisfies("1.2.3", ">=1.0.0 <2.0.0")
+        self.assertTrue(res2)
+        info2 = kevlar.check_semver_satisfies.cache_info()
+        self.assertEqual(info2.currsize, 1)
+        self.assertEqual(info2.hits, 1)
+
+        # Third call with new arguments -> cache miss, currsize = 2
+        res3 = kevlar.check_semver_satisfies("2.5.0", "^2.0.0")
+        self.assertTrue(res3)
+        info3 = kevlar.check_semver_satisfies.cache_info()
+        self.assertEqual(info3.currsize, 2)
+        self.assertEqual(info3.hits, 1)
+
+        # Flush cache via clear_kevlar_cache
+        kevlar.clear_kevlar_cache()
+        cleared_info = kevlar.check_semver_satisfies.cache_info()
+        self.assertEqual(cleared_info.currsize, 0)
+        self.assertEqual(cleared_info.hits, 0)
+
+    def test_check_semver_satisfies_extended_edge_cases(self):
+        """Validates edge cases including operator whitespace, complex compound expressions, and boundaries."""
+        # Operator whitespace normalization
+        self.assertTrue(kevlar.check_semver_satisfies("1.5.0", " >= 1.2.0   <  2.0.0 "))
+        self.assertTrue(kevlar.check_semver_satisfies("2.0.0", " = 2.0.0 "))
+        self.assertTrue(kevlar.check_semver_satisfies("2.0.0", " == 2.0.0 "))
+        self.assertFalse(kevlar.check_semver_satisfies("2.0.1", " == 2.0.0 "))
+
+        # Wildcard variations
+        self.assertTrue(kevlar.check_semver_satisfies("1.2.3", "1.x"))
+        self.assertTrue(kevlar.check_semver_satisfies("1.2.3", "1.*"))
+        self.assertTrue(kevlar.check_semver_satisfies("1.2.3", "1.2.x"))
+        self.assertTrue(kevlar.check_semver_satisfies("1.2.3", "1.2.*"))
+        self.assertFalse(kevlar.check_semver_satisfies("1.3.0", "1.2.x"))
+        self.assertFalse(kevlar.check_semver_satisfies("2.0.0", "1.x"))
+
+        # Multiple compound OR and comma combinations
+        self.assertTrue(kevlar.check_semver_satisfies("0.9.5", "<1.0.0 || >=2.0.0"))
+        self.assertTrue(kevlar.check_semver_satisfies("2.5.0", "<1.0.0 || >=2.0.0"))
+        self.assertFalse(kevlar.check_semver_satisfies("1.5.0", "<1.0.0 || >=2.0.0"))
+
+        # Zero-series semver edge cases
+        self.assertTrue(kevlar.check_semver_satisfies("0.0.1", "^0.0.1"))
+        self.assertFalse(kevlar.check_semver_satisfies("0.0.2", "^0.0.1"))
+        self.assertTrue(kevlar.check_semver_satisfies("0.1.5", "^0.1.0"))
+        self.assertFalse(kevlar.check_semver_satisfies("0.2.0", "^0.1.0"))
+
+        # Falsy and universal ranges
+        self.assertTrue(kevlar.check_semver_satisfies("1.0.0", None))
+        self.assertTrue(kevlar.check_semver_satisfies("1.0.0", ""))
+        self.assertTrue(kevlar.check_semver_satisfies("1.0.0", "*"))
+        self.assertTrue(kevlar.check_semver_satisfies("1.0.0", "any"))
+        self.assertTrue(kevlar.check_semver_satisfies("1.0.0", "x"))
+
+    def test_check_semver_satisfies_ecosystems_matrix(self):
+        """Validates semver constraint satisfaction patterns covering all supported technology ecosystems."""
+        # 1. Node.js (npm / yarn / pnpm) patterns: Carets, tildes, wildcards, and disjunctive ranges
+        self.assertTrue(kevlar.check_semver_satisfies("18.12.1", ">=16.0.0 <17.0.0 || >=18.0.0 <19.0.0"))
+        self.assertFalse(kevlar.check_semver_satisfies("17.5.0", ">=16.0.0 <17.0.0 || >=18.0.0 <19.0.0"))
+        self.assertTrue(kevlar.check_semver_satisfies("4.17.21", "^4.17.0"))
+        self.assertTrue(kevlar.check_semver_satisfies("2.3.4", "~2.3.0"))
+
+        # 2. Python (PEP 440 / requirements.txt / pyproject.toml) patterns: Comma-separated bounds and exact pins
+        self.assertTrue(kevlar.check_semver_satisfies("3.10.4", ">=3.8, <=3.11"))
+        self.assertFalse(kevlar.check_semver_satisfies("3.12.0", ">=3.8, <=3.11"))
+        self.assertTrue(kevlar.check_semver_satisfies("2.28.1", "==2.28.1"))
+        self.assertFalse(kevlar.check_semver_satisfies("2.28.2", "==2.28.1"))
+
+        # 3. Rust (Cargo.toml) patterns: Caret default conventions and zero-major crates
+        self.assertTrue(kevlar.check_semver_satisfies("1.0.197", "^1.0.0"))
+        self.assertTrue(kevlar.check_semver_satisfies("0.4.19", "^0.4"))
+        self.assertFalse(kevlar.check_semver_satisfies("0.5.0", "^0.4"))
+
+        # 4. Ruby (Gemfile / Bundler) patterns: Pessimistic constraint equivalents
+        self.assertTrue(kevlar.check_semver_satisfies("7.0.4", "~7.0.0"))
+        self.assertFalse(kevlar.check_semver_satisfies("7.1.0", "~7.0.0"))
+
+        # 5. PHP (Composer) patterns: Pipe-separated OR ranges, caret and tilde prefixes
+        self.assertTrue(kevlar.check_semver_satisfies("8.1.5", "^8.0 || ^8.1"))
+        self.assertTrue(kevlar.check_semver_satisfies("8.0.28", "^8.0 || ^8.1"))
+        self.assertFalse(kevlar.check_semver_satisfies("9.0.0", "^8.0 || ^8.1"))
+        self.assertTrue(kevlar.check_semver_satisfies("8.0.5", "~8.0.0 || ~8.1.0"))
+        self.assertFalse(kevlar.check_semver_satisfies("8.2.0", "~8.0.0 || ~8.1.0"))
+
+        # 6. Go (go.mod) patterns: Semver tags with and without v-prefix
+        self.assertTrue(kevlar.check_semver_satisfies("v1.18.2", ">=1.18.0"))
+        self.assertTrue(kevlar.check_semver_satisfies("1.18.2", ">=1.18.0"))
+
+        # 7. .NET / C# (NuGet / CPM) & Java (Maven / Gradle) patterns: Minimum bounds and exact versions
+        self.assertTrue(kevlar.check_semver_satisfies("13.0.3", ">=13.0.1"))
+        self.assertTrue(kevlar.check_semver_satisfies("2.13.4", ">=2.0.0"))
+        self.assertTrue(kevlar.check_semver_satisfies("3.0.0", "3.0.0"))
+
     def test_configuration_drift_validation(self):
         results = [
             # 1. Matching constraint
@@ -3907,14 +4015,17 @@ require (
 
         kevlar._set_cached_target_result("rust", target, results)
         kevlar._set_cached_registry_metadata("rust", "serde", ["1.0.228"])
+        kevlar.check_semver_satisfies("1.2.3", ">=1.0.0")
 
         self.assertIsNotNone(kevlar._get_cached_target_result("rust", target))
         self.assertIsNotNone(kevlar._get_cached_registry_metadata("rust", "serde"))
+        self.assertGreaterEqual(kevlar.check_semver_satisfies.cache_info().currsize, 1)
 
         kevlar.clear_kevlar_cache()
 
         self.assertIsNone(kevlar._get_cached_target_result("rust", target))
         self.assertIsNone(kevlar._get_cached_registry_metadata("rust", "serde"))
+        self.assertEqual(kevlar.check_semver_satisfies.cache_info().currsize, 0)
 
     def test_ruby_rails_core_gem_remediation(self):
         """Test that SCA remediation for Rails core submodules (e.g. activestorage) targets the rails gem and produces bundle update commands."""
