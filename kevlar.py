@@ -349,6 +349,11 @@ RE_CARGO_SUB_DEP = re.compile(
 RE_CARGO_DEP = re.compile(r"^([a-zA-Z0-9_-]+)\s*=\s*(.*)$")
 RE_VERSION_CLEAN = re.compile(r"(?:>=|>|<=|<|~|\^|v)?\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?")
 
+# Optimization: Global compiled regexes for Ruby Gemfile and Gemfile.lock parsing
+RE_GEMFILE_ENTRY = re.compile(r'^gem\s+[\'"]([^\'"]+)[\'"]')
+RE_GEMFILE_LOCK_SPEC = re.compile(r"^\s*([a-zA-Z0-9_-]+)\s*\(([^)]+)\)")
+RE_GEMFILE_LOCK_DEP = re.compile(r"^\s*([a-zA-Z0-9_-]+)(?:\s*\(([^)]+)\))?")
+
 
 def init_colors_and_encoding():
     """Enable ANSI escape sequences and adjust icons for stdout encoding compatibility."""
@@ -7587,8 +7592,8 @@ def parse_gemfile(filepath):
                 if not line or line.startswith("#"):
                     continue
 
-                # gem 'rails', '~> 6.0' or gem "nokogiri"
-                m = re.match(r'^gem\s+[\'"]([^\'"]+)[\'"]', line)
+                # Optimization: Use globally compiled regex to avoid cache lookup overhead in line loop
+                m = RE_GEMFILE_ENTRY.match(line)
                 if m:
                     dependencies.add(m.group(1).strip())
     except Exception as e:
@@ -7632,8 +7637,8 @@ def parse_gemfile_lock(filepath):
                 # Count leading spaces
                 leading_spaces = len(line) - len(line.lstrip(" "))
 
-                # Try to match gem version pattern: "    name (version)"
-                m_spec = re.match(r"^\s*([a-zA-Z0-9_-]+)\s*\(([^)]+)\)", line)
+                # Optimization: Use globally compiled regex to avoid cache lookup overhead in hot line loop
+                m_spec = RE_GEMFILE_LOCK_SPEC.match(line)
                 if m_spec:
                     name = m_spec.group(1)
                     version = m_spec.group(2)
@@ -7652,7 +7657,8 @@ def parse_gemfile_lock(filepath):
                     and leading_spaces > spec_indent
                     and current_parent
                 ):
-                    m_dep = re.match(r"^\s*([a-zA-Z0-9_-]+)(?:\s*\(([^)]+)\))?", line)
+                    # Optimization: Use globally compiled regex to avoid cache lookup overhead in hot line loop
+                    m_dep = RE_GEMFILE_LOCK_DEP.match(line)
                     if m_dep:
                         child = m_dep.group(1)
                         if child not in parents:
