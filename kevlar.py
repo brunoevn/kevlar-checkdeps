@@ -9281,19 +9281,26 @@ def _match_npm_php(line_lower, pkg_lower):
     return _get_npm_php_regex(pkg_lower).search(line_lower) is not None
 
 
-def _match_pip(line_lower, pkg_lower):
+@functools.lru_cache(maxsize=1024)
+def _get_pip_regexes(pkg_lower):
+    # Optimization: Cache compiled regexes for pip package matching to avoid re.search recompilation in loops
     extras = r"(\[[^\]]+\])?"
-    pattern_req = (
+    pattern_req = re.compile(
         r"^\s*" + re.escape(pkg_lower) + extras + r'\s*(==|>=|<=|~=|!=|>|<|@|;|[\'"]|$)'
     )
-    pattern_toml = r"^\s*" + re.escape(pkg_lower) + r"\s*=\s*"
-    pattern_setup = (
+    pattern_toml = re.compile(r"^\s*" + re.escape(pkg_lower) + r"\s*=\s*")
+    pattern_setup = re.compile(
         r'[\'"]' + re.escape(pkg_lower) + extras + r'([>=<!~^@;]+|[\'"]\s*[,\]])'
     )
+    return pattern_req, pattern_toml, pattern_setup
+
+
+def _match_pip(line_lower, pkg_lower):
+    p_req, p_toml, p_setup = _get_pip_regexes(pkg_lower)
     return (
-        re.search(pattern_req, line_lower) is not None
-        or re.search(pattern_toml, line_lower) is not None
-        or re.search(pattern_setup, line_lower) is not None
+        p_req.search(line_lower) is not None
+        or p_toml.search(line_lower) is not None
+        or p_setup.search(line_lower) is not None
     )
 
 
