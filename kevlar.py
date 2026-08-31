@@ -279,6 +279,7 @@ TECHNOLOGIES = {
 RE_SEMVER_ALPHA = re.compile(r"([a-zA-Z]+.*)$")
 RE_SEMVER_DIGITS = re.compile(r"\d+")
 RE_CLEAN_VER = re.compile(r"^[^\d]*")
+RE_ANSI_ESCAPE = re.compile(r"\033\[[0-9;]*[a-zA-Z]")
 
 # Optimization: Use global compiled regexes to avoid cache lookup and call overhead in hot loops
 RE_PEP508_REQ = re.compile(
@@ -8294,7 +8295,8 @@ class TerminalTextFormatter:
     @staticmethod
     def visual_len(s):
         """Calculates visual terminal length of a string, ignoring ANSI codes."""
-        clean_s = re.sub(r"\033\[[0-9;]*[a-zA-Z]", "", s)
+        # Optimization: Use global pre-compiled regex RE_ANSI_ESCAPE to avoid re.sub lookup overhead
+        clean_s = RE_ANSI_ESCAPE.sub("", s)
         return sum(TerminalTextFormatter.get_char_width(c) for c in clean_s)
 
     @staticmethod
