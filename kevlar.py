@@ -348,6 +348,9 @@ RE_CARGO_SUB_DEP = re.compile(
 )
 RE_CARGO_DEP = re.compile(r"^([a-zA-Z0-9_-]+)\s*=\s*(.*)$")
 RE_VERSION_CLEAN = re.compile(r"(?:>=|>|<=|<|~|\^|v)?\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?")
+RE_XML_ENCODING = re.compile(
+    r'<\?xml\s+[^>]*encoding\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE
+)
 
 
 def init_colors_and_encoding():
@@ -770,11 +773,8 @@ def parse_secure_xml(content, max_depth=15, max_expanded_size=10 * 1024 * 1024):
         encoding = _detect_xml_encoding(content)
         try:
             prefix = content[:1024].decode("latin-1", errors="ignore")
-            m = re.search(
-                r'<\?xml\s+[^>]*encoding\s*=\s*["\']([^"\']+)["\']',
-                prefix,
-                re.IGNORECASE,
-            )
+            # Optimization: Use global compiled regex instead of local compilation
+            m = RE_XML_ENCODING.search(prefix)
             if m:
                 encoding = m.group(1)
         except (UnicodeError, IndexError, AttributeError):
@@ -786,11 +786,8 @@ def parse_secure_xml(content, max_depth=15, max_expanded_size=10 * 1024 * 1024):
             encoding = "latin-1"
     else:
         content_str = content
-        m = re.search(
-            r'<\?xml\s+[^>]*encoding\s*=\s*["\']([^"\']+)["\']',
-            content_str[:1024],
-            re.IGNORECASE,
-        )
+        # Optimization: Use global compiled regex instead of local compilation
+        m = RE_XML_ENCODING.search(content_str[:1024])
         if m:
             encoding = m.group(1)
 
