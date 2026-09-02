@@ -4167,6 +4167,536 @@ require (
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_parse_package_lock_v1_nested_hierarchy(self):
+        import json
+        import tempfile
+        lock_data = {
+            "name": "test-v1",
+            "version": "1.0.0",
+            "lockfileVersion": 1,
+            "requires": True,
+            "dependencies": {
+                "express": {
+                    "version": "4.16.4",
+                    "integrity": "sha512-j12Uuyb4FMtxewQbVW95EQmuqlzdr638J70gyYoAjqdPHvUUyKaeGQQCKt3bYVI4tuYWxbwlUXlQDthkxV/xEw==",
+                    "requires": {
+                        "body-parser": "1.18.3"
+                    },
+                    "dependencies": {
+                        "body-parser": {
+                            "version": "1.18.3",
+                            "integrity": "sha1-WykhmP/dVTs6DyDe0FkrlWlVyLQ=",
+                            "requires": {
+                                "bytes": "3.0.0",
+                                "qs": "6.5.2"
+                            },
+                            "dependencies": {
+                                "bytes": {
+                                    "version": "3.0.0",
+                                    "integrity": "sha1-0ygVQE1olpn4Wk6k+odV3ROpYEg="
+                                },
+                                "qs": {
+                                    "version": "6.5.2",
+                                    "integrity": "sha512-N5ZAX4/LxJmF+7wN74pUD6qAh9/wnvdQcjq9TZjevvXzSUo7bfmw91saq38OW86VMJYIjMpfRTd3UNYoVgWW3g=="
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json", encoding="utf-8") as tmp:
+            json.dump(lock_data, tmp)
+            tmp_path = tmp.name
+        try:
+            resolved, parents, integrity, direct_versions = kevlar.parse_package_lock(tmp_path)
+            self.assertEqual(resolved.get("express"), ["4.16.4"])
+            self.assertEqual(resolved.get("body-parser"), ["1.18.3"])
+            self.assertEqual(resolved.get("bytes"), ["3.0.0"])
+            self.assertEqual(resolved.get("qs"), ["6.5.2"])
+            self.assertEqual(direct_versions.get("express"), "4.16.4")
+            self.assertIn("root", parents.get("express", []))
+            self.assertIn("express", parents.get("body-parser", []))
+            self.assertIn("body-parser", parents.get("bytes", []))
+            self.assertIn("body-parser", parents.get("qs", []))
+            self.assertIn("sha512-j12Uuyb4FMtxewQbVW95EQmuqlzdr638J70gyYoAjqdPHvUUyKaeGQQCKt3bYVI4tuYWxbwlUXlQDthkxV/xEw==", integrity.get(("express", "4.16.4"), ""))
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def test_parse_package_lock_v3_workspaces_and_scoped(self):
+        import json
+        import tempfile
+        lock_data = {
+            "name": "test-workspaces",
+            "version": "1.0.0",
+            "lockfileVersion": 3,
+            "requires": True,
+            "packages": {
+                "": {
+                    "name": "test-workspaces",
+                    "version": "1.0.0",
+                    "workspaces": ["packages/*"],
+                    "devDependencies": {
+                        "typescript": "^5.4.5"
+                    }
+                },
+                "packages/core": {
+                    "name": "@workspace-demo/core",
+                    "version": "1.0.0",
+                    "dependencies": {
+                        "lodash": "^4.17.21"
+                    }
+                },
+                "packages/web": {
+                    "name": "@workspace-demo/web",
+                    "version": "1.0.0",
+                    "dependencies": {
+                        "@workspace-demo/core": "1.0.0",
+                        "axios": "^1.6.8"
+                    }
+                },
+                "node_modules/@types/node": {
+                    "version": "20.11.0",
+                    "integrity": "sha512-abc"
+                },
+                "node_modules/axios": {
+                    "version": "1.6.8",
+                    "integrity": "sha512-def"
+                },
+                "node_modules/lodash": {
+                    "version": "4.17.21",
+                    "integrity": "sha512-ghi"
+                }
+            }
+        }
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json", encoding="utf-8") as tmp:
+            json.dump(lock_data, tmp)
+            tmp_path = tmp.name
+        try:
+            resolved, parents, integrity, direct_versions = kevlar.parse_package_lock(tmp_path)
+            self.assertEqual(resolved.get("axios"), ["1.6.8"])
+            self.assertEqual(resolved.get("lodash"), ["4.17.21"])
+            self.assertEqual(resolved.get("@types/node"), ["20.11.0"])
+            self.assertIn("root", parents.get("typescript", []))
+            self.assertIn("root", parents.get("lodash", []))
+            self.assertIn("root", parents.get("@workspace-demo/core", []))
+            self.assertIn("root", parents.get("axios", []))
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def test_parse_yarn_lock_classic_multi_specifiers(self):
+        import tempfile
+        content = (
+            "# THIS IS AN AUTOGENERATED FILE. DO NOT EDIT MANUALLY.\n"
+            "# yarn lockfile v1\n"
+            "\n"
+            "\"@babel/core@^7.0.0\", \"@babel/core@^7.12.0\", \"@babel/core@^7.20.0\":\n"
+            "  version \"7.24.0\"\n"
+            "  resolved \"https://registry.yarnpkg.com/@babel/core/-/core-7.24.0.tgz\"\n"
+            "  integrity sha512-5XUvmMuXSDmvQO3STSpuMGWNQSLLOHESJRgK07cPZKNL4wBa82uPwsN4uhJM9GPq8G6hA9TrDrUvo+Vjz1hvw==\n"
+            "  dependencies:\n"
+            "    \"@babel/parser\" \"^7.24.0\"\n"
+            "\n"
+            "\"@babel/parser@^7.24.0\":\n"
+            "  version \"7.24.0\"\n"
+            "  resolved \"https://registry.yarnpkg.com/@babel/parser/-/parser-7.24.0.tgz\"\n"
+            "  integrity sha512-QuP/ZKprliGCSpSxP9Y69VoKTM3Z3NAWVW242PzvUMag+WBAUvA3Zb55hQo7cC9ORCR219Wh5TiA83tRKgkYMw==\n"
+            "\n"
+            "\"debug@2.6.9\", \"debug@^2.2.0\", \"debug@^2.3.3\":\n"
+            "  version \"2.6.9\"\n"
+            "  resolved \"https://registry.yarnpkg.com/debug/-/debug-2.6.9.tgz\"\n"
+            "  integrity sha512-bC7ElrdJaJnPbAP+1EotYvqZsb3ecl5wi6Bfi6BJTUcNowp6cvspg0jXznRTKDjm/E7AdgFBVeAPVMNcKGsHMA==\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".lock", encoding="utf-8") as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        try:
+            resolved, parents, integrity = kevlar.parse_yarn_lock(tmp_path)
+            self.assertEqual(resolved.get("@babel/core"), ["7.24.0"])
+            self.assertEqual(resolved.get("@babel/parser"), ["7.24.0"])
+            self.assertEqual(resolved.get("debug"), ["2.6.9"])
+            self.assertIn("@babel/core", parents.get("@babel/parser", []))
+            self.assertIn(("@babel/core", "7.24.0"), integrity)
+            self.assertIn(("debug", "2.6.9"), integrity)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def test_parse_yarn_berry_protocols_and_checksum_formats(self):
+        import tempfile
+        content = (
+            "__metadata:\n"
+            "  version: 8\n"
+            "  cacheKey: 10c0\n"
+            "\n"
+            "\"clsx@npm:^2.1.0\":\n"
+            "  version: 2.1.1\n"
+            "  resolution: \"clsx@npm:2.1.1\"\n"
+            "  checksum: 10c0/sha512:c607ab9b38030b6ff8d5bfba22e70e3592bc133cf0b809a7b7de283fa71b12b545d65cb5ecad25ef20fa76bf38b584fe3bebb3650228c2eefbd094b8e23b1855\n"
+            "\n"
+            "\"@org/patched@patch:@org/patched@npm%3A1.0.0#./patch.diff::locator=app%40workspace%3A.\":\n"
+            "  version: 1.0.0\n"
+            "  resolution: \"@org/patched@patch:@org/patched@npm%3A1.0.0#./patch.diff::locator=app%40workspace%3A.\"\n"
+            "  dependencies:\n"
+            "    \"is-number\": \"npm:^7.0.0\"\n"
+            "  checksum: 8/sha512:47b864a7ef14cf86c8d234771234a75a0b777a88523c14c56e3039d48b67f67747b864a7ef14cf86c8d234771234a75a0b777a88523c14c56e3039d48b67f677\n"
+            "\n"
+            "\"is-number@npm:^7.0.0\":\n"
+            "  version: 7.0.0\n"
+            "  resolution: \"is-number@npm:7.0.0\"\n"
+            "  checksum: sha1:b32c6955a004ee3fa2691ab1a499ff39e144a1e9\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".lock", encoding="utf-8") as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        try:
+            resolved, parents, integrity = kevlar.parse_yarn_lock(tmp_path)
+            self.assertEqual(resolved.get("clsx"), ["2.1.1"])
+            self.assertEqual(resolved.get("@org/patched"), ["1.0.0"])
+            self.assertEqual(resolved.get("is-number"), ["7.0.0"])
+            self.assertIn("@org/patched", parents.get("is-number", []))
+            
+            # Verify clsx checksum converted to sha512- base64
+            clsx_integrity = integrity.get(("clsx", "2.1.1"))
+            self.assertTrue(clsx_integrity.startswith("sha512-"))
+            
+            # Verify is-number checksum converted to sha1- base64
+            is_num_integrity = integrity.get(("is-number", "7.0.0"))
+            self.assertTrue(is_num_integrity.startswith("sha1-"))
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def test_parse_pnpm_lock_monorepo_importers_and_peers(self):
+        import tempfile
+        content = (
+            "lockfileVersion: '9.0'\n"
+            "importers:\n"
+            "  apps/web:\n"
+            "    dependencies:\n"
+            "      '@angular/core':\n"
+            "        specifier: 17.3.0\n"
+            "        version: 17.3.0(zone.js@0.14.4)\n"
+            "  packages/ui:\n"
+            "    dependencies:\n"
+            "      rxjs:\n"
+            "        specifier: ^7.8.1\n"
+            "        version: 7.8.1\n"
+            "packages:\n"
+            "  '@angular/core@17.3.0(zone.js@0.14.4)':\n"
+            "    resolution: {integrity: sha512-angular_core_hash}\n"
+            "    dependencies:\n"
+            "      tslib: 2.6.2\n"
+            "  rxjs@7.8.1:\n"
+            "    resolution: {integrity: sha512-rxjs_hash}\n"
+            "    dependencies:\n"
+            "      tslib: 2.6.2\n"
+            "  tslib@2.6.2:\n"
+            "    resolution: {integrity: sha512-tslib_hash}\n"
+            "snapshots:\n"
+            "  '@angular/core@17.3.0(zone.js@0.14.4)':\n"
+            "    dependencies:\n"
+            "      tslib: 2.6.2\n"
+            "  rxjs@7.8.1:\n"
+            "    dependencies:\n"
+            "      tslib: 2.6.2\n"
+            "  tslib@2.6.2: {}\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".yaml", encoding="utf-8") as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        try:
+            resolved, parents, integrity = kevlar.parse_pnpm_lock(tmp_path)
+            self.assertEqual(resolved.get("@angular/core"), ["17.3.0"])
+            self.assertEqual(resolved.get("rxjs"), ["7.8.1"])
+            self.assertEqual(resolved.get("tslib"), ["2.6.2"])
+            self.assertIn("@angular/core", parents.get("tslib", []))
+            self.assertIn("rxjs", parents.get("tslib", []))
+            self.assertIn("root", parents.get("@angular/core", []))
+            self.assertIn("root", parents.get("rxjs", []))
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    @patch("urllib.request.urlopen")
+    def test_check_npm_package_scoped_and_registry_metadata(self, mock_urlopen):
+        import io
+        fake_json = {
+            "name": "@nestjs/core",
+            "dist-tags": {"latest": "10.3.7"},
+            "versions": {
+                "9.4.0": {
+                    "version": "9.4.0",
+                    "dist": {
+                        "integrity": "sha512-fakehash940==",
+                        "shasum": "0123456789abcdef0123456789abcdef01234567"
+                    }
+                },
+                "10.3.7": {
+                    "version": "10.3.7",
+                    "dist": {
+                        "integrity": "sha512-fakehash1037==",
+                        "shasum": "abcdef0123456789abcdef0123456789abcdef01"
+                    }
+                }
+            },
+            "repository": {
+                "type": "git",
+                "url": "git+https://github.com/nestjs/nest.git"
+            }
+        }
+        
+        class FakeResponse:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+            def read(self):
+                import json
+                return json.dumps(fake_json).encode("utf-8")
+
+        mock_urlopen.return_value = FakeResponse()
+        
+        target = {
+            "name": "@nestjs/core",
+            "declared": "^9.4.0",
+            "installed": ["9.4.0"],
+            "integrity": {
+                "9.4.0": "sha512-fakehash940=="
+            }
+        }
+        
+        results = kevlar.check_npm_package(target)
+        self.assertEqual(len(results), 1)
+        res = results[0]
+        self.assertEqual(res["name"], "@nestjs/core")
+        self.assertEqual(res["installed"], "9.4.0")
+        self.assertEqual(res["status"], "major")
+        self.assertEqual(res["latest_absolute"], "10.3.7")
+        self.assertFalse(res["mismatch_checksum"])
+        self.assertIn("github.com/nestjs/nest", res["repo_url"])
+        self.assertIn("v9.4.0...v10.3.7", res["compare_url"])
+
+    @patch("urllib.request.urlopen")
+    def test_check_npm_package_integrity_checksum_mismatch_and_weak(self, mock_urlopen):
+        import io
+        fake_json = {
+            "name": "superagent",
+            "dist-tags": {"latest": "8.1.2"},
+            "versions": {
+                "8.0.9": {
+                    "version": "8.0.9",
+                    "dist": {
+                        "integrity": "sha512-OFFICIAL_INTEGRITY_HASH==",
+                        "shasum": "3b25055047b2dfd71c8ee933a39e7cb2811442c7"
+                    }
+                }
+            }
+        }
+        
+        class FakeResponse:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+            def read(self):
+                import json
+                return json.dumps(fake_json).encode("utf-8")
+
+        mock_urlopen.return_value = FakeResponse()
+
+        # Target 1: Mismatched integrity
+        target_mismatch = {
+            "name": "superagent-mismatch",
+            "declared": "^8.0.9",
+            "installed": ["8.0.9"],
+            "integrity": {
+                "8.0.9": "sha512-MALICIOUS_OR_CORRUPTED_HASH=="
+            }
+        }
+        results_mismatch = kevlar.check_npm_package(target_mismatch)
+        self.assertTrue(results_mismatch[0]["mismatch_checksum"])
+
+        # Target 2: Matching integrity
+        target_match = {
+            "name": "superagent-match",
+            "declared": "^8.0.9",
+            "installed": ["8.0.9"],
+            "integrity": {
+                "8.0.9": "sha512-OFFICIAL_INTEGRITY_HASH=="
+            }
+        }
+        results_match = kevlar.check_npm_package(target_match)
+        self.assertFalse(results_match[0]["mismatch_checksum"])
+
+    def test_check_npm_package_local_and_aliased(self):
+        targets = [
+            {"name": "local-pkg-workspace", "declared": "workspace:*", "installed": ["workspace:*"]},
+            {"name": "local-pkg-portal", "declared": "portal:../my-portal", "installed": ["portal:../my-portal"]},
+            {"name": "local-pkg-relative", "declared": "./local-dir", "installed": ["./local-dir"]}
+        ]
+        for t in targets:
+            res = kevlar.check_npm_package(t)
+            self.assertEqual(len(res), 1)
+            self.assertEqual(res[0]["latest"], "Local")
+            self.assertEqual(res[0]["status"], "local")
+            self.assertIsNone(res[0]["error"])
+
+    def test_npm_remediation_diff_overrides_and_resolutions(self):
+        import tempfile
+        
+        # Test 1: NPM overrides insertion when overrides does not exist
+        npm_pkg_content = (
+            "{\n"
+            "  \"name\": \"my-app\",\n"
+            "  \"version\": \"1.0.0\",\n"
+            "  \"dependencies\": {\n"
+            "    \"express\": \"^4.18.2\"\n"
+            "  }\n"
+            "}\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json", encoding="utf-8") as tmp:
+            tmp.write(npm_pkg_content)
+            tmp_path = tmp.name
+        try:
+            diff = kevlar.generate_override_remediation_diff(tmp_path, "qs", "6.12.1", "npm")
+            self.assertIsNotNone(diff)
+            self.assertEqual(diff["manifest_path"], tmp_path)
+            suggested = [row["html"] for row in diff["suggested_code"]]
+            self.assertTrue(any("overrides" in line for line in suggested))
+            self.assertTrue(any("qs" in line and "6.12.1" in line for line in suggested))
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+        # Test 2: Yarn resolutions insertion
+        yarn_pkg_content = (
+            "{\n"
+            "  \"name\": \"yarn-app\",\n"
+            "  \"version\": \"1.0.0\",\n"
+            "  \"resolutions\": {\n"
+            "    \"lodash\": \"4.17.21\"\n"
+            "  }\n"
+            "}\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json", encoding="utf-8") as tmp:
+            tmp.write(yarn_pkg_content)
+            tmp_path = tmp.name
+        try:
+            diff_yarn = kevlar.generate_override_remediation_diff(tmp_path, "semver", "7.5.2", "yarn")
+            self.assertIsNotNone(diff_yarn)
+            suggested_yarn = [row["html"] for row in diff_yarn["suggested_code"]]
+            self.assertTrue(any("semver" in line and "7.5.2" in line for line in suggested_yarn))
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def test_npm_remediation_diff_addition_direct_and_dev(self):
+        import tempfile
+
+        # Case A: Adding to manifest with dependencies
+        pkg_json_a = (
+            "{\n"
+            "  \"name\": \"app-a\",\n"
+            "  \"dependencies\": {\n"
+            "    \"express\": \"^4.18.2\"\n"
+            "  }\n"
+            "}\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json", encoding="utf-8") as tmp:
+            tmp.write(pkg_json_a)
+            tmp_path = tmp.name
+        try:
+            diff = kevlar.generate_addition_remediation_diff(tmp_path, "helmet", "7.1.0", "npm")
+            self.assertIsNotNone(diff)
+            self.assertTrue(diff.get("is_addition"))
+            suggested = [row["html"] for row in diff["suggested_code"]]
+            self.assertTrue(any("helmet" in line and "^7.1.0" in line for line in suggested))
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+        # Case B: Adding to empty json
+        pkg_json_b = "{}\n"
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json", encoding="utf-8") as tmp:
+            tmp.write(pkg_json_b)
+            tmp_path = tmp.name
+        try:
+            diff_empty = kevlar.generate_addition_remediation_diff(tmp_path, "cors", "2.8.5", "npm")
+            self.assertIsNotNone(diff_empty)
+            suggested_empty = [row["html"] for row in diff_empty["suggested_code"]]
+            self.assertTrue(any("dependencies" in line for line in suggested_empty))
+            self.assertTrue(any("cors" in line for line in suggested_empty))
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def test_node_engine_nvmrc_and_complex_ranges(self):
+        import tempfile
+        
+        # 1. Test .nvmrc file discovery
+        with tempfile.TemporaryDirectory() as tmpdir:
+            nvmrc_path = os.path.join(tmpdir, ".nvmrc")
+            with open(nvmrc_path, "w", encoding="utf-8") as f:
+                f.write("v20.11.0\n")
+            
+            constraint, source = kevlar.find_node_constraint(tmpdir, None)
+            self.assertEqual(constraint, "=v20.11.0")
+            self.assertIn(".nvmrc", source)
+
+        # 2. Test .node-version file discovery
+        with tempfile.TemporaryDirectory() as tmpdir:
+            node_ver_path = os.path.join(tmpdir, ".node-version")
+            with open(node_ver_path, "w", encoding="utf-8") as f:
+                f.write("22.5.0\n")
+            
+            constraint, source = kevlar.find_node_constraint(tmpdir, None)
+            self.assertEqual(constraint, "=22.5.0")
+            self.assertIn(".node-version", source)
+
+        # 3. Test analyze_node_constraint with strictly EOL node constraint
+        status_eol, depr_eol, err_eol, rec_eol = kevlar.analyze_node_constraint(">=12.0.0 <14.0.0")
+        self.assertEqual(status_eol, "error")
+        self.assertIsNotNone(err_eol)
+        self.assertIn("only satisfies EOL versions", err_eol)
+
+        # 4. Test analyze_node_constraint with mixed constraint allowing EOL
+        status_mix, depr_mix, err_mix, rec_mix = kevlar.analyze_node_constraint(">=12.0.0")
+        self.assertEqual(status_mix, "minor")
+        self.assertIsNotNone(depr_mix)
+        self.assertIn("allows EOL versions", depr_mix)
+
+        # 5. Test analyze_node_constraint with modern active node constraint
+        status_ok, depr_ok, err_ok, rec_ok = kevlar.analyze_node_constraint(">=20.0.0")
+        self.assertIn(status_ok, ("up-to-date", "minor", "patch"))
+
+    def test_run_npm_checker_on_all_fixtures(self):
+        import types
+        fixtures = [
+            "test/test_npm_v1",
+            "test/test_npm_workspaces",
+            "test/test_yarn_classic",
+            "test/test_yarn_berry",
+            "test/test_pnpm_monorepo",
+            "test/test_npm_overrides"
+        ]
+        base_dir = os.path.abspath(os.path.dirname(__file__))
+        for rel_path in fixtures:
+            fixture_path = os.path.join(base_dir, rel_path)
+            if os.path.exists(fixture_path):
+                args = types.SimpleNamespace(
+                    path=fixture_path,
+                    all=True,
+                    concurrent=5,
+                    vuls=False,
+                    suppress=None
+                )
+                results, pkg_data, elapsed = kevlar.run_npm_checker(args)
+                self.assertIsNotNone(results, f"Failed on fixture {rel_path}")
+                self.assertTrue(len(results) > 0, f"Expected non-empty results for fixture {rel_path}")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,41 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+  .:
+    dependencies:
+      dotenv:
+        specifier: ^16.4.5
+        version: 16.4.5
+    devDependencies:
+      rimraf:
+        specifier: ^5.0.5
+        version: 5.0.5
+
+packages:
+  dotenv@16.4.5:
+    resolution: {integrity: sha512-ZmdL2zs+eU54mCoZOJrWJ7CF/k09bK01uCuzb/P6g/e1e1a49c67g9d2e14e6d4268e36d4001b97a224a9194==}
+    engines: {node: '>=12'}
+
+  glob@10.3.10:
+    resolution: {integrity: sha512-fa46+R1UVMmI6P7Xk1RSxnPGy3NEHSXC+Pn3JS37f0qq4Gb3jkhzpboeQIwbZU+3o+pw64wtNy/ke65M3UzneA==}
+    engines: {node: '>=16 || 14 >=14.17'}
+
+  rimraf@5.0.5:
+    resolution: {integrity: sha512-CcrCe635079CEoED2YsSpuG1493012a6f238b7d991b1d91a9b2b5275815340649722384a51608972895690==}
+    engines: {node: '>=14'}
+    hasBin: true
+    dependencies:
+      glob: 10.3.10
+
+snapshots:
+  dotenv@16.4.5: {}
+
+  glob@10.3.10: {}
+
+  rimraf@5.0.5:
+    dependencies:
+      glob: 10.3.10
