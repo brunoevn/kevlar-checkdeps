@@ -10522,7 +10522,12 @@ def _populate_parent_strategies(
     if not r.get("required_by"):
         return strategies
 
+    seen_parents = set()
     for parent_name in r.get("required_by", []):
+        if not parent_name or parent_name in seen_parents:
+            continue
+        seen_parents.add(parent_name)
+
         parent_candidate = next(
             (
                 item
@@ -10638,7 +10643,6 @@ def _populate_parent_strategies(
                     "options": parent_options,
                 }
             )
-            break
 
     return strategies
 

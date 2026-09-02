@@ -4189,6 +4189,86 @@ require (
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_populate_parent_strategies_multiple_parents(self):
+        """Test that transitive dependencies with multiple parents offer upgrade strategies for all upgradable parents."""
+        import json
+        import shutil
+        import tempfile
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            pkg_json_path = os.path.join(temp_dir, "package.json")
+            pkg_json_content = {
+                "name": "multi-parent-test",
+                "dependencies": {
+                    "parent-a": "1.0.0",
+                    "parent-b": "2.0.0",
+                },
+            }
+            with open(pkg_json_path, "w", encoding="utf-8") as f:
+                json.dump(pkg_json_content, f, indent=2)
+
+            results = [
+                {
+                    "name": "parent-a",
+                    "declared": "1.0.0",
+                    "installed": "1.0.0",
+                    "latest_patch": None,
+                    "latest_same_major": "1.1.0",
+                    "latest_absolute": "2.0.0",
+                    "status": "minor",
+                    "technology": "npm",
+                    "dep_type": "Direct",
+                    "project_path": temp_dir,
+                },
+                {
+                    "name": "parent-b",
+                    "declared": "2.0.0",
+                    "installed": "2.0.0",
+                    "latest_patch": None,
+                    "latest_same_major": "2.5.0",
+                    "latest_absolute": "3.0.0",
+                    "status": "minor",
+                    "technology": "npm",
+                    "dep_type": "Direct",
+                    "project_path": temp_dir,
+                },
+                {
+                    "name": "transitive-lib",
+                    "declared": None,
+                    "installed": "0.9.0",
+                    "latest_patch": "0.9.1",
+                    "latest_same_major": "0.9.2",
+                    "latest_absolute": "1.0.0",
+                    "status": "patch",
+                    "technology": "npm",
+                    "dep_type": "Transitive",
+                    "required_by": ["parent-a", "parent-b"],
+                    "vulnerabilities": [{"id": "GHSA-test-123"}],
+                    "project_path": temp_dir,
+                },
+            ]
+
+            kevlar.populate_remediation_recommendations(results, temp_dir)
+
+            trans_rem = results[2].get("remediation")
+            self.assertIsNotNone(trans_rem)
+            strategies = trans_rem.get("strategies", [])
+            parent_strategies = [s for s in strategies if s["id"] == "parent_upgrade"]
+            self.assertEqual(len(parent_strategies), 2)
+
+            parent_a_st = next(s for s in parent_strategies if "parent-a" in s["title"])
+            parent_b_st = next(s for s in parent_strategies if "parent-b" in s["title"])
+
+            self.assertTrue(parent_a_st.get("is_recommended"))
+            self.assertTrue(parent_b_st.get("is_recommended"))
+
+            override_st = next((s for s in strategies if s["id"] == "override"), None)
+            self.assertIsNotNone(override_st)
+            self.assertFalse(override_st.get("is_recommended"))
+        finally:
+            shutil.rmtree(temp_dir)
+
 
 if __name__ == "__main__":
     unittest.main()
