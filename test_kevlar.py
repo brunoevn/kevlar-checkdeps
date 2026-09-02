@@ -1428,6 +1428,28 @@ class TestKevlar(unittest.TestCase):
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
+    def test_parse_pnpm_lock_peer_dep_slashes(self):
+        import tempfile
+        content = (
+            "lockfileVersion: '9.0'\n"
+            "snapshots:\n"
+            "  'http-proxy-middleware@2.0.10(@types/express@4.17.25)(debug@4.4.3)':\n"
+            "    dependencies:\n"
+            "      '@types/express': 4.17.25\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".yaml", encoding="utf-8") as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        try:
+            resolved, parents, _integrity = kevlar.parse_pnpm_lock(tmp_path)
+            self.assertEqual(resolved.get("http-proxy-middleware"), ["2.0.10"])
+            self.assertNotIn("express", resolved)
+            self.assertNotIn("4.17.25)", resolved.get("express", []))
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+
     def test_python_lock_parsers(self):
         import json
         import tempfile
@@ -4696,6 +4718,171 @@ require (
                 results, pkg_data, elapsed = kevlar.run_npm_checker(args)
                 self.assertIsNotNone(results, f"Failed on fixture {rel_path}")
                 self.assertTrue(len(results) > 0, f"Expected non-empty results for fixture {rel_path}")
+
+    def test_populate_parent_strategies_multiple_parents(self):
+        """Test that transitive dependencies with multiple parents offer upgrade strategies for all upgradable parents."""
+        import json
+        import shutil
+        import tempfile
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            pkg_json_path = os.path.join(temp_dir, "package.json")
+            pkg_json_content = {
+                "name": "multi-parent-test",
+                "dependencies": {
+                    "parent-a": "1.0.0",
+                    "parent-b": "2.0.0",
+                },
+            }
+            with open(pkg_json_path, "w", encoding="utf-8") as f:
+                json.dump(pkg_json_content, f, indent=2)
+
+            results = [
+                {
+                    "name": "parent-a",
+                    "declared": "1.0.0",
+                    "installed": "1.0.0",
+                    "latest_patch": None,
+                    "latest_same_major": "1.1.0",
+                    "latest_absolute": "2.0.0",
+                    "status": "minor",
+                    "technology": "npm",
+                    "dep_type": "Direct",
+                    "project_path": temp_dir,
+                },
+                {
+                    "name": "parent-b",
+                    "declared": "2.0.0",
+                    "installed": "2.0.0",
+                    "latest_patch": None,
+                    "latest_same_major": "2.5.0",
+                    "latest_absolute": "3.0.0",
+                    "status": "minor",
+                    "technology": "npm",
+                    "dep_type": "Direct",
+                    "project_path": temp_dir,
+                },
+                {
+                    "name": "transitive-lib",
+                    "declared": None,
+                    "installed": "0.9.0",
+                    "latest_patch": "0.9.1",
+                    "latest_same_major": "0.9.2",
+                    "latest_absolute": "1.0.0",
+                    "status": "patch",
+                    "technology": "npm",
+                    "dep_type": "Transitive",
+                    "required_by": ["parent-a", "parent-b"],
+                    "vulnerabilities": [{"id": "GHSA-test-123"}],
+                    "project_path": temp_dir,
+                },
+            ]
+
+            kevlar.populate_remediation_recommendations(results, temp_dir)
+
+            trans_rem = results[2].get("remediation")
+            self.assertIsNotNone(trans_rem)
+            strategies = trans_rem.get("strategies", [])
+            parent_strategies = [s for s in strategies if s["id"] == "parent_upgrade"]
+            self.assertEqual(len(parent_strategies), 1)
+
+            parent_st = parent_strategies[0]
+            self.assertIn("Upgrade Parent Packages (2 direct packages)", parent_st["title"])
+            self.assertTrue(parent_st.get("is_recommended"))
+            self.assertIn("All of them must be updated", parent_st.get("diagnostic", ""))
+
+            # Options check: First option must be Unified Diff
+            options = parent_st.get("options", [])
+            self.assertTrue(len(options) >= 3)  # unified + step 1 + step 2
+            self.assertEqual(options[0]["id"], "unified")
+            self.assertIn("Unified Diff: All 2 Parents", options[0]["label"])
+
+            # Verify unified diff has changes for both parents
+            unified_diff = options[0].get("diff")
+            self.assertIsNotNone(unified_diff)
+            suggested_html = " ".join(item["html"] for item in unified_diff.get("suggested_code", []))
+            self.assertIn("parent-a", suggested_html)
+            self.assertIn("parent-b", suggested_html)
+
+            # Override strategy check
+            override_st = next((s for s in strategies if s["id"] == "override"), None)
+            self.assertIsNotNone(override_st)
+            self.assertFalse(override_st.get("is_recommended"))
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_populate_parent_strategies_multi_file(self):
+        """Test that transitive dependencies with parents in different manifest files present multi-file stepper options."""
+        import json
+        import shutil
+        import tempfile
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            dir_a = os.path.join(temp_dir, "app-a")
+            dir_b = os.path.join(temp_dir, "app-b")
+            os.makedirs(dir_a, exist_ok=True)
+            os.makedirs(dir_b, exist_ok=True)
+
+            with open(os.path.join(dir_a, "package.json"), "w", encoding="utf-8") as f:
+                json.dump({"name": "app-a", "dependencies": {"parent-a": "1.0.0"}}, f, indent=2)
+
+            with open(os.path.join(dir_b, "package.json"), "w", encoding="utf-8") as f:
+                json.dump({"name": "app-b", "dependencies": {"parent-b": "2.0.0"}}, f, indent=2)
+
+            results = [
+                {
+                    "name": "parent-a",
+                    "declared": "1.0.0",
+                    "installed": "1.0.0",
+                    "latest_patch": None,
+                    "latest_same_major": "1.1.0",
+                    "latest_absolute": "2.0.0",
+                    "status": "minor",
+                    "technology": "npm",
+                    "dep_type": "Direct",
+                    "project_path": dir_a,
+                },
+                {
+                    "name": "parent-b",
+                    "declared": "2.0.0",
+                    "installed": "2.0.0",
+                    "latest_patch": None,
+                    "latest_same_major": "2.5.0",
+                    "latest_absolute": "3.0.0",
+                    "status": "minor",
+                    "technology": "npm",
+                    "dep_type": "Direct",
+                    "project_path": dir_b,
+                },
+                {
+                    "name": "transitive-lib",
+                    "declared": None,
+                    "installed": "0.9.0",
+                    "latest_patch": "0.9.1",
+                    "latest_same_major": "0.9.2",
+                    "latest_absolute": "1.0.0",
+                    "status": "patch",
+                    "technology": "npm",
+                    "dep_type": "Transitive",
+                    "required_by": ["parent-a", "parent-b"],
+                    "vulnerabilities": [{"id": "GHSA-multi-file"}],
+                    "project_path": dir_a,
+                },
+            ]
+
+            # In this case, parent-a is in dir_a (the project_path of transitive-lib)
+            kevlar.populate_remediation_recommendations(results, dir_a)
+
+            trans_rem = results[2].get("remediation")
+            self.assertIsNotNone(trans_rem)
+            strategies = trans_rem.get("strategies", [])
+            parent_strategies = [s for s in strategies if s["id"] == "parent_upgrade"]
+            self.assertEqual(len(parent_strategies), 1)
+            self.assertIn("Upgrade Parent Package (parent-a)", parent_strategies[0]["title"])
+        finally:
+            shutil.rmtree(temp_dir)
 
 
 if __name__ == "__main__":
