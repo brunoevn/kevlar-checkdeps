@@ -4255,17 +4255,102 @@ require (
             self.assertIsNotNone(trans_rem)
             strategies = trans_rem.get("strategies", [])
             parent_strategies = [s for s in strategies if s["id"] == "parent_upgrade"]
-            self.assertEqual(len(parent_strategies), 2)
+            self.assertEqual(len(parent_strategies), 1)
 
-            parent_a_st = next(s for s in parent_strategies if "parent-a" in s["title"])
-            parent_b_st = next(s for s in parent_strategies if "parent-b" in s["title"])
+            parent_st = parent_strategies[0]
+            self.assertIn("Upgrade Parent Packages (2 direct packages)", parent_st["title"])
+            self.assertTrue(parent_st.get("is_recommended"))
+            self.assertIn("All of them must be updated", parent_st.get("diagnostic", ""))
 
-            self.assertTrue(parent_a_st.get("is_recommended"))
-            self.assertTrue(parent_b_st.get("is_recommended"))
+            # Options check: First option must be Unified Diff
+            options = parent_st.get("options", [])
+            self.assertTrue(len(options) >= 3)  # unified + step 1 + step 2
+            self.assertEqual(options[0]["id"], "unified")
+            self.assertIn("Unified Diff: All 2 Parents", options[0]["label"])
 
+            # Verify unified diff has changes for both parents
+            unified_diff = options[0].get("diff")
+            self.assertIsNotNone(unified_diff)
+            suggested_html = " ".join(item["html"] for item in unified_diff.get("suggested_code", []))
+            self.assertIn("parent-a", suggested_html)
+            self.assertIn("parent-b", suggested_html)
+
+            # Override strategy check
             override_st = next((s for s in strategies if s["id"] == "override"), None)
             self.assertIsNotNone(override_st)
             self.assertFalse(override_st.get("is_recommended"))
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_populate_parent_strategies_multi_file(self):
+        """Test that transitive dependencies with parents in different manifest files present multi-file stepper options."""
+        import json
+        import shutil
+        import tempfile
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            dir_a = os.path.join(temp_dir, "app-a")
+            dir_b = os.path.join(temp_dir, "app-b")
+            os.makedirs(dir_a, exist_ok=True)
+            os.makedirs(dir_b, exist_ok=True)
+
+            with open(os.path.join(dir_a, "package.json"), "w", encoding="utf-8") as f:
+                json.dump({"name": "app-a", "dependencies": {"parent-a": "1.0.0"}}, f, indent=2)
+
+            with open(os.path.join(dir_b, "package.json"), "w", encoding="utf-8") as f:
+                json.dump({"name": "app-b", "dependencies": {"parent-b": "2.0.0"}}, f, indent=2)
+
+            results = [
+                {
+                    "name": "parent-a",
+                    "declared": "1.0.0",
+                    "installed": "1.0.0",
+                    "latest_patch": None,
+                    "latest_same_major": "1.1.0",
+                    "latest_absolute": "2.0.0",
+                    "status": "minor",
+                    "technology": "npm",
+                    "dep_type": "Direct",
+                    "project_path": dir_a,
+                },
+                {
+                    "name": "parent-b",
+                    "declared": "2.0.0",
+                    "installed": "2.0.0",
+                    "latest_patch": None,
+                    "latest_same_major": "2.5.0",
+                    "latest_absolute": "3.0.0",
+                    "status": "minor",
+                    "technology": "npm",
+                    "dep_type": "Direct",
+                    "project_path": dir_b,
+                },
+                {
+                    "name": "transitive-lib",
+                    "declared": None,
+                    "installed": "0.9.0",
+                    "latest_patch": "0.9.1",
+                    "latest_same_major": "0.9.2",
+                    "latest_absolute": "1.0.0",
+                    "status": "patch",
+                    "technology": "npm",
+                    "dep_type": "Transitive",
+                    "required_by": ["parent-a", "parent-b"],
+                    "vulnerabilities": [{"id": "GHSA-multi-file"}],
+                    "project_path": dir_a,
+                },
+            ]
+
+            # In this case, parent-a is in dir_a (the project_path of transitive-lib)
+            kevlar.populate_remediation_recommendations(results, dir_a)
+
+            trans_rem = results[2].get("remediation")
+            self.assertIsNotNone(trans_rem)
+            strategies = trans_rem.get("strategies", [])
+            parent_strategies = [s for s in strategies if s["id"] == "parent_upgrade"]
+            self.assertEqual(len(parent_strategies), 1)
+            self.assertIn("Upgrade Parent Package (parent-a)", parent_strategies[0]["title"])
         finally:
             shutil.rmtree(temp_dir)
 

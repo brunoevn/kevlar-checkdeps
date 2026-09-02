@@ -9825,6 +9825,196 @@ def generate_remediation_diff(
     }
 
 
+def generate_multi_parent_unified_diff(manifest_path, parent_changes, tech):
+    """Generates a consolidated unified diff showing changes for multiple packages in the same manifest file."""
+    try:
+        with open(manifest_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+    except Exception:
+        return None
+
+    resolved_changes = []
+    for ch in parent_changes:
+        line_index = ch.get("line_index")
+        if line_index is None:
+            continue
+        idx = line_index - 1
+        if idx < 0 or idx >= len(lines):
+            continue
+
+        declared_ver = ch.get("declared")
+        pkg_name = ch.get("name")
+        target_ver = ch.get("target")
+        if not target_ver:
+            continue
+
+        search_range = range(idx, min(idx + 4, len(lines)))
+        line_idx_to_change, target_text = _find_target_version_line(
+            lines, search_range, declared_ver, tech, pkg_name, idx
+        )
+
+        if (
+            target_text
+            and pkg_name
+            and target_text.lower().strip() == pkg_name.lower().strip()
+        ):
+            target_text = None
+
+        if not target_text:
+            continue
+
+        res_path, res_idx, res_text, res_lines = _resolve_property_placeholder(
+            manifest_path, target_text, tech, lines, line_idx_to_change, declared_ver
+        )
+        if res_path is None or res_path != manifest_path:
+            continue
+
+        line_idx_to_change = res_idx
+        target_text = res_text
+
+        match_prefix = ""
+        if target_text:
+            match_opt = RE_OPERATOR_PREFIX_MATCH.match(target_text.strip())
+            if match_opt:
+                match_prefix = match_opt.group(1)
+
+        effective_prefix = match_prefix
+        if RE_OPERATOR_START.match(target_ver.strip()):
+            effective_prefix = ""
+
+        upgraded_str = effective_prefix + target_ver
+
+        def _clean_v(v):
+            if not v:
+                return ""
+            v = str(v).strip().lower().removeprefix("v")
+            return RE_OPERATOR_PREFIX.sub("", v)
+
+        if target_text and target_ver and _clean_v(target_text) == _clean_v(target_ver):
+            continue
+
+        orig_line = lines[line_idx_to_change].rstrip("\r\n")
+        escaped_orig = escape_html(orig_line)
+        if target_text and target_text in orig_line:
+            escaped_target = escape_html(target_text)
+            html_orig = escaped_orig.replace(
+                escaped_target,
+                f'<span class="diff-remove-chunk">{escaped_target}</span>',
+            )
+            new_line = orig_line.replace(target_text, upgraded_str)
+        else:
+            html_orig = escaped_orig
+            new_line = orig_line + f" -> {target_ver}"
+
+        escaped_new = escape_html(new_line)
+        escaped_upgraded = escape_html(upgraded_str)
+        if upgraded_str in new_line:
+            html_new = escaped_new.replace(
+                escaped_upgraded,
+                f'<span class="diff-add-chunk">{escaped_upgraded}</span>',
+            )
+        else:
+            html_new = escaped_new
+
+        resolved_changes.append(
+            {
+                "line_idx": line_idx_to_change,
+                "html_orig": html_orig,
+                "html_new": html_new,
+            }
+        )
+
+    if not resolved_changes:
+        return None
+
+    # Deduplicate changes by line_idx and sort
+    unique_changes = {}
+    for ch in resolved_changes:
+        unique_changes[ch["line_idx"]] = ch
+
+    # Collect context ranges [line_idx - 1, line_idx + 1] and merge overlapping
+    ranges = []
+    for l_idx in sorted(unique_changes.keys()):
+        r_start = max(0, l_idx - 1)
+        r_end = min(len(lines), l_idx + 2)
+        ranges.append([r_start, r_end])
+
+    merged_ranges = []
+    for r_start, r_end in ranges:
+        if not merged_ranges:
+            merged_ranges.append([r_start, r_end])
+        else:
+            prev_start, prev_end = merged_ranges[-1]
+            if r_start <= prev_end + 1:
+                merged_ranges[-1][1] = max(prev_end, r_end)
+            else:
+                merged_ranges.append([r_start, r_end])
+
+    current_block = []
+    suggested_block = []
+
+    for idx_range, (r_start, r_end) in enumerate(merged_ranges):
+        if idx_range > 0:
+            current_block.append(
+                {
+                    "line_num": "...",
+                    "html": '<span style="color:var(--text-muted,#94a3b8)">...</span>',
+                    "is_changed": False,
+                }
+            )
+            suggested_block.append(
+                {
+                    "line_num": "...",
+                    "html": '<span style="color:var(--text-muted,#94a3b8)">...</span>',
+                    "is_changed": False,
+                }
+            )
+
+        for i in range(r_start, r_end):
+            orig_line = lines[i].rstrip("\r\n")
+            line_num = i + 1
+            if i in unique_changes:
+                ch = unique_changes[i]
+                current_block.append(
+                    {
+                        "line_num": line_num,
+                        "html": ch["html_orig"],
+                        "is_changed": True,
+                    }
+                )
+                suggested_block.append(
+                    {
+                        "line_num": line_num,
+                        "html": ch["html_new"],
+                        "is_changed": True,
+                    }
+                )
+            else:
+                escaped_orig = escape_html(orig_line)
+                current_block.append(
+                    {
+                        "line_num": line_num,
+                        "html": escaped_orig,
+                        "is_changed": False,
+                    }
+                )
+                suggested_block.append(
+                    {
+                        "line_num": line_num,
+                        "html": escaped_orig,
+                        "is_changed": False,
+                    }
+                )
+
+    first_line_number = min(unique_changes.keys()) + 1 if unique_changes else 1
+    return {
+        "manifest_path": manifest_path,
+        "line_number": first_line_number,
+        "current_code": current_block,
+        "suggested_code": suggested_block,
+    }
+
+
 def generate_addition_remediation_diff(manifest_path, package_name, target_ver, tech):
     """Generates remediation diff showing an addition to the manifest file when missing."""
     try:
@@ -10523,6 +10713,7 @@ def _populate_parent_strategies(
         return strategies
 
     seen_parents = set()
+    valid_parents = []
     for parent_name in r.get("required_by", []):
         if not parent_name or parent_name in seen_parents:
             continue
@@ -10632,17 +10823,117 @@ def _populate_parent_strategies(
                 )
 
         if parent_options:
-            strategies.append(
+            target_v = p_abs or p_sm or p_patch
+            valid_parents.append(
                 {
-                    "id": "parent_upgrade",
-                    "title": f"Upgrade Parent Package ({p_name})",
-                    "description": f"Recommended. Upgrades parent package '{p_name}' which requires '{name}'.",
-                    "is_recommended": True,
+                    "name": p_name,
+                    "manifest_path": manifest_path,
+                    "line_idx": parent_line_idx,
+                    "declared": p_decl,
+                    "target": target_v,
+                    "options": parent_options,
                     "command": cmd_parent,
                     "validation": val_parent,
-                    "options": parent_options,
                 }
             )
+
+    if not valid_parents:
+        return strategies
+
+    if len(valid_parents) == 1:
+        vp = valid_parents[0]
+        strategies.append(
+            {
+                "id": "parent_upgrade",
+                "title": f"Upgrade Parent Package ({vp['name']})",
+                "description": f"Recommended. Upgrades parent package '{vp['name']}' which requires '{name}'.",
+                "is_recommended": True,
+                "command": vp["command"],
+                "validation": vp["validation"],
+                "options": vp["options"],
+            }
+        )
+        return strategies
+
+    all_same_file = len({vp["manifest_path"] for vp in valid_parents}) == 1
+    p_names = [vp["name"] for vp in valid_parents]
+
+    diagnostic_msg = (
+        f"'{name}' is a transitive dependency required by {len(valid_parents)} direct packages: "
+        f"{', '.join(p_names)}. All of them must be updated in your manifest to completely resolve this dependency."
+    )
+
+    combined_options = []
+
+    if all_same_file:
+        # Case 1: All parents in the same manifest file (Alternative 1 - Unified Diff)
+        parent_changes = [
+            {
+                "name": vp["name"],
+                "line_index": vp["line_idx"],
+                "declared": vp["declared"],
+                "target": vp["target"],
+            }
+            for vp in valid_parents
+        ]
+        unified_diff = generate_multi_parent_unified_diff(
+            valid_parents[0]["manifest_path"], parent_changes, tech
+        )
+        if unified_diff:
+            combined_options.append(
+                {
+                    "id": "unified",
+                    "label": f"Unified Diff: All {len(valid_parents)} Parents",
+                    "badge": "All Parents",
+                    "badge_class": "v-chip-ok",
+                    "command": None,
+                    "validation": None,
+                    "diff": unified_diff,
+                }
+            )
+
+        for idx_p, vp in enumerate(valid_parents, 1):
+            for opt in vp["options"]:
+                combined_options.append(
+                    {
+                        "id": f"step_{idx_p}_{opt['id']}",
+                        "label": f"Step {idx_p}: {opt['label']}",
+                        "badge": opt.get("badge"),
+                        "badge_class": opt.get("badge_class"),
+                        "command": opt.get("command"),
+                        "validation": opt.get("validation"),
+                        "diff": opt.get("diff"),
+                    }
+                )
+    else:
+        # Case 2: Parents in different manifest files (Alternative 2 - Stepper)
+        for idx_p, vp in enumerate(valid_parents, 1):
+            m_name = os.path.basename(vp["manifest_path"])
+            for opt in vp["options"]:
+                combined_options.append(
+                    {
+                        "id": f"step_{idx_p}_{opt['id']}",
+                        "label": f"Step {idx_p} of {len(valid_parents)}: {vp['name']} ({m_name}) - {opt['label']}",
+                        "badge": opt.get("badge"),
+                        "badge_class": opt.get("badge_class"),
+                        "command": opt.get("command"),
+                        "validation": opt.get("validation"),
+                        "diff": opt.get("diff"),
+                    }
+                )
+
+    strategies.append(
+        {
+            "id": "parent_upgrade",
+            "title": f"Upgrade Parent Packages ({len(valid_parents)} direct packages)",
+            "description": f"Recommended. Upgrades all direct parent packages ({', '.join(p_names)}) that require '{name}'.",
+            "is_recommended": True,
+            "diagnostic": diagnostic_msg,
+            "command": None,
+            "validation": None,
+            "options": combined_options,
+        }
+    )
 
     return strategies
 
@@ -10709,7 +11000,7 @@ def _build_final_remediation(strategies, manifest_missing):
         (
             opt["diff"]
             for opt in all_flat_options
-            if opt.get("id") in {"patch", "minor"} and opt.get("diff")
+            if opt.get("id") in {"patch", "minor", "unified"} and opt.get("diff")
         ),
         None,
     )
