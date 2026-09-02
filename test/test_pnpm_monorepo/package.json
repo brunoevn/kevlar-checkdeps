@@ -1,0 +1,11 @@
+{
+  "name": "test-pnpm-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "rimraf": "^5.0.5"
+  }
+}

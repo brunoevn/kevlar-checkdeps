@@ -1,0 +1,17 @@
+__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"clsx@npm:^2.1.0":
+  version: 2.1.1
+  resolution: "clsx@npm:2.1.1"
+  checksum: 10c0/sha512:c607ab9b38030b6ff8d5bfba22e70e3592bc133cf0b809a7b7de283fa71b12b545d65cb5ecad25ef20fa76bf38b584fe3bebb3650228c2eefbd094b8e23b1855
+  languageName: node
+  linkType: hard
+
+"zod@npm:^3.22.4":
+  version: 3.23.8
+  resolution: "zod@npm:3.23.8"
+  checksum: 10c0/sha512:ab1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef
+  languageName: node
+  linkType: hard
