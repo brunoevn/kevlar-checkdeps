@@ -1428,6 +1428,28 @@ class TestKevlar(unittest.TestCase):
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
+    def test_parse_pnpm_lock_peer_dep_slashes(self):
+        import tempfile
+        content = (
+            "lockfileVersion: '9.0'\n"
+            "snapshots:\n"
+            "  'http-proxy-middleware@2.0.10(@types/express@4.17.25)(debug@4.4.3)':\n"
+            "    dependencies:\n"
+            "      '@types/express': 4.17.25\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".yaml", encoding="utf-8") as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        try:
+            resolved, parents, _integrity = kevlar.parse_pnpm_lock(tmp_path)
+            self.assertEqual(resolved.get("http-proxy-middleware"), ["2.0.10"])
+            self.assertNotIn("express", resolved)
+            self.assertNotIn("4.17.25)", resolved.get("express", []))
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+
     def test_python_lock_parsers(self):
         import json
         import tempfile

@@ -2274,34 +2274,35 @@ def parse_pnpm_lock(filepath):
                         raw_line = raw_line[:-2].rstrip()
                     raw_pkg = raw_line.rstrip(":").strip("'\"")
                     raw_pkg = raw_pkg.removeprefix("/")
-                    if "node_modules/" in raw_pkg:
-                        raw_pkg = raw_pkg.split("node_modules/")[-1]
-                    if "/" in raw_pkg and not raw_pkg.startswith("@"):
-                        first_part = raw_pkg.split("/", 1)[0]
+                    # Strip peer dependency / engine suffix in parentheses BEFORE handling registry domain / path
+                    clean_spec = raw_pkg.split("(", 1)[0]
+
+                    if "/" in clean_spec and not clean_spec.startswith("@"):
+                        first_part = clean_spec.split("/", 1)[0]
                         if "." in first_part or "localhost" in first_part:
-                            raw_pkg = raw_pkg.split("/", 1)[1]
+                            clean_spec = clean_spec.split("/", 1)[1]
 
                     pkg_name = None
                     version = None
 
-                    # Robust separator '@' detection dividing package name from version/peer info
-                    if raw_pkg.startswith("@"):
-                        at_idx = raw_pkg.find("@", 1)
+                    # Robust separator '@' detection dividing package name from version
+                    if clean_spec.startswith("@"):
+                        at_idx = clean_spec.find("@", 1)
                     else:
-                        at_idx = raw_pkg.find("@")
+                        at_idx = clean_spec.find("@")
 
                     if at_idx != -1:
-                        pkg_name = raw_pkg[:at_idx]
-                        version = raw_pkg[at_idx + 1 :]
+                        pkg_name = clean_spec[:at_idx]
+                        version = clean_spec[at_idx + 1 :]
 
-                    if not pkg_name and "/" in raw_pkg:
-                        parts = raw_pkg.rsplit("/", 1)
+                    if not pkg_name and "/" in clean_spec:
+                        parts = clean_spec.rsplit("/", 1)
                         if len(parts) == 2:
                             pkg_name = parts[0]
                             version = parts[1]
 
                     if not pkg_name:
-                        pkg_name = raw_pkg
+                        pkg_name = clean_spec
                         version = "unknown"
 
                     if version and "(" in version:
