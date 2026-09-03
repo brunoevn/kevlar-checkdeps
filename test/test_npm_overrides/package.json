@@ -1,0 +1,13 @@
+{
+  "name": "test-npm-overrides",
+  "version": "1.0.0",
+  "dependencies": {
+    "express": "^4.19.2"
+  },
+  "overrides": {
+    "send": {
+      "mime": "1.6.0"
+    },
+    "qs": "6.12.1"
+  }
+}

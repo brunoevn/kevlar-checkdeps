@@ -1,0 +1,11 @@
+{
+  "name": "test-yarn-classic",
+  "version": "1.0.0",
+  "dependencies": {
+    "@babel/core": "^7.20.0",
+    "chalk": "^4.1.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0"
+  }
+}

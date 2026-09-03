@@ -807,6 +807,114 @@ class TestKevlar(unittest.TestCase):
         self.assertTrue(kevlar.check_semver_satisfies("1.8.0", "~1"))
         self.assertFalse(kevlar.check_semver_satisfies("2.0.0", "~1"))
 
+    def test_check_semver_satisfies_caching(self):
+        """Validates that check_semver_satisfies leverages LRU caching and that clear_kevlar_cache flushes it."""
+        kevlar.clear_kevlar_cache()
+        initial_info = kevlar.check_semver_satisfies.cache_info()
+        self.assertEqual(initial_info.currsize, 0)
+        self.assertEqual(initial_info.hits, 0)
+
+        # First call -> cache miss
+        res1 = kevlar.check_semver_satisfies("1.2.3", ">=1.0.0 <2.0.0")
+        self.assertTrue(res1)
+        info1 = kevlar.check_semver_satisfies.cache_info()
+        self.assertEqual(info1.currsize, 1)
+        self.assertEqual(info1.hits, 0)
+        self.assertEqual(info1.misses, initial_info.misses + 1)
+
+        # Second call with identical arguments -> cache hit
+        res2 = kevlar.check_semver_satisfies("1.2.3", ">=1.0.0 <2.0.0")
+        self.assertTrue(res2)
+        info2 = kevlar.check_semver_satisfies.cache_info()
+        self.assertEqual(info2.currsize, 1)
+        self.assertEqual(info2.hits, 1)
+
+        # Third call with new arguments -> cache miss, currsize = 2
+        res3 = kevlar.check_semver_satisfies("2.5.0", "^2.0.0")
+        self.assertTrue(res3)
+        info3 = kevlar.check_semver_satisfies.cache_info()
+        self.assertEqual(info3.currsize, 2)
+        self.assertEqual(info3.hits, 1)
+
+        # Flush cache via clear_kevlar_cache
+        kevlar.clear_kevlar_cache()
+        cleared_info = kevlar.check_semver_satisfies.cache_info()
+        self.assertEqual(cleared_info.currsize, 0)
+        self.assertEqual(cleared_info.hits, 0)
+
+    def test_check_semver_satisfies_extended_edge_cases(self):
+        """Validates edge cases including operator whitespace, complex compound expressions, and boundaries."""
+        # Operator whitespace normalization
+        self.assertTrue(kevlar.check_semver_satisfies("1.5.0", " >= 1.2.0   <  2.0.0 "))
+        self.assertTrue(kevlar.check_semver_satisfies("2.0.0", " = 2.0.0 "))
+        self.assertTrue(kevlar.check_semver_satisfies("2.0.0", " == 2.0.0 "))
+        self.assertFalse(kevlar.check_semver_satisfies("2.0.1", " == 2.0.0 "))
+
+        # Wildcard variations
+        self.assertTrue(kevlar.check_semver_satisfies("1.2.3", "1.x"))
+        self.assertTrue(kevlar.check_semver_satisfies("1.2.3", "1.*"))
+        self.assertTrue(kevlar.check_semver_satisfies("1.2.3", "1.2.x"))
+        self.assertTrue(kevlar.check_semver_satisfies("1.2.3", "1.2.*"))
+        self.assertFalse(kevlar.check_semver_satisfies("1.3.0", "1.2.x"))
+        self.assertFalse(kevlar.check_semver_satisfies("2.0.0", "1.x"))
+
+        # Multiple compound OR and comma combinations
+        self.assertTrue(kevlar.check_semver_satisfies("0.9.5", "<1.0.0 || >=2.0.0"))
+        self.assertTrue(kevlar.check_semver_satisfies("2.5.0", "<1.0.0 || >=2.0.0"))
+        self.assertFalse(kevlar.check_semver_satisfies("1.5.0", "<1.0.0 || >=2.0.0"))
+
+        # Zero-series semver edge cases
+        self.assertTrue(kevlar.check_semver_satisfies("0.0.1", "^0.0.1"))
+        self.assertFalse(kevlar.check_semver_satisfies("0.0.2", "^0.0.1"))
+        self.assertTrue(kevlar.check_semver_satisfies("0.1.5", "^0.1.0"))
+        self.assertFalse(kevlar.check_semver_satisfies("0.2.0", "^0.1.0"))
+
+        # Falsy and universal ranges
+        self.assertTrue(kevlar.check_semver_satisfies("1.0.0", None))
+        self.assertTrue(kevlar.check_semver_satisfies("1.0.0", ""))
+        self.assertTrue(kevlar.check_semver_satisfies("1.0.0", "*"))
+        self.assertTrue(kevlar.check_semver_satisfies("1.0.0", "any"))
+        self.assertTrue(kevlar.check_semver_satisfies("1.0.0", "x"))
+
+    def test_check_semver_satisfies_ecosystems_matrix(self):
+        """Validates semver constraint satisfaction patterns covering all supported technology ecosystems."""
+        # 1. Node.js (npm / yarn / pnpm) patterns: Carets, tildes, wildcards, and disjunctive ranges
+        self.assertTrue(kevlar.check_semver_satisfies("18.12.1", ">=16.0.0 <17.0.0 || >=18.0.0 <19.0.0"))
+        self.assertFalse(kevlar.check_semver_satisfies("17.5.0", ">=16.0.0 <17.0.0 || >=18.0.0 <19.0.0"))
+        self.assertTrue(kevlar.check_semver_satisfies("4.17.21", "^4.17.0"))
+        self.assertTrue(kevlar.check_semver_satisfies("2.3.4", "~2.3.0"))
+
+        # 2. Python (PEP 440 / requirements.txt / pyproject.toml) patterns: Comma-separated bounds and exact pins
+        self.assertTrue(kevlar.check_semver_satisfies("3.10.4", ">=3.8, <=3.11"))
+        self.assertFalse(kevlar.check_semver_satisfies("3.12.0", ">=3.8, <=3.11"))
+        self.assertTrue(kevlar.check_semver_satisfies("2.28.1", "==2.28.1"))
+        self.assertFalse(kevlar.check_semver_satisfies("2.28.2", "==2.28.1"))
+
+        # 3. Rust (Cargo.toml) patterns: Caret default conventions and zero-major crates
+        self.assertTrue(kevlar.check_semver_satisfies("1.0.197", "^1.0.0"))
+        self.assertTrue(kevlar.check_semver_satisfies("0.4.19", "^0.4"))
+        self.assertFalse(kevlar.check_semver_satisfies("0.5.0", "^0.4"))
+
+        # 4. Ruby (Gemfile / Bundler) patterns: Pessimistic constraint equivalents
+        self.assertTrue(kevlar.check_semver_satisfies("7.0.4", "~7.0.0"))
+        self.assertFalse(kevlar.check_semver_satisfies("7.1.0", "~7.0.0"))
+
+        # 5. PHP (Composer) patterns: Pipe-separated OR ranges, caret and tilde prefixes
+        self.assertTrue(kevlar.check_semver_satisfies("8.1.5", "^8.0 || ^8.1"))
+        self.assertTrue(kevlar.check_semver_satisfies("8.0.28", "^8.0 || ^8.1"))
+        self.assertFalse(kevlar.check_semver_satisfies("9.0.0", "^8.0 || ^8.1"))
+        self.assertTrue(kevlar.check_semver_satisfies("8.0.5", "~8.0.0 || ~8.1.0"))
+        self.assertFalse(kevlar.check_semver_satisfies("8.2.0", "~8.0.0 || ~8.1.0"))
+
+        # 6. Go (go.mod) patterns: Semver tags with and without v-prefix
+        self.assertTrue(kevlar.check_semver_satisfies("v1.18.2", ">=1.18.0"))
+        self.assertTrue(kevlar.check_semver_satisfies("1.18.2", ">=1.18.0"))
+
+        # 7. .NET / C# (NuGet / CPM) & Java (Maven / Gradle) patterns: Minimum bounds and exact versions
+        self.assertTrue(kevlar.check_semver_satisfies("13.0.3", ">=13.0.1"))
+        self.assertTrue(kevlar.check_semver_satisfies("2.13.4", ">=2.0.0"))
+        self.assertTrue(kevlar.check_semver_satisfies("3.0.0", "3.0.0"))
+
     def test_configuration_drift_validation(self):
         results = [
             # 1. Matching constraint
@@ -1319,6 +1427,28 @@ class TestKevlar(unittest.TestCase):
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
+
+    def test_parse_pnpm_lock_peer_dep_slashes(self):
+        import tempfile
+        content = (
+            "lockfileVersion: '9.0'\n"
+            "snapshots:\n"
+            "  'http-proxy-middleware@2.0.10(@types/express@4.17.25)(debug@4.4.3)':\n"
+            "    dependencies:\n"
+            "      '@types/express': 4.17.25\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".yaml", encoding="utf-8") as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        try:
+            resolved, parents, _integrity = kevlar.parse_pnpm_lock(tmp_path)
+            self.assertEqual(resolved.get("http-proxy-middleware"), ["2.0.10"])
+            self.assertNotIn("express", resolved)
+            self.assertNotIn("4.17.25)", resolved.get("express", []))
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
 
     def test_python_lock_parsers(self):
         import json
@@ -3907,14 +4037,17 @@ require (
 
         kevlar._set_cached_target_result("rust", target, results)
         kevlar._set_cached_registry_metadata("rust", "serde", ["1.0.228"])
+        kevlar.check_semver_satisfies("1.2.3", ">=1.0.0")
 
         self.assertIsNotNone(kevlar._get_cached_target_result("rust", target))
         self.assertIsNotNone(kevlar._get_cached_registry_metadata("rust", "serde"))
+        self.assertGreaterEqual(kevlar.check_semver_satisfies.cache_info().currsize, 1)
 
         kevlar.clear_kevlar_cache()
 
         self.assertIsNone(kevlar._get_cached_target_result("rust", target))
         self.assertIsNone(kevlar._get_cached_registry_metadata("rust", "serde"))
+        self.assertEqual(kevlar.check_semver_satisfies.cache_info().currsize, 0)
 
     def test_ruby_rails_core_gem_remediation(self):
         """Test that SCA remediation for Rails core submodules (e.g. activestorage) targets the rails gem and produces bundle update commands."""
@@ -4053,6 +4186,701 @@ require (
             lock_st = next(s for s in strategies if s["id"] == "bundle_update")
             self.assertIn("bundle update zeitwerk", lock_st.get("command", ""))
             self.assertIn("transitive", lock_st.get("diagnostic", ""))
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_parse_package_lock_v1_nested_hierarchy(self):
+        import json
+        import tempfile
+        lock_data = {
+            "name": "test-v1",
+            "version": "1.0.0",
+            "lockfileVersion": 1,
+            "requires": True,
+            "dependencies": {
+                "express": {
+                    "version": "4.16.4",
+                    "integrity": "sha512-j12Uuyb4FMtxewQbVW95EQmuqlzdr638J70gyYoAjqdPHvUUyKaeGQQCKt3bYVI4tuYWxbwlUXlQDthkxV/xEw==",
+                    "requires": {
+                        "body-parser": "1.18.3"
+                    },
+                    "dependencies": {
+                        "body-parser": {
+                            "version": "1.18.3",
+                            "integrity": "sha1-WykhmP/dVTs6DyDe0FkrlWlVyLQ=",
+                            "requires": {
+                                "bytes": "3.0.0",
+                                "qs": "6.5.2"
+                            },
+                            "dependencies": {
+                                "bytes": {
+                                    "version": "3.0.0",
+                                    "integrity": "sha1-0ygVQE1olpn4Wk6k+odV3ROpYEg="
+                                },
+                                "qs": {
+                                    "version": "6.5.2",
+                                    "integrity": "sha512-N5ZAX4/LxJmF+7wN74pUD6qAh9/wnvdQcjq9TZjevvXzSUo7bfmw91saq38OW86VMJYIjMpfRTd3UNYoVgWW3g=="
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json", encoding="utf-8") as tmp:
+            json.dump(lock_data, tmp)
+            tmp_path = tmp.name
+        try:
+            resolved, parents, integrity, direct_versions = kevlar.parse_package_lock(tmp_path)
+            self.assertEqual(resolved.get("express"), ["4.16.4"])
+            self.assertEqual(resolved.get("body-parser"), ["1.18.3"])
+            self.assertEqual(resolved.get("bytes"), ["3.0.0"])
+            self.assertEqual(resolved.get("qs"), ["6.5.2"])
+            self.assertEqual(direct_versions.get("express"), "4.16.4")
+            self.assertIn("root", parents.get("express", []))
+            self.assertIn("express", parents.get("body-parser", []))
+            self.assertIn("body-parser", parents.get("bytes", []))
+            self.assertIn("body-parser", parents.get("qs", []))
+            self.assertIn("sha512-j12Uuyb4FMtxewQbVW95EQmuqlzdr638J70gyYoAjqdPHvUUyKaeGQQCKt3bYVI4tuYWxbwlUXlQDthkxV/xEw==", integrity.get(("express", "4.16.4"), ""))
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def test_parse_package_lock_v3_workspaces_and_scoped(self):
+        import json
+        import tempfile
+        lock_data = {
+            "name": "test-workspaces",
+            "version": "1.0.0",
+            "lockfileVersion": 3,
+            "requires": True,
+            "packages": {
+                "": {
+                    "name": "test-workspaces",
+                    "version": "1.0.0",
+                    "workspaces": ["packages/*"],
+                    "devDependencies": {
+                        "typescript": "^5.4.5"
+                    }
+                },
+                "packages/core": {
+                    "name": "@workspace-demo/core",
+                    "version": "1.0.0",
+                    "dependencies": {
+                        "lodash": "^4.17.21"
+                    }
+                },
+                "packages/web": {
+                    "name": "@workspace-demo/web",
+                    "version": "1.0.0",
+                    "dependencies": {
+                        "@workspace-demo/core": "1.0.0",
+                        "axios": "^1.6.8"
+                    }
+                },
+                "node_modules/@types/node": {
+                    "version": "20.11.0",
+                    "integrity": "sha512-abc"
+                },
+                "node_modules/axios": {
+                    "version": "1.6.8",
+                    "integrity": "sha512-def"
+                },
+                "node_modules/lodash": {
+                    "version": "4.17.21",
+                    "integrity": "sha512-ghi"
+                }
+            }
+        }
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json", encoding="utf-8") as tmp:
+            json.dump(lock_data, tmp)
+            tmp_path = tmp.name
+        try:
+            resolved, parents, integrity, direct_versions = kevlar.parse_package_lock(tmp_path)
+            self.assertEqual(resolved.get("axios"), ["1.6.8"])
+            self.assertEqual(resolved.get("lodash"), ["4.17.21"])
+            self.assertEqual(resolved.get("@types/node"), ["20.11.0"])
+            self.assertIn("root", parents.get("typescript", []))
+            self.assertIn("root", parents.get("lodash", []))
+            self.assertIn("root", parents.get("@workspace-demo/core", []))
+            self.assertIn("root", parents.get("axios", []))
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def test_parse_yarn_lock_classic_multi_specifiers(self):
+        import tempfile
+        content = (
+            "# THIS IS AN AUTOGENERATED FILE. DO NOT EDIT MANUALLY.\n"
+            "# yarn lockfile v1\n"
+            "\n"
+            "\"@babel/core@^7.0.0\", \"@babel/core@^7.12.0\", \"@babel/core@^7.20.0\":\n"
+            "  version \"7.24.0\"\n"
+            "  resolved \"https://registry.yarnpkg.com/@babel/core/-/core-7.24.0.tgz\"\n"
+            "  integrity sha512-5XUvmMuXSDmvQO3STSpuMGWNQSLLOHESJRgK07cPZKNL4wBa82uPwsN4uhJM9GPq8G6hA9TrDrUvo+Vjz1hvw==\n"
+            "  dependencies:\n"
+            "    \"@babel/parser\" \"^7.24.0\"\n"
+            "\n"
+            "\"@babel/parser@^7.24.0\":\n"
+            "  version \"7.24.0\"\n"
+            "  resolved \"https://registry.yarnpkg.com/@babel/parser/-/parser-7.24.0.tgz\"\n"
+            "  integrity sha512-QuP/ZKprliGCSpSxP9Y69VoKTM3Z3NAWVW242PzvUMag+WBAUvA3Zb55hQo7cC9ORCR219Wh5TiA83tRKgkYMw==\n"
+            "\n"
+            "\"debug@2.6.9\", \"debug@^2.2.0\", \"debug@^2.3.3\":\n"
+            "  version \"2.6.9\"\n"
+            "  resolved \"https://registry.yarnpkg.com/debug/-/debug-2.6.9.tgz\"\n"
+            "  integrity sha512-bC7ElrdJaJnPbAP+1EotYvqZsb3ecl5wi6Bfi6BJTUcNowp6cvspg0jXznRTKDjm/E7AdgFBVeAPVMNcKGsHMA==\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".lock", encoding="utf-8") as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        try:
+            resolved, parents, integrity = kevlar.parse_yarn_lock(tmp_path)
+            self.assertEqual(resolved.get("@babel/core"), ["7.24.0"])
+            self.assertEqual(resolved.get("@babel/parser"), ["7.24.0"])
+            self.assertEqual(resolved.get("debug"), ["2.6.9"])
+            self.assertIn("@babel/core", parents.get("@babel/parser", []))
+            self.assertIn(("@babel/core", "7.24.0"), integrity)
+            self.assertIn(("debug", "2.6.9"), integrity)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def test_parse_yarn_berry_protocols_and_checksum_formats(self):
+        import tempfile
+        content = (
+            "__metadata:\n"
+            "  version: 8\n"
+            "  cacheKey: 10c0\n"
+            "\n"
+            "\"clsx@npm:^2.1.0\":\n"
+            "  version: 2.1.1\n"
+            "  resolution: \"clsx@npm:2.1.1\"\n"
+            "  checksum: 10c0/sha512:c607ab9b38030b6ff8d5bfba22e70e3592bc133cf0b809a7b7de283fa71b12b545d65cb5ecad25ef20fa76bf38b584fe3bebb3650228c2eefbd094b8e23b1855\n"
+            "\n"
+            "\"@org/patched@patch:@org/patched@npm%3A1.0.0#./patch.diff::locator=app%40workspace%3A.\":\n"
+            "  version: 1.0.0\n"
+            "  resolution: \"@org/patched@patch:@org/patched@npm%3A1.0.0#./patch.diff::locator=app%40workspace%3A.\"\n"
+            "  dependencies:\n"
+            "    \"is-number\": \"npm:^7.0.0\"\n"
+            "  checksum: 8/sha512:47b864a7ef14cf86c8d234771234a75a0b777a88523c14c56e3039d48b67f67747b864a7ef14cf86c8d234771234a75a0b777a88523c14c56e3039d48b67f677\n"
+            "\n"
+            "\"is-number@npm:^7.0.0\":\n"
+            "  version: 7.0.0\n"
+            "  resolution: \"is-number@npm:7.0.0\"\n"
+            "  checksum: sha1:b32c6955a004ee3fa2691ab1a499ff39e144a1e9\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".lock", encoding="utf-8") as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        try:
+            resolved, parents, integrity = kevlar.parse_yarn_lock(tmp_path)
+            self.assertEqual(resolved.get("clsx"), ["2.1.1"])
+            self.assertEqual(resolved.get("@org/patched"), ["1.0.0"])
+            self.assertEqual(resolved.get("is-number"), ["7.0.0"])
+            self.assertIn("@org/patched", parents.get("is-number", []))
+            
+            # Verify clsx checksum converted to sha512- base64
+            clsx_integrity = integrity.get(("clsx", "2.1.1"))
+            self.assertTrue(clsx_integrity.startswith("sha512-"))
+            
+            # Verify is-number checksum converted to sha1- base64
+            is_num_integrity = integrity.get(("is-number", "7.0.0"))
+            self.assertTrue(is_num_integrity.startswith("sha1-"))
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def test_parse_pnpm_lock_monorepo_importers_and_peers(self):
+        import tempfile
+        content = (
+            "lockfileVersion: '9.0'\n"
+            "importers:\n"
+            "  apps/web:\n"
+            "    dependencies:\n"
+            "      '@angular/core':\n"
+            "        specifier: 17.3.0\n"
+            "        version: 17.3.0(zone.js@0.14.4)\n"
+            "  packages/ui:\n"
+            "    dependencies:\n"
+            "      rxjs:\n"
+            "        specifier: ^7.8.1\n"
+            "        version: 7.8.1\n"
+            "packages:\n"
+            "  '@angular/core@17.3.0(zone.js@0.14.4)':\n"
+            "    resolution: {integrity: sha512-angular_core_hash}\n"
+            "    dependencies:\n"
+            "      tslib: 2.6.2\n"
+            "  rxjs@7.8.1:\n"
+            "    resolution: {integrity: sha512-rxjs_hash}\n"
+            "    dependencies:\n"
+            "      tslib: 2.6.2\n"
+            "  tslib@2.6.2:\n"
+            "    resolution: {integrity: sha512-tslib_hash}\n"
+            "snapshots:\n"
+            "  '@angular/core@17.3.0(zone.js@0.14.4)':\n"
+            "    dependencies:\n"
+            "      tslib: 2.6.2\n"
+            "  rxjs@7.8.1:\n"
+            "    dependencies:\n"
+            "      tslib: 2.6.2\n"
+            "  tslib@2.6.2: {}\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".yaml", encoding="utf-8") as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        try:
+            resolved, parents, integrity = kevlar.parse_pnpm_lock(tmp_path)
+            self.assertEqual(resolved.get("@angular/core"), ["17.3.0"])
+            self.assertEqual(resolved.get("rxjs"), ["7.8.1"])
+            self.assertEqual(resolved.get("tslib"), ["2.6.2"])
+            self.assertIn("@angular/core", parents.get("tslib", []))
+            self.assertIn("rxjs", parents.get("tslib", []))
+            self.assertIn("root", parents.get("@angular/core", []))
+            self.assertIn("root", parents.get("rxjs", []))
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    @patch("urllib.request.urlopen")
+    def test_check_npm_package_scoped_and_registry_metadata(self, mock_urlopen):
+        import io
+        fake_json = {
+            "name": "@nestjs/core",
+            "dist-tags": {"latest": "10.3.7"},
+            "versions": {
+                "9.4.0": {
+                    "version": "9.4.0",
+                    "dist": {
+                        "integrity": "sha512-fakehash940==",
+                        "shasum": "0123456789abcdef0123456789abcdef01234567"
+                    }
+                },
+                "10.3.7": {
+                    "version": "10.3.7",
+                    "dist": {
+                        "integrity": "sha512-fakehash1037==",
+                        "shasum": "abcdef0123456789abcdef0123456789abcdef01"
+                    }
+                }
+            },
+            "repository": {
+                "type": "git",
+                "url": "git+https://github.com/nestjs/nest.git"
+            }
+        }
+        
+        class FakeResponse:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+            def read(self):
+                import json
+                return json.dumps(fake_json).encode("utf-8")
+
+        mock_urlopen.return_value = FakeResponse()
+        
+        target = {
+            "name": "@nestjs/core",
+            "declared": "^9.4.0",
+            "installed": ["9.4.0"],
+            "integrity": {
+                "9.4.0": "sha512-fakehash940=="
+            }
+        }
+        
+        results = kevlar.check_npm_package(target)
+        self.assertEqual(len(results), 1)
+        res = results[0]
+        self.assertEqual(res["name"], "@nestjs/core")
+        self.assertEqual(res["installed"], "9.4.0")
+        self.assertEqual(res["status"], "major")
+        self.assertEqual(res["latest_absolute"], "10.3.7")
+        self.assertFalse(res["mismatch_checksum"])
+        self.assertIn("github.com/nestjs/nest", res["repo_url"])
+        self.assertIn("v9.4.0...v10.3.7", res["compare_url"])
+
+    @patch("urllib.request.urlopen")
+    def test_check_npm_package_integrity_checksum_mismatch_and_weak(self, mock_urlopen):
+        import io
+        fake_json = {
+            "name": "superagent",
+            "dist-tags": {"latest": "8.1.2"},
+            "versions": {
+                "8.0.9": {
+                    "version": "8.0.9",
+                    "dist": {
+                        "integrity": "sha512-OFFICIAL_INTEGRITY_HASH==",
+                        "shasum": "3b25055047b2dfd71c8ee933a39e7cb2811442c7"
+                    }
+                }
+            }
+        }
+        
+        class FakeResponse:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+            def read(self):
+                import json
+                return json.dumps(fake_json).encode("utf-8")
+
+        mock_urlopen.return_value = FakeResponse()
+
+        # Target 1: Mismatched integrity
+        target_mismatch = {
+            "name": "superagent-mismatch",
+            "declared": "^8.0.9",
+            "installed": ["8.0.9"],
+            "integrity": {
+                "8.0.9": "sha512-MALICIOUS_OR_CORRUPTED_HASH=="
+            }
+        }
+        results_mismatch = kevlar.check_npm_package(target_mismatch)
+        self.assertTrue(results_mismatch[0]["mismatch_checksum"])
+
+        # Target 2: Matching integrity
+        target_match = {
+            "name": "superagent-match",
+            "declared": "^8.0.9",
+            "installed": ["8.0.9"],
+            "integrity": {
+                "8.0.9": "sha512-OFFICIAL_INTEGRITY_HASH=="
+            }
+        }
+        results_match = kevlar.check_npm_package(target_match)
+        self.assertFalse(results_match[0]["mismatch_checksum"])
+
+    def test_check_npm_package_local_and_aliased(self):
+        targets = [
+            {"name": "local-pkg-workspace", "declared": "workspace:*", "installed": ["workspace:*"]},
+            {"name": "local-pkg-portal", "declared": "portal:../my-portal", "installed": ["portal:../my-portal"]},
+            {"name": "local-pkg-relative", "declared": "./local-dir", "installed": ["./local-dir"]}
+        ]
+        for t in targets:
+            res = kevlar.check_npm_package(t)
+            self.assertEqual(len(res), 1)
+            self.assertEqual(res[0]["latest"], "Local")
+            self.assertEqual(res[0]["status"], "local")
+            self.assertIsNone(res[0]["error"])
+
+    def test_npm_remediation_diff_overrides_and_resolutions(self):
+        import tempfile
+        
+        # Test 1: NPM overrides insertion when overrides does not exist
+        npm_pkg_content = (
+            "{\n"
+            "  \"name\": \"my-app\",\n"
+            "  \"version\": \"1.0.0\",\n"
+            "  \"dependencies\": {\n"
+            "    \"express\": \"^4.18.2\"\n"
+            "  }\n"
+            "}\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json", encoding="utf-8") as tmp:
+            tmp.write(npm_pkg_content)
+            tmp_path = tmp.name
+        try:
+            diff = kevlar.generate_override_remediation_diff(tmp_path, "qs", "6.12.1", "npm")
+            self.assertIsNotNone(diff)
+            self.assertEqual(diff["manifest_path"], tmp_path)
+            suggested = [row["html"] for row in diff["suggested_code"]]
+            self.assertTrue(any("overrides" in line for line in suggested))
+            self.assertTrue(any("qs" in line and "6.12.1" in line for line in suggested))
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+        # Test 2: Yarn resolutions insertion
+        yarn_pkg_content = (
+            "{\n"
+            "  \"name\": \"yarn-app\",\n"
+            "  \"version\": \"1.0.0\",\n"
+            "  \"resolutions\": {\n"
+            "    \"lodash\": \"4.17.21\"\n"
+            "  }\n"
+            "}\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json", encoding="utf-8") as tmp:
+            tmp.write(yarn_pkg_content)
+            tmp_path = tmp.name
+        try:
+            diff_yarn = kevlar.generate_override_remediation_diff(tmp_path, "semver", "7.5.2", "yarn")
+            self.assertIsNotNone(diff_yarn)
+            suggested_yarn = [row["html"] for row in diff_yarn["suggested_code"]]
+            self.assertTrue(any("semver" in line and "7.5.2" in line for line in suggested_yarn))
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def test_npm_remediation_diff_addition_direct_and_dev(self):
+        import tempfile
+
+        # Case A: Adding to manifest with dependencies
+        pkg_json_a = (
+            "{\n"
+            "  \"name\": \"app-a\",\n"
+            "  \"dependencies\": {\n"
+            "    \"express\": \"^4.18.2\"\n"
+            "  }\n"
+            "}\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json", encoding="utf-8") as tmp:
+            tmp.write(pkg_json_a)
+            tmp_path = tmp.name
+        try:
+            diff = kevlar.generate_addition_remediation_diff(tmp_path, "helmet", "7.1.0", "npm")
+            self.assertIsNotNone(diff)
+            self.assertTrue(diff.get("is_addition"))
+            suggested = [row["html"] for row in diff["suggested_code"]]
+            self.assertTrue(any("helmet" in line and "^7.1.0" in line for line in suggested))
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+        # Case B: Adding to empty json
+        pkg_json_b = "{}\n"
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json", encoding="utf-8") as tmp:
+            tmp.write(pkg_json_b)
+            tmp_path = tmp.name
+        try:
+            diff_empty = kevlar.generate_addition_remediation_diff(tmp_path, "cors", "2.8.5", "npm")
+            self.assertIsNotNone(diff_empty)
+            suggested_empty = [row["html"] for row in diff_empty["suggested_code"]]
+            self.assertTrue(any("dependencies" in line for line in suggested_empty))
+            self.assertTrue(any("cors" in line for line in suggested_empty))
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def test_node_engine_nvmrc_and_complex_ranges(self):
+        import tempfile
+        
+        # 1. Test .nvmrc file discovery
+        with tempfile.TemporaryDirectory() as tmpdir:
+            nvmrc_path = os.path.join(tmpdir, ".nvmrc")
+            with open(nvmrc_path, "w", encoding="utf-8") as f:
+                f.write("v20.11.0\n")
+            
+            constraint, source = kevlar.find_node_constraint(tmpdir, None)
+            self.assertEqual(constraint, "=v20.11.0")
+            self.assertIn(".nvmrc", source)
+
+        # 2. Test .node-version file discovery
+        with tempfile.TemporaryDirectory() as tmpdir:
+            node_ver_path = os.path.join(tmpdir, ".node-version")
+            with open(node_ver_path, "w", encoding="utf-8") as f:
+                f.write("22.5.0\n")
+            
+            constraint, source = kevlar.find_node_constraint(tmpdir, None)
+            self.assertEqual(constraint, "=22.5.0")
+            self.assertIn(".node-version", source)
+
+        # 3. Test analyze_node_constraint with strictly EOL node constraint
+        status_eol, depr_eol, err_eol, rec_eol = kevlar.analyze_node_constraint(">=12.0.0 <14.0.0")
+        self.assertEqual(status_eol, "error")
+        self.assertIsNotNone(err_eol)
+        self.assertIn("only satisfies EOL versions", err_eol)
+
+        # 4. Test analyze_node_constraint with mixed constraint allowing EOL
+        status_mix, depr_mix, err_mix, rec_mix = kevlar.analyze_node_constraint(">=12.0.0")
+        self.assertEqual(status_mix, "minor")
+        self.assertIsNotNone(depr_mix)
+        self.assertIn("allows EOL versions", depr_mix)
+
+        # 5. Test analyze_node_constraint with modern active node constraint
+        status_ok, depr_ok, err_ok, rec_ok = kevlar.analyze_node_constraint(">=20.0.0")
+        self.assertIn(status_ok, ("up-to-date", "minor", "patch"))
+
+    def test_run_npm_checker_on_all_fixtures(self):
+        import types
+        fixtures = [
+            "test/test_npm_v1",
+            "test/test_npm_workspaces",
+            "test/test_yarn_classic",
+            "test/test_yarn_berry",
+            "test/test_pnpm_monorepo",
+            "test/test_npm_overrides"
+        ]
+        base_dir = os.path.abspath(os.path.dirname(__file__))
+        for rel_path in fixtures:
+            fixture_path = os.path.join(base_dir, rel_path)
+            if os.path.exists(fixture_path):
+                args = types.SimpleNamespace(
+                    path=fixture_path,
+                    all=True,
+                    concurrent=5,
+                    vuls=False,
+                    suppress=None
+                )
+                results, pkg_data, elapsed = kevlar.run_npm_checker(args)
+                self.assertIsNotNone(results, f"Failed on fixture {rel_path}")
+                self.assertTrue(len(results) > 0, f"Expected non-empty results for fixture {rel_path}")
+
+    def test_populate_parent_strategies_multiple_parents(self):
+        """Test that transitive dependencies with multiple parents offer upgrade strategies for all upgradable parents."""
+        import json
+        import shutil
+        import tempfile
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            pkg_json_path = os.path.join(temp_dir, "package.json")
+            pkg_json_content = {
+                "name": "multi-parent-test",
+                "dependencies": {
+                    "parent-a": "1.0.0",
+                    "parent-b": "2.0.0",
+                },
+            }
+            with open(pkg_json_path, "w", encoding="utf-8") as f:
+                json.dump(pkg_json_content, f, indent=2)
+
+            results = [
+                {
+                    "name": "parent-a",
+                    "declared": "1.0.0",
+                    "installed": "1.0.0",
+                    "latest_patch": None,
+                    "latest_same_major": "1.1.0",
+                    "latest_absolute": "2.0.0",
+                    "status": "minor",
+                    "technology": "npm",
+                    "dep_type": "Direct",
+                    "project_path": temp_dir,
+                },
+                {
+                    "name": "parent-b",
+                    "declared": "2.0.0",
+                    "installed": "2.0.0",
+                    "latest_patch": None,
+                    "latest_same_major": "2.5.0",
+                    "latest_absolute": "3.0.0",
+                    "status": "minor",
+                    "technology": "npm",
+                    "dep_type": "Direct",
+                    "project_path": temp_dir,
+                },
+                {
+                    "name": "transitive-lib",
+                    "declared": None,
+                    "installed": "0.9.0",
+                    "latest_patch": "0.9.1",
+                    "latest_same_major": "0.9.2",
+                    "latest_absolute": "1.0.0",
+                    "status": "patch",
+                    "technology": "npm",
+                    "dep_type": "Transitive",
+                    "required_by": ["parent-a", "parent-b"],
+                    "vulnerabilities": [{"id": "GHSA-test-123"}],
+                    "project_path": temp_dir,
+                },
+            ]
+
+            kevlar.populate_remediation_recommendations(results, temp_dir)
+
+            trans_rem = results[2].get("remediation")
+            self.assertIsNotNone(trans_rem)
+            strategies = trans_rem.get("strategies", [])
+            parent_strategies = [s for s in strategies if s["id"] == "parent_upgrade"]
+            self.assertEqual(len(parent_strategies), 1)
+
+            parent_st = parent_strategies[0]
+            self.assertIn("Upgrade Parent Packages (2 direct packages)", parent_st["title"])
+            self.assertTrue(parent_st.get("is_recommended"))
+            self.assertIn("All of them must be updated", parent_st.get("diagnostic", ""))
+
+            # Options check: First option must be Unified Diff
+            options = parent_st.get("options", [])
+            self.assertTrue(len(options) >= 3)  # unified + step 1 + step 2
+            self.assertEqual(options[0]["id"], "unified")
+            self.assertIn("Unified Diff: All 2 Parents", options[0]["label"])
+
+            # Verify unified diff has changes for both parents
+            unified_diff = options[0].get("diff")
+            self.assertIsNotNone(unified_diff)
+            suggested_html = " ".join(item["html"] for item in unified_diff.get("suggested_code", []))
+            self.assertIn("parent-a", suggested_html)
+            self.assertIn("parent-b", suggested_html)
+
+            # Override strategy check
+            override_st = next((s for s in strategies if s["id"] == "override"), None)
+            self.assertIsNotNone(override_st)
+            self.assertFalse(override_st.get("is_recommended"))
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_populate_parent_strategies_multi_file(self):
+        """Test that transitive dependencies with parents in different manifest files present multi-file stepper options."""
+        import json
+        import shutil
+        import tempfile
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            dir_a = os.path.join(temp_dir, "app-a")
+            dir_b = os.path.join(temp_dir, "app-b")
+            os.makedirs(dir_a, exist_ok=True)
+            os.makedirs(dir_b, exist_ok=True)
+
+            with open(os.path.join(dir_a, "package.json"), "w", encoding="utf-8") as f:
+                json.dump({"name": "app-a", "dependencies": {"parent-a": "1.0.0"}}, f, indent=2)
+
+            with open(os.path.join(dir_b, "package.json"), "w", encoding="utf-8") as f:
+                json.dump({"name": "app-b", "dependencies": {"parent-b": "2.0.0"}}, f, indent=2)
+
+            results = [
+                {
+                    "name": "parent-a",
+                    "declared": "1.0.0",
+                    "installed": "1.0.0",
+                    "latest_patch": None,
+                    "latest_same_major": "1.1.0",
+                    "latest_absolute": "2.0.0",
+                    "status": "minor",
+                    "technology": "npm",
+                    "dep_type": "Direct",
+                    "project_path": dir_a,
+                },
+                {
+                    "name": "parent-b",
+                    "declared": "2.0.0",
+                    "installed": "2.0.0",
+                    "latest_patch": None,
+                    "latest_same_major": "2.5.0",
+                    "latest_absolute": "3.0.0",
+                    "status": "minor",
+                    "technology": "npm",
+                    "dep_type": "Direct",
+                    "project_path": dir_b,
+                },
+                {
+                    "name": "transitive-lib",
+                    "declared": None,
+                    "installed": "0.9.0",
+                    "latest_patch": "0.9.1",
+                    "latest_same_major": "0.9.2",
+                    "latest_absolute": "1.0.0",
+                    "status": "patch",
+                    "technology": "npm",
+                    "dep_type": "Transitive",
+                    "required_by": ["parent-a", "parent-b"],
+                    "vulnerabilities": [{"id": "GHSA-multi-file"}],
+                    "project_path": dir_a,
+                },
+            ]
+
+            # In this case, parent-a is in dir_a (the project_path of transitive-lib)
+            kevlar.populate_remediation_recommendations(results, dir_a)
+
+            trans_rem = results[2].get("remediation")
+            self.assertIsNotNone(trans_rem)
+            strategies = trans_rem.get("strategies", [])
+            parent_strategies = [s for s in strategies if s["id"] == "parent_upgrade"]
+            self.assertEqual(len(parent_strategies), 1)
+            self.assertIn("Upgrade Parent Package (parent-a)", parent_strategies[0]["title"])
         finally:
             shutil.rmtree(temp_dir)
 
