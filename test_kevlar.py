@@ -2588,6 +2588,48 @@ class TestKevlar(unittest.TestCase):
         self.assertEqual(supp_item["status"], "accepted")
         self.assertEqual(supp_item["justification"], "Input sanitized upstream by API gateway")
 
+    def test_sarif_bolt_optimizations_and_indexing(self):
+        """Validates Bolt micro-optimizations: inverted manifest indexing, memoization caches, and fast-paths."""
+        import tempfile
+
+        # 1. Inverted Manifest Indexing
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pkg_json = os.path.join(tmpdir, "package.json")
+            with open(pkg_json, "w", encoding="utf-8") as f:
+                f.write('{\n  "dependencies": {\n    "express": "^4.18.2",\n    "lodash": "~4.17.21"\n  }\n}\n')
+
+            resolver = kevlar.SarifLocationResolver(repo_root=tmpdir)
+            index = resolver.index_manifest_lines(pkg_json, "npm")
+            self.assertIn("express", index)
+            self.assertIn("lodash", index)
+            self.assertEqual(index["express"][0][0], 3)
+            self.assertEqual(index["lodash"][0][0], 4)
+
+            # Check O(1) resolution via inverted index
+            path, line = resolver.resolve_manifest_and_line({
+                "package": "lodash",
+                "technology": "npm",
+                "project_path": tmpdir
+            })
+            self.assertEqual(line, 4)
+
+        # 2. Fast path in SarifFixBuilder
+        self.assertIsNone(kevlar.SarifFixBuilder.build_fixes(None, "package.json", "pkg"))
+        self.assertIsNone(kevlar.SarifFixBuilder.build_fixes({}, "package.json", "pkg"))
+        # Clean HTML stripping test (preserves indentation for code patches)
+        stripped = kevlar.SarifFixBuilder._strip_html('  <span class="diff-add-chunk">&quot;test&quot;</span>  ')
+        self.assertEqual(stripped, '  "test"  ')
+
+        # 3. Cache verification in SarifRuleRegistry
+        registry = kevlar.SarifRuleRegistry()
+        v1 = {"id": "CVE-2024-1111", "severity": "HIGH", "score": 8.5}
+        score1 = registry._calculate_security_severity(v1)
+        self.assertEqual(score1, "8.5")
+        # Verify result is cached
+        cache_key = ("CVE-2024-1111", "HIGH", "8.5")
+        self.assertIn(cache_key, registry._cvss_cache)
+        self.assertEqual(registry._cvss_cache[cache_key], "8.5")
+
     def test_safe_urlopen_security_validations(self):
         import urllib.request
         from unittest.mock import MagicMock, patch
