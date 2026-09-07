@@ -2424,6 +2424,31 @@ class TestKevlar(unittest.TestCase):
         # Decoupling check: shortDescription must not be tied to package name
         self.assertEqual(r0["shortDescription"]["text"], "Remote Code Execution in core module")
 
+        # 4. CVSS 4.0 subsequent metrics test (VC:N/VI:N/VA:N/SC:L/SI:L/SA:N)
+        vec_cvss4 = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:P/VC:N/VI:N/VA:N/SC:L/SI:L/SA:N"
+        score_cvss4 = kevlar.calculate_cvss4_score_approx(vec_cvss4)
+        self.assertIsNotNone(score_cvss4)
+        self.assertGreater(score_cvss4, 0.0)
+        self.assertAlmostEqual(score_cvss4, 6.0, places=1)
+
+        idx_cvss4, _ = registry.get_or_register_vulnerability_rule({
+            "id": "GHSA-x8qp-wqqm-57ph",
+            "summary": "Subsequent impact vulnerability",
+            "severity": vec_cvss4,
+        })
+        rule_cvss4 = registry.get_rules()[idx_cvss4]
+        self.assertEqual(rule_cvss4["properties"]["security-severity"], "6.0")
+
+        # 5. Severity Floor Fallback verification
+        self.assertEqual(registry._calculate_security_severity({"severity": "LOW", "score": 0.0}), "2.0")
+        self.assertEqual(registry._calculate_security_severity({"severity": "MEDIUM", "score": 0.0}), "4.0")
+        self.assertEqual(registry._calculate_security_severity({"severity": "HIGH", "score": 0.0}), "7.0")
+        self.assertEqual(registry._calculate_security_severity({"severity": "CRITICAL", "score": 0.0}), "9.0")
+        self.assertEqual(registry._calculate_security_severity({"severity": "MALICIOUS", "score": 0.0}), "9.0")
+        self.assertEqual(registry._calculate_security_severity({"severity": "UNKNOWN", "score": 0.0}), "0.0")
+        # Ensure valid non-zero score is preserved
+        self.assertEqual(registry._calculate_security_severity({"severity": "HIGH", "score": 8.2}), "8.2")
+
     def test_sarif_location_resolver_path_traversal_sanitization(self):
         """Verifies path normalization, path traversal sanitization, and %SRCROOT% assignment."""
         resolver = kevlar.SarifLocationResolver()
@@ -2443,6 +2468,19 @@ class TestKevlar(unittest.TestCase):
         )
         self.assertEqual(resolver.normalize_repo_path(None), "unknown_manifest")
         self.assertEqual(resolver.normalize_repo_path(""), "unknown_manifest")
+
+        # Monorepo and repo_root support
+        custom_root = os.path.abspath("c:/monorepo") if os.name == "nt" else "/monorepo"
+        resolver_mono = kevlar.SarifLocationResolver(repo_root=custom_root)
+        nested_file = os.path.join(custom_root, "tests", "playwright", "package.json")
+        self.assertEqual(
+            resolver_mono.normalize_repo_path(nested_file),
+            "tests/playwright/package.json"
+        )
+        self.assertEqual(
+            resolver_mono.normalize_repo_path("packages/core/package.json"),
+            "packages/core/package.json"
+        )
 
         # Physical location anchoring to %SRCROOT%
         locs = resolver.build_locations("package.json", 15)

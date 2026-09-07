@@ -561,32 +561,25 @@ def calculate_cvss3_score(vector_str):
 def calculate_cvss4_score_approx(vector_str):
     """Approximates base CVSS v4.0 score by translating metrics to v3 equivalent."""
     try:
-        parts = {}
-        for p in vector_str.split("/"):
-            if p.count(":") == 1:
-                k, v = p.split(":")
-                parts[k] = v
-
+        parts = dict(p.split(":", 1) for p in vector_str.split("/") if ":" in p)
         av = parts.get("AV", "N")
-        ac = parts.get("AC", "L")
-        if parts.get("AT") == "P":
-            ac = "H"
+        ac = "H" if parts.get("AT") == "P" else parts.get("AC", "L")
         pr = parts.get("PR", "N")
-        ui = "N"
-        if parts.get("UI") in {"A", "R"}:
-            ui = "R"
+        ui = "R" if parts.get("UI") in {"A", "R", "P"} else "N"
 
-        scope = "U"
-        if (
-            parts.get("SC") in {"H", "L"}
-            or parts.get("SI") in {"H", "L"}
-            or parts.get("SA") in {"H", "L"}
-        ):
-            scope = "C"
+        has_subsequent = any(
+            parts.get(k) in {"H", "L"} for k in ("SC", "SI", "SA")
+        )
+        scope = "C" if has_subsequent else "U"
 
         c = parts.get("VC", "N")
         i = parts.get("VI", "N")
         a = parts.get("VA", "N")
+
+        if c == "N" and i == "N" and a == "N" and has_subsequent:
+            c = parts.get("SC", "N")
+            i = parts.get("SI", "N")
+            a = parts.get("SA", "N")
 
         v3_vector = (
             f"CVSS:3.1/AV:{av}/AC:{ac}/PR:{pr}/UI:{ui}/S:{scope}/C:{c}/I:{i}/A:{a}"
@@ -8747,41 +8740,51 @@ class SarifRuleRegistry:
         self._rule_indices: Dict[str, int] = {}
 
     def _calculate_security_severity(self, vuln: Dict[str, Any]) -> str:
-        """Calculates CVSS score (0.0 to 10.0) for GitHub Code Scanning security-severity."""
+        """Calculates CVSS score (0.1 to 10.0) with floor fallback for GitHub Code Scanning."""
+        score: Optional[float] = None
         score_val = vuln.get("cvss_score") or vuln.get("score")
         if score_val is not None:
             try:
-                val = float(score_val)
-                return f"{max(0.0, min(10.0, val)):.1f}"
+                score = float(score_val)
             except (ValueError, TypeError):
                 pass
 
-        raw_sev = str(vuln.get("severity", "")).upper()
-        if "CVSS" in raw_sev or "AV:" in raw_sev:
-            score = None
-            m4 = RE_CVSS4_SEV.search(raw_sev)
-            if m4:
-                score = calculate_cvss4_score_approx(m4.group(1))
-            if score is None:
-                m3 = RE_CVSS3_SEV.search(raw_sev)
-                if m3:
-                    score = calculate_cvss3_score(m3.group(1))
-            if score is None:
-                m2 = RE_CVSS2_SEV.search(raw_sev) or RE_AV_SEV.search(raw_sev)
-                if m2:
-                    score = calculate_cvss2_score(m2.group(1))
-            if score is not None:
-                return f"{max(0.0, min(10.0, score)):.1f}"
+        if score is None:
+            raw_sev = str(vuln.get("severity", "")).upper()
+            if "CVSS" in raw_sev or "AV:" in raw_sev:
+                m4 = RE_CVSS4_SEV.search(raw_sev)
+                score = calculate_cvss4_score_approx(m4.group(1)) if m4 else None
+                if score is None:
+                    m3 = RE_CVSS3_SEV.search(raw_sev)
+                    score = calculate_cvss3_score(m3.group(1)) if m3 else None
+                if score is None:
+                    m2 = RE_CVSS2_SEV.search(raw_sev) or RE_AV_SEV.search(raw_sev)
+                    score = calculate_cvss2_score(m2.group(1)) if m2 else None
 
         level = get_severity_level(vuln)
-        severity_map = {
+        floor_map = {
+            "malicious": 9.0,
+            "critical": 9.0,
+            "high": 7.0,
+            "medium": 4.0,
+            "low": 2.0,
+        }
+        default_map = {
             "malicious": 10.0,
             "critical": 9.0,
             "high": 7.5,
             "medium": 5.5,
             "low": 2.0,
         }
-        return f"{severity_map.get(level, 0.0):.1f}"
+
+        if score is not None:
+            if score < 0.1 and level in floor_map:
+                score = floor_map[level]
+            final_val = max(0.0, min(10.0, score))
+        else:
+            final_val = default_map.get(level, 0.0)
+
+        return f"{final_val:.1f}"
 
     def _resolve_help_uri(
         self, rule_id: str, vuln: Optional[Dict[str, Any]] = None
@@ -8976,18 +8979,38 @@ class SarifLocationResolver:
     """
 
     def __init__(
-        self, manifest_lines_cache: Optional[Dict[str, List[str]]] = None
+        self,
+        manifest_lines_cache: Optional[Dict[str, List[str]]] = None,
+        repo_root: Optional[str] = None,
     ) -> None:
         self.manifest_lines_cache: Dict[str, List[str]] = (
             manifest_lines_cache if manifest_lines_cache is not None else {}
         )
+        self.repo_root: str = os.path.abspath(repo_root or os.getcwd())
 
-    @staticmethod
-    def normalize_repo_path(raw_path: Optional[str]) -> str:
-        """Normalizes path with forward slashes and removes traversal escapes for %SRCROOT%."""
-        if not raw_path:
+    def normalize_repo_path(self, raw_path: Optional[str] = None) -> str:
+        """Normalizes path relative to repo_root with forward slashes and without ../ escapes."""
+        if isinstance(self, SarifLocationResolver):
+            target_path = raw_path
+            root = getattr(self, "repo_root", None) or os.path.abspath(os.getcwd())
+        else:
+            target_path = self
+            root = os.path.abspath(os.getcwd())
+
+        if not target_path:
             return "unknown_manifest"
-        clean = str(raw_path).replace("\\", "/")
+
+        raw_str = str(target_path).replace("\\", "/")
+        try:
+            abs_target = os.path.abspath(target_path)
+            rel = os.path.relpath(abs_target, root).replace("\\", "/")
+            if not rel.startswith("../") and rel != "..":
+                clean = rel
+            else:
+                clean = re.sub(r"^(?:\.\./|\./)+", "", raw_str)
+        except Exception:
+            clean = re.sub(r"^(?:\.\./|\./)+", "", raw_str)
+
         clean = re.sub(r"^(?:\.\./|\./)+", "", clean).lstrip("/")
         return clean or "unknown_manifest"
 
@@ -9316,10 +9339,12 @@ class SarifResultMapper:
         return result
 
 
-def generate_sarif_run(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+def generate_sarif_run(
+    results: List[Dict[str, Any]], repo_root: Optional[str] = None
+) -> Dict[str, Any]:
     """Generates a SARIF v2.1.0-rtm.5 run object from Kevlar dependency results."""
     registry = SarifRuleRegistry()
-    resolver = SarifLocationResolver()
+    resolver = SarifLocationResolver(repo_root=repo_root)
     sarif_results: List[Dict[str, Any]] = []
 
     for r in results:
@@ -9381,10 +9406,10 @@ def generate_sarif_run(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def export_sarif_report(results, filepath):
+def export_sarif_report(results, filepath, repo_root: Optional[str] = None):
     """Exports results as a SARIF v2.1.0 JSON document."""
     try:
-        run = generate_sarif_run(results)
+        run = generate_sarif_run(results, repo_root=repo_root)
         sarif_log = {
             "$schema": "https://schemastore.org/json/schema/sarif-2.1.0-rtm.5.json",
             "version": "2.1.0",
