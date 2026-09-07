@@ -9575,7 +9575,7 @@ def export_sarif_report(results, filepath, repo_root: Optional[str] = None):
     try:
         run = generate_sarif_run(results, repo_root=repo_root)
         sarif_log = {
-            "$schema": "https://schemastore.org/json/schema/sarif-2.1.0-rtm.5.json",
+            "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
             "version": "2.1.0",
             "runs": [run],
         }
@@ -13206,7 +13206,7 @@ def run_scan_all(args, parser):
         consolidated_path = "report-consolidated.sarif"
         try:
             consolidated_log = {
-                "$schema": "https://schemastore.org/json/schema/sarif-2.1.0-rtm.5.json",
+                "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
                 "version": "2.1.0",
                 "runs": sarif_runs,
             }

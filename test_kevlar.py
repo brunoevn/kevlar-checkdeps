@@ -2283,7 +2283,7 @@ class TestKevlar(unittest.TestCase):
                 report = json.load(f)
                 
             # Verify structure
-            self.assertEqual(report.get("$schema"), "https://schemastore.org/json/schema/sarif-2.1.0-rtm.5.json")
+            self.assertEqual(report.get("$schema"), "https://json.schemastore.org/sarif-2.1.0.json")
             self.assertEqual(report.get("version"), "2.1.0")
             self.assertIn("runs", report)
             self.assertEqual(len(report["runs"]), 1)
@@ -2368,7 +2368,7 @@ class TestKevlar(unittest.TestCase):
         run_2 = kevlar.generate_sarif_run(results_project_2)
         
         consolidated_log = {
-            "$schema": "https://schemastore.org/json/schema/sarif-2.1.0-rtm.5.json",
+            "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
             "version": "2.1.0",
             "runs": [run_1, run_2]
         }
