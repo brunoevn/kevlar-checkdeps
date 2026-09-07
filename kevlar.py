@@ -12,6 +12,7 @@ import codecs
 import ctypes
 import functools
 import gzip
+import html
 import json
 import os
 import random
@@ -168,7 +169,7 @@ class ScanResultRow(TypedDict, total=False):
     remediation: Optional[Dict[str, Any]]
 
 
-VERSION = "1.10.12"
+VERSION = "1.11.0"
 
 # External APIs Configuration
 URL_NPM_REGISTRY = "https://registry.npmjs.org/"
@@ -8733,255 +8734,651 @@ def export_json_report(results, filepath):
         print(f"{COLOR_RED}{ICON_ERROR} Failed to export JSON report: {e}{COLOR_RESET}")
 
 
-def generate_sarif_run(results):
-    """Generates a SARIF run object from results."""
-    # Cache for reading manifest file lines to avoid redundant disk I/O
-    manifest_lines_cache = {}
+class SarifRuleRegistry:
+    """Manages the catalog of unique SARIF reporting descriptors (rules).
 
-    run = {
+    Adheres to OASIS SARIF v2.1.0-rtm.5 §3.19. Maintains O(1) index lookups,
+    decouples rules from package specifics, and injects GitHub Code Scanning
+    metadata (e.g. security-severity score, tags, and help markdown).
+    """
+
+    def __init__(self) -> None:
+        self._rules: List[Dict[str, Any]] = []
+        self._rule_indices: Dict[str, int] = {}
+
+    def _calculate_security_severity(self, vuln: Dict[str, Any]) -> str:
+        """Calculates CVSS score (0.0 to 10.0) for GitHub Code Scanning security-severity."""
+        score_val = vuln.get("cvss_score") or vuln.get("score")
+        if score_val is not None:
+            try:
+                val = float(score_val)
+                return f"{max(0.0, min(10.0, val)):.1f}"
+            except (ValueError, TypeError):
+                pass
+
+        raw_sev = str(vuln.get("severity", "")).upper()
+        if "CVSS" in raw_sev or "AV:" in raw_sev:
+            score = None
+            m4 = RE_CVSS4_SEV.search(raw_sev)
+            if m4:
+                score = calculate_cvss4_score_approx(m4.group(1))
+            if score is None:
+                m3 = RE_CVSS3_SEV.search(raw_sev)
+                if m3:
+                    score = calculate_cvss3_score(m3.group(1))
+            if score is None:
+                m2 = RE_CVSS2_SEV.search(raw_sev) or RE_AV_SEV.search(raw_sev)
+                if m2:
+                    score = calculate_cvss2_score(m2.group(1))
+            if score is not None:
+                return f"{max(0.0, min(10.0, score)):.1f}"
+
+        level = get_severity_level(vuln)
+        severity_map = {
+            "malicious": 10.0,
+            "critical": 9.0,
+            "high": 7.5,
+            "medium": 5.5,
+            "low": 2.0,
+        }
+        return f"{severity_map.get(level, 0.0):.1f}"
+
+    def _resolve_help_uri(
+        self, rule_id: str, vuln: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """Determines the authoritative advisory or rule reference URI."""
+        if vuln:
+            for ref in vuln.get("references", []):
+                if isinstance(ref, dict) and ref.get("url", "").startswith(
+                    ("http://", "https://")
+                ):
+                    return ref["url"]
+                elif isinstance(ref, str) and ref.startswith(("http://", "https://")):
+                    return ref
+        if rule_id.startswith("GHSA-"):
+            return f"https://github.com/advisories/{rule_id}"
+        if rule_id.startswith("CVE-"):
+            return f"https://nvd.nist.gov/vuln/detail/{rule_id}"
+        if rule_id.startswith("KEVLAR-"):
+            return f"https://kevlar-checkdeps.dev/rules/{rule_id}"
+        return f"https://osv.dev/vulnerability/{rule_id}"
+
+    def _build_markdown_help(
+        self, rule_id: str, summary: str, details: str, severity: str, help_uri: str
+    ) -> Dict[str, str]:
+        """Constructs plain text and markdown documentation for the SARIF rule (§3.19.25)."""
+        clean_summary = summary.strip() or "Security advisory"
+        clean_details = (
+            details.strip() or "No additional vulnerability details provided."
+        )
+        md = (
+            f"### {rule_id}\n\n"
+            f"**Summary:** {clean_summary}\n\n"
+            f"**Severity:** `{severity.upper()}`\n\n"
+            f"#### Details\n{clean_details}\n\n"
+            f"[More Information & Advisory]({help_uri})"
+        )
+        return {
+            "text": f"Vulnerability {rule_id}: {clean_summary}\n\n{clean_details}",
+            "markdown": md,
+        }
+
+    def get_or_register_vulnerability_rule(
+        self, vuln: Dict[str, Any]
+    ) -> Tuple[int, str]:
+        """Registers a vulnerability advisory rule and returns (rule_index, rule_id)."""
+        vuln_id = vuln.get("id") or "KEVLAR-VULN-UNKNOWN"
+        if vuln_id in self._rule_indices:
+            return self._rule_indices[vuln_id], vuln_id
+
+        rule_idx = len(self._rules)
+        self._rule_indices[vuln_id] = rule_idx
+
+        severity = get_severity_level(vuln)
+        sarif_level = (
+            "error"
+            if severity in {"malicious", "critical", "high"}
+            else ("warning" if severity == "medium" else "note")
+        )
+        sec_sev = self._calculate_security_severity(vuln)
+        help_uri = self._resolve_help_uri(vuln_id, vuln)
+        summary = vuln.get("summary") or f"Security vulnerability {vuln_id}"
+        details = vuln.get("details") or ""
+
+        tags = ["security", "vulnerability", "sca", vuln_id.lower()]
+        for cwe in vuln.get("cwes", []):
+            if isinstance(cwe, str) and cwe.strip():
+                tags.append(cwe.strip().lower())
+
+        self._rules.append(
+            {
+                "id": vuln_id,
+                "name": re.sub(r"[^a-zA-Z0-9]", "", vuln_id)
+                or "SecurityVulnerability",
+                "shortDescription": {"text": summary.strip()},
+                "fullDescription": {"text": (details or summary).strip()},
+                "defaultConfiguration": {"level": sarif_level},
+                "helpUri": help_uri,
+                "help": self._build_markdown_help(
+                    vuln_id, summary, details, severity, help_uri
+                ),
+                "properties": {
+                    "security-severity": sec_sev,
+                    "tags": tags,
+                    "precision": "very-high",
+                },
+            }
+        )
+        return rule_idx, vuln_id
+
+    def get_or_register_config_drift_rule(self) -> Tuple[int, str]:
+        """Registers the rule for Configuration Drift anomalies."""
+        rule_id = "KEVLAR-CONFIG-DRIFT"
+        if rule_id in self._rule_indices:
+            return self._rule_indices[rule_id], rule_id
+
+        rule_idx = len(self._rules)
+        self._rule_indices[rule_id] = rule_idx
+        self._rules.append(
+            {
+                "id": rule_id,
+                "name": "ConfigurationDrift",
+                "shortDescription": {
+                    "text": "Installed version of dependency violates declared constraint (Configuration Drift)"
+                },
+                "fullDescription": {
+                    "text": "The locally installed package version violates declared manifest constraints."
+                },
+                "defaultConfiguration": {"level": "error"},
+                "helpUri": "https://kevlar-checkdeps.dev/rules/KEVLAR-CONFIG-DRIFT",
+                "help": {
+                    "text": "Configuration Drift: Installed version violates manifest constraint.",
+                    "markdown": "### Configuration Drift\n\nThe installed version does not satisfy the declared manifest constraint.",
+                },
+                "properties": {
+                    "tags": ["configuration", "drift", "sca"],
+                    "precision": "very-high",
+                },
+            }
+        )
+        return rule_idx, rule_id
+
+    def get_or_register_outdated_rule(self) -> Tuple[int, str]:
+        """Registers the rule for outdated package dependencies."""
+        rule_id = "KEVLAR-OUTDATED-DEPENDENCY"
+        if rule_id in self._rule_indices:
+            return self._rule_indices[rule_id], rule_id
+
+        rule_idx = len(self._rules)
+        self._rule_indices[rule_id] = rule_idx
+        self._rules.append(
+            {
+                "id": rule_id,
+                "name": "OutdatedDependency",
+                "shortDescription": {"text": "Package version is outdated"},
+                "fullDescription": {
+                    "text": "A newer release of this dependency is available in the upstream package registry."
+                },
+                "defaultConfiguration": {"level": "warning"},
+                "helpUri": "https://kevlar-checkdeps.dev/rules/KEVLAR-OUTDATED-DEPENDENCY",
+                "help": {
+                    "text": "Outdated dependency: newer version available.",
+                    "markdown": "### Outdated Dependency\n\nUpgrade the package to receive the latest security fixes and features.",
+                },
+                "properties": {
+                    "tags": ["dependency", "outdated", "maintenance"],
+                    "precision": "very-high",
+                },
+            }
+        )
+        return rule_idx, rule_id
+
+    def get_or_register_deprecation_rule(self) -> Tuple[int, str]:
+        """Registers the rule for deprecated packages."""
+        rule_id = "KEVLAR-DEPRECATED-PACKAGE"
+        if rule_id in self._rule_indices:
+            return self._rule_indices[rule_id], rule_id
+
+        rule_idx = len(self._rules)
+        self._rule_indices[rule_id] = rule_idx
+        self._rules.append(
+            {
+                "id": rule_id,
+                "name": "DeprecatedPackage",
+                "shortDescription": {"text": "Package is deprecated"},
+                "fullDescription": {
+                    "text": "This package is deprecated by upstream maintainers and should be migrated."
+                },
+                "defaultConfiguration": {"level": "warning"},
+                "helpUri": "https://kevlar-checkdeps.dev/rules/KEVLAR-DEPRECATED-PACKAGE",
+                "help": {
+                    "text": "Deprecated package: package is unmaintained or deprecated.",
+                    "markdown": "### Deprecated Package\n\nReplace this package with an actively supported alternative.",
+                },
+                "properties": {
+                    "tags": ["dependency", "deprecated", "maintenance"],
+                    "precision": "very-high",
+                },
+            }
+        )
+        return rule_idx, rule_id
+
+    def get_rules(self) -> List[Dict[str, Any]]:
+        """Returns list of registered rules for tool.driver.rules."""
+        return list(self._rules)
+
+
+class SarifLocationResolver:
+    """Normalizes file paths and resolves line numbers for SARIF locations.
+
+    Adheres to OASIS SARIF v2.1.0-rtm.5 §3.28 & §3.29, ensuring clean relative URIs
+    anchored to %SRCROOT% without escape sequences (../).
+    """
+
+    def __init__(
+        self, manifest_lines_cache: Optional[Dict[str, List[str]]] = None
+    ) -> None:
+        self.manifest_lines_cache: Dict[str, List[str]] = (
+            manifest_lines_cache if manifest_lines_cache is not None else {}
+        )
+
+    @staticmethod
+    def normalize_repo_path(raw_path: Optional[str]) -> str:
+        """Normalizes path with forward slashes and removes traversal escapes for %SRCROOT%."""
+        if not raw_path:
+            return "unknown_manifest"
+        clean = str(raw_path).replace("\\", "/")
+        clean = re.sub(r"^(?:\.\./|\./)+", "", clean).lstrip("/")
+        return clean or "unknown_manifest"
+
+    def _read_manifest_lines(self, path: str) -> List[str]:
+        """Reads and caches manifest lines to minimize disk I/O."""
+        if path not in self.manifest_lines_cache:
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                        self.manifest_lines_cache[path] = f.readlines()
+                except Exception:
+                    self.manifest_lines_cache[path] = []
+            else:
+                self.manifest_lines_cache[path] = []
+        return self.manifest_lines_cache[path]
+
+    def _find_line_in_manifests(
+        self, manifest_files: List[str], name: str, tech: str, declared: Any
+    ) -> Tuple[Optional[str], int]:
+        """Heuristically finds manifest file and 1-based line number for dependency."""
+        best_path: Optional[str] = None
+        best_line = 1
+        best_score = -1
+
+        declared_match = RE_VERSION_DIGITS.search(str(declared)) if declared else None
+        digits = declared_match.group(0) if declared_match else None
+        decl_str = str(declared).strip() if declared else None
+
+        for path in manifest_files:
+            lines = self._read_manifest_lines(path)
+            for idx, line in enumerate(lines):
+                if match_line_for_dependency(line, name, tech):
+                    score = (
+                        2
+                        if (
+                            (digits and digits in line)
+                            or (decl_str and decl_str in line)
+                        )
+                        else 1
+                    )
+                    if score > best_score:
+                        best_score, best_path, best_line = score, path, idx + 1
+                        if score == 2:
+                            return best_path, best_line
+        return best_path, best_line
+
+    def resolve_manifest_and_line(self, item: Dict[str, Any]) -> Tuple[str, int]:
+        """Resolves the normalized manifest URI and 1-based line number."""
+        rem = item.get("remediation")
+        manifest_path: Optional[str] = None
+        line_num = 1
+
+        if rem and isinstance(rem, dict):
+            manifest_path = rem.get("manifest_path")
+            line_num = rem.get("line_number") or 1
+            if not manifest_path and isinstance(rem.get("safe"), dict):
+                manifest_path = rem["safe"].get("manifest_path")
+                line_num = rem["safe"].get("line_number") or line_num
+
+        tech = item.get("technology")
+        if not manifest_path and tech:
+            proj_path = item.get("project_path") or "."
+            manifest_files = find_manifest_files(proj_path, tech)
+            if manifest_files:
+                f_path, f_line = self._find_line_in_manifests(
+                    manifest_files, item.get("name", ""), tech, item.get("declared")
+                )
+                manifest_path = f_path or manifest_files[0]
+                line_num = f_line
+
+        return self.normalize_repo_path(manifest_path), line_num
+
+    @staticmethod
+    def build_locations(uri: str, line_number: int) -> List[Dict[str, Any]]:
+        """Constructs OASIS SARIF v2.1.0 physicalLocation anchored to %SRCROOT% (§3.28)."""
+        return [
+            {
+                "physicalLocation": {
+                    "artifactLocation": {
+                        "uri": uri,
+                        "uriBaseId": "%SRCROOT%",
+                    },
+                    "region": {
+                        "startLine": max(1, line_number),
+                        "startColumn": 1,
+                    },
+                }
+            }
+        ]
+
+
+class SarifFixBuilder:
+    """Builds standard OASIS SARIF v2.1.0 fixes blocks from remediation diffs (§3.55)."""
+
+    @staticmethod
+    def _extract_diff_dict(
+        remediation: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """Extracts the most relevant diff dict from the remediation payload."""
+        if not remediation or not isinstance(remediation, dict):
+            return None
+        if isinstance(remediation.get("safe"), dict):
+            return remediation["safe"]
+        if remediation.get("current_code") or remediation.get("suggested_code"):
+            return remediation
+        if isinstance(remediation.get("options"), list):
+            for opt in remediation["options"]:
+                if isinstance(opt, dict) and isinstance(opt.get("diff"), dict):
+                    return opt["diff"]
+        return None
+
+    @staticmethod
+    def _extract_replacement_text(
+        diff: Dict[str, Any],
+    ) -> Tuple[Optional[str], int, bool]:
+        """Extracts plain text replacement and target line from suggested_code."""
+        suggested = diff.get("suggested_code", [])
+        line_num = diff.get("line_number", 1)
+        is_addition = bool(diff.get("is_addition", False))
+
+        for entry in suggested:
+            if isinstance(entry, dict) and entry.get("is_changed"):
+                raw_html = entry.get("html", "")
+                plain = html.unescape(re.sub(r"<[^>]+>", "", raw_html))
+                if plain.strip():
+                    target_line = (
+                        entry.get("line_num")
+                        if isinstance(entry.get("line_num"), int)
+                        else line_num
+                    )
+                    return plain, target_line, is_addition
+        return None, line_num, is_addition
+
+    @classmethod
+    def build_fixes(
+        cls, remediation: Optional[Dict[str, Any]], uri: str, package_name: str
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Constructs SARIF fixes block with artifactChanges and replacements (§3.55)."""
+        diff = cls._extract_diff_dict(remediation)
+        if not diff:
+            return None
+
+        replacement_text, line_num, is_addition = cls._extract_replacement_text(diff)
+        if replacement_text is None:
+            return None
+
+        clean_line = max(1, line_num)
+        deleted_range: Dict[str, int] = {
+            "startLine": clean_line,
+            "startColumn": 1,
+            "endLine": clean_line,
+        }
+        if is_addition:
+            deleted_range["endColumn"] = 1
+
+        return [
+            {
+                "description": {
+                    "text": f"Remediate dependency update for package '{package_name}'"
+                },
+                "artifactChanges": [
+                    {
+                        "artifactLocation": {
+                            "uri": uri,
+                            "uriBaseId": "%SRCROOT%",
+                        },
+                        "replacements": [
+                            {
+                                "deletedRange": deleted_range,
+                                "insertedContent": {"text": replacement_text + "\n"},
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
+
+
+class SarifResultMapper:
+    """Specialized mappers converting Kevlar findings into OASIS SARIF v2.1.0 results (§3.27)."""
+
+    @staticmethod
+    def map_vulnerability_result(
+        vuln: Dict[str, Any],
+        item: Dict[str, Any],
+        rule_idx: int,
+        locations: List[Dict[str, Any]],
+        is_suppressed: bool = False,
+        fixes: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Maps an active or suppressed security vulnerability to a SARIF result."""
+        name = item.get("name", "")
+        installed = item.get("installed", "")
+        vuln_id = vuln.get("id") or "KEVLAR-VULN-UNKNOWN"
+        summary = vuln.get("summary") or "Security vulnerability detected"
+        details = vuln.get("details") or ""
+        severity = get_severity_level(vuln)
+
+        sarif_level = (
+            "error"
+            if severity in {"malicious", "critical", "high"}
+            else ("warning" if severity == "medium" else "note")
+        )
+        msg_text = f"Security Vulnerability: package '{name}' (version {installed}) has vulnerability {vuln_id}. Summary: {summary}"
+        if details:
+            msg_text += f"\nDetails: {details}"
+
+        result: Dict[str, Any] = {
+            "ruleId": vuln_id,
+            "ruleIndex": rule_idx,
+            "message": {"text": msg_text},
+            "level": sarif_level,
+            "locations": locations,
+            "properties": {
+                "packageName": name,
+                "installedVersion": installed,
+                "declaredConstraint": item.get("declared"),
+                "technology": item.get("technology"),
+                "vulnerabilityDetails": vuln,
+            },
+        }
+        if fixes:
+            result["fixes"] = fixes
+        if is_suppressed:
+            justification = (
+                vuln.get("justification")
+                or vuln.get("suppressed_reason")
+                or "Suppressed by Kevlar security governance policy"
+            )
+            result["suppressions"] = [
+                {
+                    "kind": "external",
+                    "status": "accepted",
+                    "justification": justification,
+                }
+            ]
+        return result
+
+    @staticmethod
+    def map_config_drift_result(
+        item: Dict[str, Any],
+        rule_idx: int,
+        locations: List[Dict[str, Any]],
+        fixes: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Maps a Configuration Drift finding to a SARIF result."""
+        result: Dict[str, Any] = {
+            "ruleId": "KEVLAR-CONFIG-DRIFT",
+            "ruleIndex": rule_idx,
+            "message": {"text": item.get("error", "Configuration Drift detected")},
+            "level": "error",
+            "locations": locations,
+            "properties": {
+                "packageName": item.get("name"),
+                "installedVersion": item.get("installed"),
+                "declaredConstraint": item.get("declared"),
+                "technology": item.get("technology"),
+            },
+        }
+        if fixes:
+            result["fixes"] = fixes
+        return result
+
+    @staticmethod
+    def map_outdated_result(
+        item: Dict[str, Any],
+        rule_idx: int,
+        locations: List[Dict[str, Any]],
+        fixes: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Maps an outdated dependency finding to a SARIF result."""
+        status = item.get("status")
+        name = item.get("name")
+        installed = item.get("installed")
+        latest = item.get("latest") or "unknown"
+        sarif_level = (
+            "error"
+            if status == "major"
+            else ("warning" if status == "minor" else "note")
+        )
+        msg = f"Outdated dependency: package '{name}' (version {installed}) is behind latest version '{latest}' ({status} update available)."
+
+        result: Dict[str, Any] = {
+            "ruleId": "KEVLAR-OUTDATED-DEPENDENCY",
+            "ruleIndex": rule_idx,
+            "message": {"text": msg},
+            "level": sarif_level,
+            "locations": locations,
+            "properties": {
+                "packageName": name,
+                "installedVersion": installed,
+                "latestVersion": latest,
+                "declaredConstraint": item.get("declared"),
+                "technology": item.get("technology"),
+                "updateType": status,
+            },
+        }
+        if fixes:
+            result["fixes"] = fixes
+        return result
+
+    @staticmethod
+    def map_deprecation_result(
+        item: Dict[str, Any],
+        rule_idx: int,
+        locations: List[Dict[str, Any]],
+        fixes: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Maps a deprecated package finding to a SARIF result."""
+        name = item.get("name")
+        dep_msg = str(item.get("deprecated"))
+        result: Dict[str, Any] = {
+            "ruleId": "KEVLAR-DEPRECATED-PACKAGE",
+            "ruleIndex": rule_idx,
+            "message": {"text": f"Deprecated package '{name}': {dep_msg}"},
+            "level": "warning",
+            "locations": locations,
+            "properties": {
+                "packageName": name,
+                "installedVersion": item.get("installed"),
+                "technology": item.get("technology"),
+            },
+        }
+        if fixes:
+            result["fixes"] = fixes
+        return result
+
+
+def generate_sarif_run(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Generates a SARIF v2.1.0-rtm.5 run object from Kevlar dependency results."""
+    registry = SarifRuleRegistry()
+    resolver = SarifLocationResolver()
+    sarif_results: List[Dict[str, Any]] = []
+
+    for r in results:
+        uri, line = resolver.resolve_manifest_and_line(r)
+        locations = resolver.build_locations(uri, line)
+        fixes = SarifFixBuilder.build_fixes(
+            r.get("remediation"), uri, r.get("name", "")
+        )
+
+        for vuln in r.get("vulnerabilities", []):
+            rule_idx, _ = registry.get_or_register_vulnerability_rule(vuln)
+            sarif_results.append(
+                SarifResultMapper.map_vulnerability_result(
+                    vuln, r, rule_idx, locations, False, fixes
+                )
+            )
+        for vuln in r.get("suppressed_vulnerabilities", []):
+            rule_idx, _ = registry.get_or_register_vulnerability_rule(vuln)
+            sarif_results.append(
+                SarifResultMapper.map_vulnerability_result(
+                    vuln, r, rule_idx, locations, True, fixes
+                )
+            )
+
+        status, err = r.get("status"), r.get("error")
+        is_drift = status == "error" and err and err.startswith("Configuration Drift")
+        if is_drift:
+            rule_idx, _ = registry.get_or_register_config_drift_rule()
+            sarif_results.append(
+                SarifResultMapper.map_config_drift_result(
+                    r, rule_idx, locations, fixes
+                )
+            )
+
+        if status in {"major", "minor", "patch"} and not is_drift:
+            rule_idx, _ = registry.get_or_register_outdated_rule()
+            sarif_results.append(
+                SarifResultMapper.map_outdated_result(r, rule_idx, locations, fixes)
+            )
+
+        if r.get("deprecated"):
+            rule_idx, _ = registry.get_or_register_deprecation_rule()
+            sarif_results.append(
+                SarifResultMapper.map_deprecation_result(
+                    r, rule_idx, locations, fixes
+                )
+            )
+
+    return {
         "tool": {
             "driver": {
                 "name": "Kevlar CheckDeps",
                 "version": VERSION,
                 "informationUri": "https://kevlar-checkdeps.dev",
-                "rules": [],
+                "rules": registry.get_rules(),
             }
         },
-        "results": [],
+        "results": sarif_results,
     }
-
-    sarif_results = run["results"]
-    rules_map = {}
-
-    for r in results:
-        name = r.get("name")
-        installed = r.get("installed")
-        declared = r.get("declared")
-        status = r.get("status")
-        deprecated = r.get("deprecated")
-        tech = r.get("technology")
-        error_msg = r.get("error")
-
-        # Determine manifest file path and line number
-        manifest_path = None
-        line_number = 1
-
-        rem = r.get("remediation")
-        if rem and isinstance(rem, dict):
-            manifest_path = rem.get("manifest_path")
-            line_number = rem.get("line_number") or 1
-
-        if not manifest_path:
-            project_path = r.get("project_path") or "."
-            if tech:
-                manifest_files = find_manifest_files(project_path, tech)
-                if manifest_files:
-                    found_line = False
-                    for path in manifest_files:
-                        if path not in manifest_lines_cache:
-                            if os.path.exists(path):
-                                try:
-                                    with open(
-                                        path, "r", encoding="utf-8", errors="ignore"
-                                    ) as f:
-                                        manifest_lines_cache[path] = f.readlines()
-                                except Exception:
-                                    manifest_lines_cache[path] = []
-                            else:
-                                manifest_lines_cache[path] = []
-
-                        lines = manifest_lines_cache[path]
-                        best_score = -1
-                        # Optimization: Pre-extract version digits and stripped declared string outside loop using global RE_VERSION_DIGITS
-                        declared_digits_match = (
-                            RE_VERSION_DIGITS.search(str(declared))
-                            if declared
-                            else None
-                        )
-                        declared_digits = (
-                            declared_digits_match.group(0)
-                            if declared_digits_match
-                            else None
-                        )
-                        declared_str = str(declared).strip() if declared else None
-
-                        for idx, line in enumerate(lines):
-                            if match_line_for_dependency(line, name, tech):
-                                score = 1
-                                if declared:
-                                    if (
-                                        declared_digits and declared_digits in line
-                                    ) or (declared_str and declared_str in line):
-                                        score = 2
-                                if score > best_score:
-                                    best_score = score
-                                    manifest_path = path
-                                    line_number = idx + 1
-                                    if score == 2:
-                                        found_line = True
-                                        break
-                        if found_line:
-                            break
-                    if not manifest_path:
-                        manifest_path = manifest_files[0]
-
-        # Standardize relative path for URI field (using forward slashes)
-        rel_uri = "unknown_manifest"
-        if manifest_path:
-            try:
-                rel_uri = os.path.relpath(manifest_path).replace("\\", "/")
-            except Exception:
-                rel_uri = str(manifest_path).replace("\\", "/")
-
-        # Helper to create locations array
-        def make_locations(uri, line):
-            return [
-                {
-                    "physicalLocation": {
-                        "artifactLocation": {"uri": uri},
-                        "region": {"startLine": line, "startColumn": 1},
-                    }
-                }
-            ]
-
-        # 1. Map Vulnerabilities
-        vulns = r.get("vulnerabilities", [])
-        for vuln in vulns:
-            vuln_id = vuln.get("id") or "KEVLAR-VULN-UNKNOWN"
-            summary = vuln.get("summary") or "Security vulnerability detected"
-            details = vuln.get("details") or ""
-            severity = get_severity_level(vuln)
-
-            # Severity level mapping for SARIF:
-            # critical/high -> error, medium -> warning, low/unknown -> note
-            if severity in {"malicious", "critical", "high"}:
-                sarif_level = "error"
-            elif severity == "medium":
-                sarif_level = "warning"
-            else:
-                sarif_level = "note"
-
-            msg_text = f"Security Vulnerability: package '{name}' (version {installed}) has vulnerability {vuln_id}. Summary: {summary}"
-            if details:
-                msg_text += f"\nDetails: {details}"
-
-            sarif_results.append(
-                {
-                    "ruleId": vuln_id,
-                    "message": {"text": msg_text},
-                    "level": sarif_level,
-                    "locations": make_locations(rel_uri, line_number),
-                    "properties": {
-                        "packageName": name,
-                        "installedVersion": installed,
-                        "declaredConstraint": declared,
-                        "technology": tech,
-                        "vulnerabilityDetails": vuln,
-                    },
-                }
-            )
-
-            # Track in tool rules
-            if vuln_id not in rules_map:
-                rules_map[vuln_id] = {
-                    "id": vuln_id,
-                    "shortDescription": {"text": f"Vulnerability {vuln_id} in {name}"},
-                }
-
-        # 2. Map Configuration Drift (status == "error" and error starts with "Configuration Drift")
-        is_config_drift = False
-        if (
-            status == "error"
-            and error_msg
-            and error_msg.startswith("Configuration Drift")
-        ):
-            is_config_drift = True
-            rule_id = "KEVLAR-CONFIG-DRIFT"
-            sarif_results.append(
-                {
-                    "ruleId": rule_id,
-                    "message": {"text": error_msg},
-                    "level": "error",
-                    "locations": make_locations(rel_uri, line_number),
-                    "properties": {
-                        "packageName": name,
-                        "installedVersion": installed,
-                        "declaredConstraint": declared,
-                        "technology": tech,
-                    },
-                }
-            )
-            if rule_id not in rules_map:
-                rules_map[rule_id] = {
-                    "id": rule_id,
-                    "shortDescription": {
-                        "text": "Installed version of dependency violates declared constraint (Configuration Drift)"
-                    },
-                }
-
-        # 3. Map Outdated Dependency (status in {"major", "minor", "patch"} and not is_config_drift)
-        if status in {"major", "minor", "patch"} and not is_config_drift:
-            rule_id = "KEVLAR-OUTDATED-DEPENDENCY"
-            latest = r.get("latest") or "unknown"
-
-            if status == "major":
-                sarif_level = "error"
-            elif status == "minor":
-                sarif_level = "warning"
-            else:
-                sarif_level = "note"
-
-            msg_text = f"Outdated dependency: package '{name}' (version {installed}) is behind latest version '{latest}' ({status} update available)."
-
-            sarif_results.append(
-                {
-                    "ruleId": rule_id,
-                    "message": {"text": msg_text},
-                    "level": sarif_level,
-                    "locations": make_locations(rel_uri, line_number),
-                    "properties": {
-                        "packageName": name,
-                        "installedVersion": installed,
-                        "latestVersion": latest,
-                        "declaredConstraint": declared,
-                        "technology": tech,
-                        "updateType": status,
-                    },
-                }
-            )
-            if rule_id not in rules_map:
-                rules_map[rule_id] = {
-                    "id": rule_id,
-                    "shortDescription": {"text": "Package version is outdated"},
-                }
-
-        # 4. Map Deprecation
-        if deprecated:
-            rule_id = "KEVLAR-DEPRECATED-PACKAGE"
-            dep_msg = str(deprecated)
-
-            sarif_results.append(
-                {
-                    "ruleId": rule_id,
-                    "message": {"text": f"Deprecated package '{name}': {dep_msg}"},
-                    "level": "warning",
-                    "locations": make_locations(rel_uri, line_number),
-                    "properties": {
-                        "packageName": name,
-                        "installedVersion": installed,
-                        "technology": tech,
-                    },
-                }
-            )
-            if rule_id not in rules_map:
-                rules_map[rule_id] = {
-                    "id": rule_id,
-                    "shortDescription": {"text": "Package is deprecated"},
-                }
-
-    # Set rules
-    run["tool"]["driver"]["rules"] = list(rules_map.values())
-    return run
 
 
 def export_sarif_report(results, filepath):
