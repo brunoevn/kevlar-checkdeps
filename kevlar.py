@@ -9303,13 +9303,13 @@ class SarifFixBuilder:
             return None
 
         clean_line = max(1, line_num)
-        deleted_range: Dict[str, int] = {
+        deleted_region: Dict[str, int] = {
             "startLine": clean_line,
             "startColumn": 1,
             "endLine": clean_line,
         }
         if is_addition:
-            deleted_range["endColumn"] = 1
+            deleted_region["endColumn"] = 1
 
         return [
             {
@@ -9324,7 +9324,7 @@ class SarifFixBuilder:
                         },
                         "replacements": [
                             {
-                                "deletedRange": deleted_range,
+                                "deletedRegion": deleted_region,
                                 "insertedContent": {"text": replacement_text + "\n"},
                             }
                         ],

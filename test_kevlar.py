@@ -2516,9 +2516,9 @@ class TestKevlar(unittest.TestCase):
         self.assertEqual(change["artifactLocation"]["uriBaseId"], "%SRCROOT%")
         self.assertEqual(len(change["replacements"]), 1)
         rep = change["replacements"][0]
-        self.assertEqual(rep["deletedRange"]["startLine"], 20)
-        self.assertEqual(rep["deletedRange"]["startColumn"], 1)
-        self.assertEqual(rep["deletedRange"]["endLine"], 20)
+        self.assertEqual(rep["deletedRegion"]["startLine"], 20)
+        self.assertEqual(rep["deletedRegion"]["startColumn"], 1)
+        self.assertEqual(rep["deletedRegion"]["endLine"], 20)
         self.assertEqual(rep["insertedContent"]["text"], '    "axios": "^1.7.4",\n')
 
         # Test addition diff
@@ -2537,7 +2537,7 @@ class TestKevlar(unittest.TestCase):
         add_fixes = kevlar.SarifFixBuilder.build_fixes(rem_add, "requirements.txt", "urllib3")
         self.assertIsNotNone(add_fixes)
         add_rep = add_fixes[0]["artifactChanges"][0]["replacements"][0]
-        self.assertEqual(add_rep["deletedRange"]["endColumn"], 1)
+        self.assertEqual(add_rep["deletedRegion"]["endColumn"], 1)
         self.assertEqual(add_rep["insertedContent"]["text"], "urllib3>=2.0.0\n")
 
     def test_sarif_suppressions_and_rule_indices(self):
