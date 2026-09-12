@@ -337,6 +337,7 @@ RE_GRADLE_MAP1 = re.compile(
 RE_GRADLE_MAP2 = re.compile(
     r'group\s*=\s*[\'"]([^\'"]+)[\'"]\s*,\s*name\s*=\s*[\'"]([^\'"]+)[\'"]\s*,\s*version\s*=\s*[\'"]([^\'"]+)[\'"]'
 )
+RE_GRADLE_LOCKFILE_ENTRY = re.compile(r"^([^:]+):([^:]+):([^=]+)=")
 
 # Optimization: Global regexes for fast file scanning and remediation
 RE_DEPS_MATCH = re.compile(r'"dependencies"\s*:\s*\{')
@@ -8130,7 +8131,8 @@ def parse_gradle_lockfile(filepath):
                 line = line.strip()
                 if not line or line.startswith("#"):
                     continue
-                m = re.match(r"^([^:]+):([^:]+):([^=]+)=", line)
+                # Optimization: Use pre-compiled regex RE_GRADLE_LOCKFILE_ENTRY to avoid regex recompilation overhead in hot line loop
+                m = RE_GRADLE_LOCKFILE_ENTRY.match(line)
                 if m:
                     group = m.group(1).strip()
                     artifact = m.group(2).strip()
