@@ -357,6 +357,8 @@ RE_OVERRIDES_MATCH = re.compile(r'"overrides"\s*:\s*\{')
 RE_RESOLUTIONS_MATCH = re.compile(r'"resolutions"\s*:\s*\{')
 RE_RUST_PATCH = re.compile(r"^\[patch\.crates-io\]")
 RE_VERSION_DIGITS = re.compile(r"\d+\.\d+")
+RE_NON_WORD_HYPHEN = re.compile(r"[^\w\-]")
+RE_MULTI_UNDERSCORE = re.compile(r"_{2,}")
 
 # Optimization: Use global compiled regexes to avoid cache lookup and call overhead in hot loops
 RE_CARGO_SECTION = re.compile(r"^\[([^\]]+)\]")
@@ -13177,8 +13179,9 @@ def run_scan_all(args, parser):
                     proj_dirname = rel_path
 
                 proj_dirname = proj_dirname.replace("/", "_").replace("\\", "_")
-                safe_proj_dirname = re.sub(r"[^\w\-]", "_", proj_dirname)
-                safe_proj_dirname = re.sub(r"_{2,}", "_", safe_proj_dirname).strip("_")
+                # Optimization: Use global compiled regexes to avoid cache lookup overhead in hot loop
+                safe_proj_dirname = RE_NON_WORD_HYPHEN.sub("_", proj_dirname)
+                safe_proj_dirname = RE_MULTI_UNDERSCORE.sub("_", safe_proj_dirname).strip("_")
 
                 base_safe_name = safe_proj_dirname
                 if base_safe_name in generated_report_basenames:
