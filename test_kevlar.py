@@ -4294,12 +4294,15 @@ require (
         self.assertIsNotNone(kevlar._get_cached_target_result("rust", target))
         self.assertIsNotNone(kevlar._get_cached_registry_metadata("rust", "serde"))
         self.assertGreaterEqual(kevlar.check_semver_satisfies.cache_info().currsize, 1)
+        kevlar.compare_versions("1.0.0", "1.0.1")
+        self.assertGreaterEqual(kevlar.compare_versions.cache_info().currsize, 1)
 
         kevlar.clear_kevlar_cache()
 
         self.assertIsNone(kevlar._get_cached_target_result("rust", target))
         self.assertIsNone(kevlar._get_cached_registry_metadata("rust", "serde"))
         self.assertEqual(kevlar.check_semver_satisfies.cache_info().currsize, 0)
+        self.assertEqual(kevlar.compare_versions.cache_info().currsize, 0)
 
     def test_ruby_rails_core_gem_remediation(self):
         """Test that SCA remediation for Rails core submodules (e.g. activestorage) targets the rails gem and produces bundle update commands."""
