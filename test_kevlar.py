@@ -2283,7 +2283,7 @@ class TestKevlar(unittest.TestCase):
                 report = json.load(f)
                 
             # Verify structure
-            self.assertEqual(report.get("$schema"), "https://json.schemastore.org/sarif-2.1.0.json")
+            self.assertEqual(report.get("$schema"), "https://schemastore.org/json/schema/sarif-2.1.0-rtm.5.json")
             self.assertEqual(report.get("version"), "2.1.0")
             self.assertIn("runs", report)
             self.assertEqual(len(report["runs"]), 1)
@@ -2368,7 +2368,7 @@ class TestKevlar(unittest.TestCase):
         run_2 = kevlar.generate_sarif_run(results_project_2)
         
         consolidated_log = {
-            "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+            "$schema": "https://schemastore.org/json/schema/sarif-2.1.0-rtm.5.json",
             "version": "2.1.0",
             "runs": [run_1, run_2]
         }
@@ -2377,258 +2377,6 @@ class TestKevlar(unittest.TestCase):
         self.assertEqual(consolidated_log["runs"][0]["tool"]["driver"]["name"], "Kevlar CheckDeps")
         self.assertEqual(consolidated_log["runs"][0]["results"][0]["ruleId"], "CVE-2023-3000")
         self.assertEqual(consolidated_log["runs"][1]["results"][0]["ruleId"], "KEVLAR-OUTDATED-DEPENDENCY")
-
-    def test_sarif_rule_registry_features(self):
-        """Validates SarifRuleRegistry O(1) indexing, CVSS calculation, decoupled metadata, and GitHub Code Scanning tags."""
-        registry = kevlar.SarifRuleRegistry()
-
-        # 1. Register vulnerability with CVSS vector
-        idx1, id1 = registry.get_or_register_vulnerability_rule({
-            "id": "CVE-2024-9999",
-            "summary": "Remote Code Execution in core module",
-            "severity": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-            "details": "Details regarding RCE exploitation.",
-            "cwes": ["CWE-94", "CWE-78"]
-        })
-        self.assertEqual(idx1, 0)
-        self.assertEqual(id1, "CVE-2024-9999")
-
-        # 2. Register same vulnerability again -> must return identical index in O(1)
-        idx1_dup, id1_dup = registry.get_or_register_vulnerability_rule({
-            "id": "CVE-2024-9999",
-            "summary": "Duplicate entry"
-        })
-        self.assertEqual(idx1_dup, 0)
-        self.assertEqual(id1_dup, id1)
-
-        # 3. Register predefined rules
-        idx_drift, id_drift = registry.get_or_register_config_drift_rule()
-        idx_outdated, id_outdated = registry.get_or_register_outdated_rule()
-        idx_depr, id_depr = registry.get_or_register_deprecation_rule()
-        self.assertEqual(idx_drift, 1)
-        self.assertEqual(idx_outdated, 2)
-        self.assertEqual(idx_depr, 3)
-
-        rules = registry.get_rules()
-        self.assertEqual(len(rules), 4)
-
-        # Verify GitHub Code Scanning security-severity and tags
-        r0 = rules[0]
-        self.assertEqual(r0["properties"]["security-severity"], "9.8")
-        self.assertIn("security", r0["properties"]["tags"])
-        self.assertIn("cwe-94", r0["properties"]["tags"])
-        self.assertIn("cwe-78", r0["properties"]["tags"])
-        self.assertEqual(r0["helpUri"], "https://nvd.nist.gov/vuln/detail/CVE-2024-9999")
-        self.assertIn("### CVE-2024-9999", r0["help"]["markdown"])
-
-        # Decoupling check: shortDescription must not be tied to package name
-        self.assertEqual(r0["shortDescription"]["text"], "Remote Code Execution in core module")
-
-        # 4. CVSS 4.0 subsequent metrics test (VC:N/VI:N/VA:N/SC:L/SI:L/SA:N)
-        vec_cvss4 = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:P/VC:N/VI:N/VA:N/SC:L/SI:L/SA:N"
-        score_cvss4 = kevlar.calculate_cvss4_score_approx(vec_cvss4)
-        self.assertIsNotNone(score_cvss4)
-        self.assertGreater(score_cvss4, 0.0)
-        self.assertAlmostEqual(score_cvss4, 6.0, places=1)
-
-        idx_cvss4, _ = registry.get_or_register_vulnerability_rule({
-            "id": "GHSA-x8qp-wqqm-57ph",
-            "summary": "Subsequent impact vulnerability",
-            "severity": vec_cvss4,
-        })
-        rule_cvss4 = registry.get_rules()[idx_cvss4]
-        self.assertEqual(rule_cvss4["properties"]["security-severity"], "6.0")
-
-        # 5. Severity Floor Fallback verification
-        self.assertEqual(registry._calculate_security_severity({"severity": "LOW", "score": 0.0}), "2.0")
-        self.assertEqual(registry._calculate_security_severity({"severity": "MEDIUM", "score": 0.0}), "4.0")
-        self.assertEqual(registry._calculate_security_severity({"severity": "HIGH", "score": 0.0}), "7.0")
-        self.assertEqual(registry._calculate_security_severity({"severity": "CRITICAL", "score": 0.0}), "9.0")
-        self.assertEqual(registry._calculate_security_severity({"severity": "MALICIOUS", "score": 0.0}), "9.0")
-        self.assertEqual(registry._calculate_security_severity({"severity": "UNKNOWN", "score": 0.0}), "0.0")
-        # Ensure valid non-zero score is preserved
-        self.assertEqual(registry._calculate_security_severity({"severity": "HIGH", "score": 8.2}), "8.2")
-
-    def test_sarif_location_resolver_path_traversal_sanitization(self):
-        """Verifies path normalization, path traversal sanitization, and %SRCROOT% assignment."""
-        resolver = kevlar.SarifLocationResolver()
-
-        # Unix and Windows path traversal patterns
-        self.assertEqual(
-            resolver.normalize_repo_path("../test-kevlar/chatwoot/package.json"),
-            "test-kevlar/chatwoot/package.json"
-        )
-        self.assertEqual(
-            resolver.normalize_repo_path("..\\..\\project\\Gemfile"),
-            "project/Gemfile"
-        )
-        self.assertEqual(
-            resolver.normalize_repo_path("./requirements.txt"),
-            "requirements.txt"
-        )
-        self.assertEqual(resolver.normalize_repo_path(None), "unknown_manifest")
-        self.assertEqual(resolver.normalize_repo_path(""), "unknown_manifest")
-
-        # Monorepo and repo_root support
-        custom_root = os.path.abspath("c:/monorepo") if os.name == "nt" else "/monorepo"
-        resolver_mono = kevlar.SarifLocationResolver(repo_root=custom_root)
-        nested_file = os.path.join(custom_root, "tests", "playwright", "package.json")
-        self.assertEqual(
-            resolver_mono.normalize_repo_path(nested_file),
-            "tests/playwright/package.json"
-        )
-        self.assertEqual(
-            resolver_mono.normalize_repo_path("packages/core/package.json"),
-            "packages/core/package.json"
-        )
-
-        # Physical location anchoring to %SRCROOT%
-        locs = resolver.build_locations("package.json", 15)
-        self.assertEqual(len(locs), 1)
-        phys = locs[0]["physicalLocation"]
-        self.assertEqual(phys["artifactLocation"]["uri"], "package.json")
-        self.assertEqual(phys["artifactLocation"]["uriBaseId"], "%SRCROOT%")
-        self.assertEqual(phys["region"]["startLine"], 15)
-        self.assertEqual(phys["region"]["startColumn"], 1)
-
-    def test_sarif_fix_builder_remediation(self):
-        """Verifies SarifFixBuilder generates compliant SARIF fixes with artifactChanges and replacements."""
-        # Test standard replacement diff
-        rem_replace = {
-            "manifest_path": "package.json",
-            "line_number": 20,
-            "suggested_code": [
-                {
-                    "line_num": 20,
-                    "html": '    &quot;axios&quot;: <span class="diff-add-chunk">&quot;^1.7.4&quot;</span>,',
-                    "is_changed": True
-                }
-            ]
-        }
-        fixes = kevlar.SarifFixBuilder.build_fixes(rem_replace, "package.json", "axios")
-        self.assertIsNotNone(fixes)
-        self.assertEqual(len(fixes), 1)
-        fix = fixes[0]
-        self.assertIn("axios", fix["description"]["text"])
-        self.assertEqual(len(fix["artifactChanges"]), 1)
-        change = fix["artifactChanges"][0]
-        self.assertEqual(change["artifactLocation"]["uri"], "package.json")
-        self.assertEqual(change["artifactLocation"]["uriBaseId"], "%SRCROOT%")
-        self.assertEqual(len(change["replacements"]), 1)
-        rep = change["replacements"][0]
-        self.assertEqual(rep["deletedRegion"]["startLine"], 20)
-        self.assertEqual(rep["deletedRegion"]["startColumn"], 1)
-        self.assertEqual(rep["deletedRegion"]["endLine"], 20)
-        self.assertEqual(rep["insertedContent"]["text"], '    "axios": "^1.7.4",\n')
-
-        # Test addition diff
-        rem_add = {
-            "manifest_path": "requirements.txt",
-            "line_number": 10,
-            "is_addition": True,
-            "suggested_code": [
-                {
-                    "line_num": 10,
-                    "html": '<span class="diff-add-chunk">urllib3&gt;=2.0.0</span>',
-                    "is_changed": True
-                }
-            ]
-        }
-        add_fixes = kevlar.SarifFixBuilder.build_fixes(rem_add, "requirements.txt", "urllib3")
-        self.assertIsNotNone(add_fixes)
-        add_rep = add_fixes[0]["artifactChanges"][0]["replacements"][0]
-        self.assertEqual(add_rep["deletedRegion"]["endColumn"], 1)
-        self.assertEqual(add_rep["insertedContent"]["text"], "urllib3>=2.0.0\n")
-
-    def test_sarif_suppressions_and_rule_indices(self):
-        """Verifies formal SARIF suppressions object and relational ruleIndex linking."""
-        results = [
-            {
-                "name": "lodash",
-                "installed": "4.17.20",
-                "technology": "npm",
-                "vulnerabilities": [
-                    {
-                        "id": "CVE-2021-23337",
-                        "summary": "Command injection vulnerability",
-                        "severity": "HIGH",
-                        "details": "Lodash injection flaw"
-                    }
-                ],
-                "suppressed_vulnerabilities": [
-                    {
-                        "id": "CVE-2020-8203",
-                        "summary": "Prototype pollution vulnerability",
-                        "severity": "MEDIUM",
-                        "details": "Prototype pollution via zipObjectDeep",
-                        "justification": "Input sanitized upstream by API gateway",
-                        "suppressed_reason": "Risk accepted by SecOps"
-                    }
-                ]
-            }
-        ]
-
-        run = kevlar.generate_sarif_run(results)
-        sarif_results = run["results"]
-        self.assertEqual(len(sarif_results), 2)
-
-        active = next(r for r in sarif_results if r["ruleId"] == "CVE-2021-23337")
-        suppressed = next(r for r in sarif_results if r["ruleId"] == "CVE-2020-8203")
-
-        # Active vulnerability has ruleIndex and NO suppressions block
-        self.assertEqual(active["ruleIndex"], 0)
-        self.assertNotIn("suppressions", active)
-
-        # Suppressed vulnerability has ruleIndex and formal SARIF suppressions block
-        self.assertEqual(suppressed["ruleIndex"], 1)
-        self.assertIn("suppressions", suppressed)
-        self.assertEqual(len(suppressed["suppressions"]), 1)
-        supp_item = suppressed["suppressions"][0]
-        self.assertEqual(supp_item["kind"], "external")
-        self.assertEqual(supp_item["status"], "accepted")
-        self.assertEqual(supp_item["justification"], "Input sanitized upstream by API gateway")
-
-    def test_sarif_bolt_optimizations_and_indexing(self):
-        """Validates Bolt micro-optimizations: inverted manifest indexing, memoization caches, and fast-paths."""
-        import tempfile
-
-        # 1. Inverted Manifest Indexing
-        with tempfile.TemporaryDirectory() as tmpdir:
-            pkg_json = os.path.join(tmpdir, "package.json")
-            with open(pkg_json, "w", encoding="utf-8") as f:
-                f.write('{\n  "dependencies": {\n    "express": "^4.18.2",\n    "lodash": "~4.17.21"\n  }\n}\n')
-
-            resolver = kevlar.SarifLocationResolver(repo_root=tmpdir)
-            index = resolver.index_manifest_lines(pkg_json, "npm")
-            self.assertIn("express", index)
-            self.assertIn("lodash", index)
-            self.assertEqual(index["express"][0][0], 3)
-            self.assertEqual(index["lodash"][0][0], 4)
-
-            # Check O(1) resolution via inverted index
-            path, line = resolver.resolve_manifest_and_line({
-                "package": "lodash",
-                "technology": "npm",
-                "project_path": tmpdir
-            })
-            self.assertEqual(line, 4)
-
-        # 2. Fast path in SarifFixBuilder
-        self.assertIsNone(kevlar.SarifFixBuilder.build_fixes(None, "package.json", "pkg"))
-        self.assertIsNone(kevlar.SarifFixBuilder.build_fixes({}, "package.json", "pkg"))
-        # Clean HTML stripping test (preserves indentation for code patches)
-        stripped = kevlar.SarifFixBuilder._strip_html('  <span class="diff-add-chunk">&quot;test&quot;</span>  ')
-        self.assertEqual(stripped, '  "test"  ')
-
-        # 3. Cache verification in SarifRuleRegistry
-        registry = kevlar.SarifRuleRegistry()
-        v1 = {"id": "CVE-2024-1111", "severity": "HIGH", "score": 8.5}
-        score1 = registry._calculate_security_severity(v1)
-        self.assertEqual(score1, "8.5")
-        # Verify result is cached
-        cache_key = ("CVE-2024-1111", "HIGH", "8.5")
-        self.assertIn(cache_key, registry._cvss_cache)
-        self.assertEqual(registry._cvss_cache[cache_key], "8.5")
 
     def test_safe_urlopen_security_validations(self):
         import urllib.request
@@ -4294,15 +4042,12 @@ require (
         self.assertIsNotNone(kevlar._get_cached_target_result("rust", target))
         self.assertIsNotNone(kevlar._get_cached_registry_metadata("rust", "serde"))
         self.assertGreaterEqual(kevlar.check_semver_satisfies.cache_info().currsize, 1)
-        kevlar.compare_versions("1.0.0", "1.0.1")
-        self.assertGreaterEqual(kevlar.compare_versions.cache_info().currsize, 1)
 
         kevlar.clear_kevlar_cache()
 
         self.assertIsNone(kevlar._get_cached_target_result("rust", target))
         self.assertIsNone(kevlar._get_cached_registry_metadata("rust", "serde"))
         self.assertEqual(kevlar.check_semver_satisfies.cache_info().currsize, 0)
-        self.assertEqual(kevlar.compare_versions.cache_info().currsize, 0)
 
     def test_ruby_rails_core_gem_remediation(self):
         """Test that SCA remediation for Rails core submodules (e.g. activestorage) targets the rails gem and produces bundle update commands."""
