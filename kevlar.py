@@ -366,6 +366,10 @@ RE_GEMFILE_ENTRY = re.compile(r'^gem\s+[\'"]([^\'"]+)[\'"]')
 RE_GEMFILE_LOCK_SPEC = re.compile(r"^\s*([a-zA-Z0-9_-]+)\s*\(([^)]+)\)")
 RE_GEMFILE_LOCK_DEP = re.compile(r"^\s*([a-zA-Z0-9_-]+)(?:\s*\(([^)]+)\))?")
 
+# ⚡ Bolt Optimization: Precompiled regexes for PDM and Gradle lockfile line parsing in hot loops
+RE_PDM_DEP_NAME = re.compile(r"^([a-zA-Z0-9\-_.]+)")
+RE_GRADLE_LOCKFILE = re.compile(r"^([^:]+):([^:]+):([^=]+)=")
+
 # ⚡ Bolt Optimization: Precompiled regexes for single-pass inverted manifest line indexing
 RE_MANIFEST_INDEX_NPM = re.compile(r'["\']([^"\']+)["\']\s*:')
 RE_MANIFEST_INDEX_RUBY = re.compile(r'gem\s+[\'"]([^\'"]+)[\'"]', re.IGNORECASE)
@@ -4253,7 +4257,8 @@ def parse_pdm_lock(filepath):
                     else:
                         item = stripped.rstrip(",").strip().strip('"').strip("'")
                         if item:
-                            match = re.match(r"^([a-zA-Z0-9\-_.]+)", item)
+                            # ⚡ Bolt Optimization: Use global precompiled RE_PDM_DEP_NAME to bypass re cache lookup overhead in hot loop
+                            match = RE_PDM_DEP_NAME.match(item)
                             if match and name:
                                 dep_name = match.group(1)
                                 parents.setdefault(dep_name, set()).add(name)
@@ -8130,7 +8135,8 @@ def parse_gradle_lockfile(filepath):
                 line = line.strip()
                 if not line or line.startswith("#"):
                     continue
-                m = re.match(r"^([^:]+):([^:]+):([^=]+)=", line)
+                # ⚡ Bolt Optimization: Use global precompiled RE_GRADLE_LOCKFILE to bypass re cache lookup overhead in hot loop
+                m = RE_GRADLE_LOCKFILE.match(line)
                 if m:
                     group = m.group(1).strip()
                     artifact = m.group(2).strip()
