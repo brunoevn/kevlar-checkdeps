@@ -287,6 +287,8 @@ TECHNOLOGIES = {
 }
 
 # Cached Regex patterns for performance
+RE_PATH_TRAVERSAL = re.compile(r"^(?:\.\./|\./)+")
+RE_NODE_VER = re.compile(r"^v?\d+")
 RE_SEMVER_ALPHA = re.compile(r"([a-zA-Z]+.*)$")
 RE_SEMVER_DIGITS = re.compile(r"\d+")
 RE_CLEAN_VER = re.compile(r"^[^\d]*")
@@ -1636,7 +1638,8 @@ def find_node_constraint(base_path, pkg_data):
                 if content:
                     content = content.split("#")[0].strip()
                     if content and not content.startswith("lts"):
-                        if re.match(r"^v?\d+", content):
+                        # Optimization: Use global compiled regex to avoid lookup overhead
+                        if RE_NODE_VER.match(content):
                             return f"={content}", ".nvmrc"
                         return content, ".nvmrc"
         except OSError:
@@ -1650,7 +1653,8 @@ def find_node_constraint(base_path, pkg_data):
                 if content:
                     content = content.split("#")[0].strip()
                     if content:
-                        if re.match(r"^v?\d+", content):
+                        # Optimization: Use global compiled regex to avoid lookup overhead
+                        if RE_NODE_VER.match(content):
                             return f"={content}", ".node-version"
                         return content, ".node-version"
         except OSError:
@@ -9088,11 +9092,14 @@ class SarifLocationResolver:
                 if not rel.startswith("../") and rel != "..":
                     result = rel
                 else:
-                    result = re.sub(r"^(?:\.\./|\./)+", "", raw_str)
+                    # Optimization: Use global compiled regex to bypass re cache lookup overhead
+                    result = RE_PATH_TRAVERSAL.sub("", raw_str)
             except Exception:
-                result = re.sub(r"^(?:\.\./|\./)+", "", raw_str)
+                # Optimization: Use global compiled regex to bypass re cache lookup overhead
+                result = RE_PATH_TRAVERSAL.sub("", raw_str)
 
-        result = re.sub(r"^(?:\.\./|\./)+", "", result).lstrip("/")
+        # Optimization: Use global compiled regex to bypass re cache lookup overhead
+        result = RE_PATH_TRAVERSAL.sub("", result).lstrip("/")
         res_str = result or "unknown_manifest"
         if cache is not None:
             cache[target_path] = res_str
