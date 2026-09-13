@@ -390,12 +390,12 @@ RE_MANIFEST_INDEX_PIP = re.compile(
 RE_MANIFEST_INDEX_NUGET = re.compile(
     r'(?:include|update)\s*=\s*[\'"]([^\'"]+)[\'"]', re.IGNORECASE
 )
-RE_MANIFEST_INDEX_GO = re.compile(r'([a-zA-Z0-9_.\-/]+)\s+v\d+')
+RE_MANIFEST_INDEX_GO = re.compile(r"([a-zA-Z0-9_.\-/]+)\s+v\d+")
 RE_MANIFEST_INDEX_RUST = re.compile(
-    r'(?:^\s*([a-zA-Z0-9_\-]+)\s*=|\[(?:dependencies|dev-dependencies|build-dependencies)\.([a-zA-Z0-9_\-]+)\])'
+    r"(?:^\s*([a-zA-Z0-9_\-]+)\s*=|\[(?:dependencies|dev-dependencies|build-dependencies)\.([a-zA-Z0-9_\-]+)\])"
 )
 RE_MANIFEST_INDEX_MAVEN = re.compile(
-    r'<artifactid>\s*([^<\s]+)\s*</artifactid>', re.IGNORECASE
+    r"<artifactid>\s*([^<\s]+)\s*</artifactid>", re.IGNORECASE
 )
 RE_MANIFEST_INDEX_GRADLE = re.compile(
     r'[\'"]([^\'"]+:[^\'"]+)[\'"]|name\s*=\s*[\'"]([^\'"]+)[\'"]'
@@ -527,6 +527,8 @@ def _detect_xml_encoding(content):
     return "utf-8"
 
 
+# ⚡ Bolt: Cache CVSS v2 score calculation to avoid repeated vector parsing in vulnerability scans
+@functools.lru_cache(maxsize=1024)
 def calculate_cvss2_score(vector_str):
     """Calculates base CVSS v2 score from a vector string."""
     try:
@@ -556,6 +558,8 @@ def calculate_cvss2_score(vector_str):
         return None
 
 
+# ⚡ Bolt: Cache CVSS v3 score calculation to avoid repeated vector parsing in vulnerability scans
+@functools.lru_cache(maxsize=1024)
 def calculate_cvss3_score(vector_str):
     """Calculates base CVSS v3.x score from a vector string."""
     try:
@@ -607,6 +611,8 @@ def calculate_cvss3_score(vector_str):
         return None
 
 
+# ⚡ Bolt: Cache CVSS v4 score calculation to avoid repeated vector parsing in vulnerability scans
+@functools.lru_cache(maxsize=1024)
 def calculate_cvss4_score_approx(vector_str):
     """Approximates base CVSS v4.0 score by translating metrics to v3 equivalent."""
     try:
@@ -616,9 +622,7 @@ def calculate_cvss4_score_approx(vector_str):
         pr = parts.get("PR", "N")
         ui = "R" if parts.get("UI") in {"A", "R", "P"} else "N"
 
-        has_subsequent = any(
-            parts.get(k) in {"H", "L"} for k in ("SC", "SI", "SA")
-        )
+        has_subsequent = any(parts.get(k) in {"H", "L"} for k in ("SC", "SI", "SA"))
         scope = "C" if has_subsequent else "U"
 
         c = parts.get("VC", "N")
@@ -8837,7 +8841,9 @@ class SarifRuleRegistry:
                     m3 = RE_CVSS3_SEV.search(raw_sev_upper)
                     score = calculate_cvss3_score(m3.group(1)) if m3 else None
                 if score is None:
-                    m2 = RE_CVSS2_SEV.search(raw_sev_upper) or RE_AV_SEV.search(raw_sev_upper)
+                    m2 = RE_CVSS2_SEV.search(raw_sev_upper) or RE_AV_SEV.search(
+                        raw_sev_upper
+                    )
                     score = calculate_cvss2_score(m2.group(1)) if m2 else None
 
         level = get_severity_level(vuln)
@@ -8937,8 +8943,7 @@ class SarifRuleRegistry:
         self._rules.append(
             {
                 "id": vuln_id,
-                "name": re.sub(r"[^a-zA-Z0-9]", "", vuln_id)
-                or "SecurityVulnerability",
+                "name": re.sub(r"[^a-zA-Z0-9]", "", vuln_id) or "SecurityVulnerability",
                 "shortDescription": {"text": summary.strip()},
                 "fullDescription": {"text": (details or summary).strip()},
                 "defaultConfiguration": {"level": sarif_level},
@@ -9071,7 +9076,9 @@ class SarifLocationResolver:
         # ⚡ Bolt Optimization: Caches for O(1) lookups
         self._path_cache: Dict[str, str] = {}
         self._manifest_files_cache: Dict[Tuple[str, str], List[str]] = {}
-        self._manifest_index: Dict[Tuple[str, str], Dict[str, List[Tuple[int, str]]]] = {}
+        self._manifest_index: Dict[
+            Tuple[str, str], Dict[str, List[Tuple[int, str]]]
+        ] = {}
         self._content_lower_cache: Dict[str, str] = {}
 
     def normalize_repo_path(self, raw_path: Optional[str] = None) -> str:
@@ -9097,7 +9104,11 @@ class SarifLocationResolver:
         raw_str = str(target_path).replace("\\", "/")
 
         # ⚡ Fast path: already clean relative path without traversal
-        if not raw_str.startswith(("../", "./", "/")) and ":" not in raw_str and not os.path.isabs(target_path):
+        if (
+            not raw_str.startswith(("../", "./", "/"))
+            and ":" not in raw_str
+            and not os.path.isabs(target_path)
+        ):
             result = raw_str
         else:
             try:
@@ -9149,9 +9160,13 @@ class SarifLocationResolver:
             if extractor:
                 m = extractor.search(line)
                 if m:
-                    pkg = m.group(1) or (m.group(2) if m.lastindex and m.lastindex >= 2 else None)
+                    pkg = m.group(1) or (
+                        m.group(2) if m.lastindex and m.lastindex >= 2 else None
+                    )
                     if pkg:
-                        index.setdefault(pkg.strip().lower(), []).append((line_no, line))
+                        index.setdefault(pkg.strip().lower(), []).append(
+                            (line_no, line)
+                        )
 
         self._manifest_index[cache_key] = index
         return index
@@ -9209,7 +9224,9 @@ class SarifLocationResolver:
             # Fallback for non-standard line formats
             lines = self._read_manifest_lines(path)
             for idx, line in enumerate(lines):
-                if pkg_lower in line.lower() and match_line_for_dependency(line, name, tech):
+                if pkg_lower in line.lower() and match_line_for_dependency(
+                    line, name, tech
+                ):
                     score = (
                         2
                         if (
@@ -9242,7 +9259,9 @@ class SarifLocationResolver:
             proj_path = item.get("project_path") or "."
             cache_key = (proj_path, tech)
             if cache_key not in self._manifest_files_cache:
-                self._manifest_files_cache[cache_key] = find_manifest_files(proj_path, tech)
+                self._manifest_files_cache[cache_key] = find_manifest_files(
+                    proj_path, tech
+                )
             manifest_files = self._manifest_files_cache[cache_key]
             if manifest_files:
                 pkg_name = item.get("name") or item.get("package") or ""
@@ -9576,7 +9595,7 @@ def generate_sarif_run(
         # 2. Configuration Drift
         status = r.get("status")
         err = r.get("error")
-        is_drift = (status == "error" and err and err.startswith("Configuration Drift"))
+        is_drift = status == "error" and err and err.startswith("Configuration Drift")
         if is_drift:
             if not has_drift_rule:
                 drift_rule_idx, _ = registry.get_or_register_config_drift_rule()
@@ -13183,7 +13202,9 @@ def run_scan_all(args, parser):
                 proj_dirname = proj_dirname.replace("/", "_").replace("\\", "_")
                 # Optimization: Use global compiled regexes to avoid cache lookup overhead in hot loop
                 safe_proj_dirname = RE_NON_WORD_HYPHEN.sub("_", proj_dirname)
-                safe_proj_dirname = RE_MULTI_UNDERSCORE.sub("_", safe_proj_dirname).strip("_")
+                safe_proj_dirname = RE_MULTI_UNDERSCORE.sub(
+                    "_", safe_proj_dirname
+                ).strip("_")
 
                 base_safe_name = safe_proj_dirname
                 if base_safe_name in generated_report_basenames:
