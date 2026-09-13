@@ -4699,7 +4699,6 @@ require (
 
     @patch("urllib.request.urlopen")
     def test_check_npm_package_scoped_and_registry_metadata(self, mock_urlopen):
-        import io
         fake_json = {
             "name": "@nestjs/core",
             "dist-tags": {"latest": "10.3.7"},
@@ -4758,7 +4757,6 @@ require (
 
     @patch("urllib.request.urlopen")
     def test_check_npm_package_integrity_checksum_mismatch_and_weak(self, mock_urlopen):
-        import io
         fake_json = {
             "name": "superagent",
             "dist-tags": {"latest": "8.1.2"},

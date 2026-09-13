@@ -30,7 +30,7 @@ import xml.etree.ElementTree as ET
 import xml.parsers.expat
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
-from typing import Any, Dict, List, Optional, Set, Tuple, TypedDict, Union
+from typing import Any, Dict, List, Optional, Tuple, TypedDict, Union
 
 import tomllib
 
@@ -10119,8 +10119,6 @@ RE_GRADLE_VER_EQ = re.compile(r'version\s*=\s*["\']([^"\']+)["\']')
 RE_GRADLE_VER_COLON = re.compile(r'version:\s*["\']([^"\']+)["\']')
 RE_NUGET_VERSION = re.compile(r'Version\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
 RE_QUOTES = re.compile(r'["\']([^"\']+)["\']')
-
-import functools
 
 
 @functools.lru_cache(maxsize=1024)
