@@ -385,7 +385,7 @@ RE_GRADLE_LOCKFILE = re.compile(r"^([^:]+):([^:]+):([^=]+)=")
 RE_MANIFEST_INDEX_NPM = re.compile(r'["\']([^"\']+)["\']\s*:')
 RE_MANIFEST_INDEX_RUBY = re.compile(r'gem\s+[\'"]([^\'"]+)[\'"]', re.IGNORECASE)
 RE_MANIFEST_INDEX_PIP = re.compile(
-    r'^\s*([a-zA-Z0-9_.\-]+)(?:\[[^\]]+\])?\s*(?:==|>=|<=|~=|!=|>|<|@|;|=|[\'"])'
+    r'^\s*([a-zA-Z0-9][a-zA-Z0-9_.\-]*)(?:\[[^\]]+\])?\s*(?:==|>=|<=|~=|!=|>|<|@|;|=|[\'"])'
 )
 RE_MANIFEST_INDEX_NUGET = re.compile(
     r'(?:include|update)\s*=\s*[\'"]([^\'"]+)[\'"]', re.IGNORECASE
