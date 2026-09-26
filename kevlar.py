@@ -319,6 +319,15 @@ RE_CVSS3_SEV = re.compile(r"(CVSS:3\.[0-9a-zA-Z/:.]+)")
 RE_CVSS2_SEV = re.compile(r"(CVSS:2\.[0-9a-zA-Z/:.]+)")
 RE_AV_SEV = re.compile(r"(AV:[NAL]/AC:[HML]/Au:[MSN]/C:[NPC]/I:[NPC]/A:[NPC])")
 
+# Optimization: Precompile metric patterns for CVSS vector component extraction to avoid dynamic recompilation in get_severity_level
+RE_CVSS_METRIC_PATTERNS = {
+    key: (
+        re.compile(rf"/{key.lower()}(?=[:/])([nhml])"),
+        re.compile(rf"(?:^|/){key.lower()}:([nhml])"),
+    )
+    for key in ("C", "I", "A", "S", "VC", "VI", "VA")
+}
+
 SEMVER_REGEX = re.compile(
     r"^v?(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)"
     r"(?:-(?P<prerelease>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
@@ -732,12 +741,20 @@ def get_severity_level(vuln):
 
     # 3. Fallback metric-based heuristic (similar to normalize_severity_to_text)
     s = severity.lower()
-    import re as _re
 
+    # Optimization: Use global precompiled regexes for O(1) pattern retrieval without local import or recompilation overhead
     def _metric(vector, key):
-        m = _re.search(r"/" + key.lower() + r"(?=[:/])([nhml])", vector)
+        key_upper = key.upper()
+        patterns = RE_CVSS_METRIC_PATTERNS.get(key_upper)
+        if patterns:
+            p1, p2 = patterns
+        else:
+            k_lower = key_upper.lower()
+            p1 = re.compile(rf"/{k_lower}(?=[:/])([nhml])")
+            p2 = re.compile(rf"(?:^|/){k_lower}:([nhml])")
+        m = p1.search(vector)
         if not m:
-            m = _re.search(r"(?:^|/)" + key.lower() + r":([nhml])", vector)
+            m = p2.search(vector)
         return m.group(1) if m else "n"
 
     if "cvss:3" in s or "cvss:2" in s or "av:" in s:
