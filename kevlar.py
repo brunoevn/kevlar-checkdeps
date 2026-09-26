@@ -11038,17 +11038,25 @@ def _populate_rails_remediation_strategies(
     clean_inst_v = _clean_version_str(rails_clean_inst)
     clean_decl_v = _clean_version_str(rails_decl)
 
-    if r_patch and _clean_version_str(r_patch) in (clean_inst_v, clean_decl_v):
+    # Optimization: Cache cleaned version strings and use set lookups to eliminate redundant string operations
+    clean_r_patch = _clean_version_str(r_patch) if r_patch else None
+    if clean_r_patch and clean_r_patch in {clean_inst_v, clean_decl_v}:
         r_patch = None
-    if r_sm and (
-        _clean_version_str(r_sm) in (clean_inst_v, clean_decl_v)
-        or _clean_version_str(r_sm) == _clean_version_str(r_patch)
+        clean_r_patch = None
+
+    clean_r_sm = _clean_version_str(r_sm) if r_sm else None
+    if clean_r_sm and (
+        clean_r_sm in {clean_inst_v, clean_decl_v}
+        or clean_r_sm == clean_r_patch
     ):
         r_sm = None
-    if r_abs and (
-        _clean_version_str(r_abs) in (clean_inst_v, clean_decl_v)
-        or _clean_version_str(r_abs) == _clean_version_str(r_sm)
-        or _clean_version_str(r_abs) == _clean_version_str(r_patch)
+        clean_r_sm = None
+
+    clean_r_abs = _clean_version_str(r_abs) if r_abs else None
+    if clean_r_abs and (
+        clean_r_abs in {clean_inst_v, clean_decl_v}
+        or clean_r_abs == clean_r_sm
+        or clean_r_abs == clean_r_patch
     ):
         r_abs = None
 
@@ -11422,17 +11430,25 @@ def _populate_parent_strategies(
         p_clean_inst_v = _clean_version_str(p_clean_inst)
         p_clean_decl_v = _clean_version_str(p_decl)
 
-        if p_patch and _clean_version_str(p_patch) in (p_clean_inst_v, p_clean_decl_v):
+        # Optimization: Cache cleaned version strings and use set lookups to eliminate redundant string operations
+        clean_p_patch = _clean_version_str(p_patch) if p_patch else None
+        if clean_p_patch and clean_p_patch in {p_clean_inst_v, p_clean_decl_v}:
             p_patch = None
-        if p_sm and (
-            _clean_version_str(p_sm) in (p_clean_inst_v, p_clean_decl_v)
-            or _clean_version_str(p_sm) == _clean_version_str(p_patch)
+            clean_p_patch = None
+
+        clean_p_sm = _clean_version_str(p_sm) if p_sm else None
+        if clean_p_sm and (
+            clean_p_sm in {p_clean_inst_v, p_clean_decl_v}
+            or clean_p_sm == clean_p_patch
         ):
             p_sm = None
-        if p_abs and (
-            _clean_version_str(p_abs) in (p_clean_inst_v, p_clean_decl_v)
-            or _clean_version_str(p_abs) == _clean_version_str(p_sm)
-            or _clean_version_str(p_abs) == _clean_version_str(p_patch)
+            clean_p_sm = None
+
+        clean_p_abs = _clean_version_str(p_abs) if p_abs else None
+        if clean_p_abs and (
+            clean_p_abs in {p_clean_inst_v, p_clean_decl_v}
+            or clean_p_abs == clean_p_sm
+            or clean_p_abs == clean_p_patch
         ):
             p_abs = None
 
@@ -11833,23 +11849,29 @@ def populate_remediation_recommendations(results, default_project_path):
         clean_inst_v = _clean_version_str(clean_installed)
         clean_decl_v = _clean_version_str(declared)
 
-        if latest_patch and _clean_version_str(latest_patch) in (
-            clean_inst_v,
-            clean_decl_v,
-        ):
+        # Optimization: Cache cleaned version strings and use set lookups to eliminate redundant string operations
+        clean_latest_patch = _clean_version_str(latest_patch) if latest_patch else None
+        if clean_latest_patch and clean_latest_patch in {clean_inst_v, clean_decl_v}:
             latest_patch = None
-        if latest_sm and (
-            _clean_version_str(latest_sm) in (clean_inst_v, clean_decl_v)
-            or _clean_version_str(latest_sm) == _clean_version_str(latest_patch)
+            clean_latest_patch = None
+
+        clean_latest_sm = _clean_version_str(latest_sm) if latest_sm else None
+        if clean_latest_sm and (
+            clean_latest_sm in {clean_inst_v, clean_decl_v}
+            or clean_latest_sm == clean_latest_patch
         ):
             latest_sm = None
+            clean_latest_sm = None
+
+        clean_latest_abs = _clean_version_str(latest_abs) if latest_abs else None
         if (
             latest_abs
             and " or " not in str(latest_abs)
+            and clean_latest_abs
             and (
-                _clean_version_str(latest_abs) in (clean_inst_v, clean_decl_v)
-                or _clean_version_str(latest_abs) == _clean_version_str(latest_sm)
-                or _clean_version_str(latest_abs) == _clean_version_str(latest_patch)
+                clean_latest_abs in {clean_inst_v, clean_decl_v}
+                or clean_latest_abs == clean_latest_sm
+                or clean_latest_abs == clean_latest_patch
             )
         ):
             latest_abs = None
