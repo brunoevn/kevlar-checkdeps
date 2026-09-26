@@ -290,6 +290,8 @@ TECHNOLOGIES = {
 
 # Cached Regex patterns for performance
 RE_PATH_TRAVERSAL = re.compile(r"^(?:\.\./|\./)+")
+RE_MAVEN_PLACEHOLDER = re.compile(r"^\s*\$\{\s*(.*?)\s*\}\s*$")
+RE_NUGET_PLACEHOLDER = re.compile(r"^\s*\$\(\s*(.*?)\s*\)\s*$")
 RE_NODE_VER = re.compile(r"^v?\d+")
 RE_SEMVER_ALPHA = re.compile(r"([a-zA-Z]+.*)$")
 RE_SEMVER_DIGITS = re.compile(r"\d+")
@@ -10283,17 +10285,14 @@ def _resolve_property_placeholder(
     is_placeholder = False
     prop_name = None
     if tech == "maven":
-        m = (
-            re.match(r"^\s*\$\SafeWriter?\{\s*(.*?)\s*\}\s*$", target_text)
-            if hasattr(re, "match")
-            else None
-        )
-        m = re.match(r"^\s*\$\{\s*(.*?)\s*\}\s*$", target_text)
+        # Optimization: Use pre-compiled regex RE_MAVEN_PLACEHOLDER to avoid re.match lookup overhead
+        m = RE_MAVEN_PLACEHOLDER.match(target_text)
         if m:
             is_placeholder = True
             prop_name = m.group(1)
     elif tech == "nuget":
-        m = re.match(r"^\s*\$\(\s*(.*?)\s*\)\s*$", target_text)
+        # Optimization: Use pre-compiled regex RE_NUGET_PLACEHOLDER to avoid re.match lookup overhead
+        m = RE_NUGET_PLACEHOLDER.match(target_text)
         if m:
             is_placeholder = True
             prop_name = m.group(1)
