@@ -426,6 +426,12 @@ RE_MANIFEST_INDEXERS = {
 
 RE_HTML_TAGS = re.compile(r"<[^>]+>")
 
+# Optimization: Precompile static regexes at global scope to avoid cache lookup and call overhead in hot loops
+RE_SUPPRESSION_VER = re.compile(r"^\d+\.\d+(\.\d+)?$")
+RE_SLN_PATH = re.compile(r'Path\s*=\s*"([^"]+)"', re.IGNORECASE)
+RE_SARIF_NAME = re.compile(r"[^a-zA-Z0-9]")
+RE_KEVLAR_VERSION = re.compile(r'VERSION\s*=\s*["\']([^"\']+)["\']')
+
 
 def init_colors_and_encoding():
     """Enable ANSI escape sequences and adjust icons for stdout encoding compatibility."""
@@ -3185,7 +3191,8 @@ def validate_suppressions_schema(data):
 
     # Validate version pattern (e.g. 1.0 or 1.0.0)
     version = metadata["version"].strip()
-    if not re.match(r"^\d+\.\d+(\.\d+)?$", version):
+    # Optimization: Use global compiled regex to avoid cache lookup and call overhead
+    if not RE_SUPPRESSION_VER.match(version):
         raise ValueError(
             f"Metadata version '{version}' is invalid. Must match pattern 'X.Y' or 'X.Y.Z'."
         )
@@ -4677,7 +4684,8 @@ def parse_sln_file(sln_path):
             except Exception:
                 with open(sln_path, "r", encoding="utf-8-sig", errors="ignore") as f:
                     content = f.read()
-                matches = re.findall(r'Path\s*=\s*"([^"]+)"', content, re.IGNORECASE)
+                # Optimization: Use global compiled regex to avoid cache lookup and call overhead
+                matches = RE_SLN_PATH.findall(content)
                 for m in matches:
                     norm_path = m.replace("\\", "/")
                     if norm_path.endswith((".csproj", ".vbproj", ".fsproj")):
@@ -8953,7 +8961,8 @@ class SarifRuleRegistry:
         self._rules.append(
             {
                 "id": vuln_id,
-                "name": re.sub(r"[^a-zA-Z0-9]", "", vuln_id) or "SecurityVulnerability",
+                # Optimization: Use global compiled regex to avoid cache lookup and call overhead
+                "name": RE_SARIF_NAME.sub("", vuln_id) or "SecurityVulnerability",
                 "shortDescription": {"text": summary.strip()},
                 "fullDescription": {"text": (details or summary).strip()},
                 "defaultConfiguration": {"level": sarif_level},
@@ -12946,7 +12955,8 @@ def check_for_updates():
         with safe_urlopen(req, timeout=5) as response:
             content = response.read(1024).decode("utf-8")
 
-        match = re.search(r'VERSION\s*=\s*["\']([^"\']+)["\']', content)
+        # Optimization: Use global compiled regex to avoid cache lookup and call overhead
+        match = RE_KEVLAR_VERSION.search(content)
         if match:
             latest_version = match.group(1)
     except Exception as e:
