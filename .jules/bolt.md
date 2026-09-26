@@ -24,3 +24,7 @@
 ## 2026-08-26 - Python Regular Expression Hot Loop Overhead
 **Learning:** Python's dynamic regex matching functions (`re.match`, `re.search`) incur observable cache lookup and function call overhead, which degrades performance when executed inside tight hot loops (like reading lines in manifest parsing functions).
 **Action:** Always move static regexes into global module scope using `re.compile()` and directly call their corresponding methods (`.match()`, `.search()`) during loops to bypass Python's dynamic evaluation overhead.
+
+## 2026-08-27 - Result Pre-indexing for Remediation Strategy Lookups
+**Learning:** Performing a linear search `next(item for item in results if item.get("name") == parent_name ...)` inside loops over transitive dependencies creates an O(K * M) bottleneck. Pre-indexing results into a dictionary keyed by `(name, project_path)` reduces lookup time to O(1) per parent.
+**Action:** Pre-index multi-attribute candidate lists into hashtables/dictionaries prior to running item-by-item lookup loops.

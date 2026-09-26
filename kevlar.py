@@ -653,6 +653,20 @@ def calculate_cvss4_score_approx(vector_str):
         return None
 
 
+def _cvss_score_to_severity(score):
+    """Optimization: Helper function to map numeric CVSS score to severity string."""
+    if score is not None:
+        if score >= 9.0:
+            return "critical"
+        if score >= 7.0:
+            return "high"
+        if score >= 4.0:
+            return "medium"
+        if score >= 0.1:
+            return "low"
+    return None
+
+
 def get_severity_level(vuln):
     """Determines the severity level (malicious, critical, high, medium, low, unknown) of a vulnerability."""
     # FIXED: Unified severity heuristics globally
@@ -692,31 +706,15 @@ def get_severity_level(vuln):
     if "CVSS" in sev_upper or "AV:" in sev_upper:
         m4 = RE_CVSS4_SEV.search(sev_upper)
         if m4:
-            vector = m4.group(1)
-            score = calculate_cvss4_score_approx(vector)
-            if score is not None:
-                if score >= 9.0:
-                    return "critical"
-                elif score >= 7.0:
-                    return "high"
-                elif score >= 4.0:
-                    return "medium"
-                elif score >= 0.1:
-                    return "low"
+            s_sev = _cvss_score_to_severity(calculate_cvss4_score_approx(m4.group(1)))
+            if s_sev:
+                return s_sev
 
         m3 = RE_CVSS3_SEV.search(sev_upper)
         if m3:
-            vector = m3.group(1)
-            score = calculate_cvss3_score(vector)
-            if score is not None:
-                if score >= 9.0:
-                    return "critical"
-                elif score >= 7.0:
-                    return "high"
-                elif score >= 4.0:
-                    return "medium"
-                elif score >= 0.1:
-                    return "low"
+            s_sev = _cvss_score_to_severity(calculate_cvss3_score(m3.group(1)))
+            if s_sev:
+                return s_sev
 
         vector2 = None
         m2 = RE_CVSS2_SEV.search(sev_upper)
@@ -728,16 +726,9 @@ def get_severity_level(vuln):
                 vector2 = m_raw2.group(1)
 
         if vector2:
-            score = calculate_cvss2_score(vector2)
-            if score is not None:
-                if score >= 9.0:
-                    return "critical"
-                elif score >= 7.0:
-                    return "high"
-                elif score >= 4.0:
-                    return "medium"
-                elif score >= 0.1:
-                    return "low"
+            s_sev = _cvss_score_to_severity(calculate_cvss2_score(vector2))
+            if s_sev:
+                return s_sev
 
     # 3. Fallback metric-based heuristic (similar to normalize_severity_to_text)
     s = severity.lower()
@@ -11379,6 +11370,12 @@ def _populate_parent_strategies(
     if not r.get("required_by"):
         return strategies
 
+    # Optimization: Pre-index results by (name, project_path) for O(1) hash map lookups instead of O(N) list searches
+    results_by_name_path = {
+        (item.get("name"), item.get("project_path")): item
+        for item in results
+    }
+
     seen_parents = set()
     valid_parents = []
     for parent_name in r.get("required_by", []):
@@ -11386,14 +11383,8 @@ def _populate_parent_strategies(
             continue
         seen_parents.add(parent_name)
 
-        parent_candidate = next(
-            (
-                item
-                for item in results
-                if item.get("name") == parent_name
-                and item.get("project_path") == r.get("project_path")
-            ),
-            None,
+        parent_candidate = results_by_name_path.get(
+            (parent_name, r.get("project_path"))
         )
         if not parent_candidate:
             continue
