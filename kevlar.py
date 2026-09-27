@@ -11035,84 +11035,25 @@ def _populate_rails_remediation_strategies(
     rails_clean_inst = (
         rails_inst[0] if (isinstance(rails_inst, list) and rails_inst) else rails_inst
     )
-    clean_inst_v = _clean_version_str(rails_clean_inst)
-    clean_decl_v = _clean_version_str(rails_decl)
 
-    # Optimization: Cache cleaned version strings and use set lookups to eliminate redundant string operations
-    clean_r_patch = _clean_version_str(r_patch) if r_patch else None
-    if clean_r_patch and clean_r_patch in {clean_inst_v, clean_decl_v}:
-        r_patch = None
-        clean_r_patch = None
+    r_patch, r_sm, r_abs = _filter_remediation_versions(
+        rails_clean_inst, rails_decl, r_patch, r_sm, r_abs
+    )
 
-    clean_r_sm = _clean_version_str(r_sm) if r_sm else None
-    if clean_r_sm and (
-        clean_r_sm in {clean_inst_v, clean_decl_v}
-        or clean_r_sm == clean_r_patch
-    ):
-        r_sm = None
-        clean_r_sm = None
-
-    clean_r_abs = _clean_version_str(r_abs) if r_abs else None
-    if clean_r_abs and (
-        clean_r_abs in {clean_inst_v, clean_decl_v}
-        or clean_r_abs == clean_r_sm
-        or clean_r_abs == clean_r_patch
-    ):
-        r_abs = None
-
-    rails_options = []
     cmd_subpkg = f"rails {name}" if name != "rails" else "rails"
-
-    if r_patch:
-        diff_patch = generate_remediation_diff(
-            manifest_path, rails_line_idx, rails_decl, r_patch, "ruby", "rails"
-        )
-        if diff_patch:
-            rails_options.append(
-                {
-                    "id": "patch",
-                    "label": f"Patch rails: v{_clean_version_str(r_patch)}",
-                    "badge": "Patch / Bugfix",
-                    "badge_class": "v-chip-ok",
-                    "command": f"bundle update {cmd_subpkg}",
-                    "validation": "bundle exec rails test",
-                    "diff": diff_patch,
-                }
-            )
-
-    if r_sm:
-        diff_sm = generate_remediation_diff(
-            manifest_path, rails_line_idx, rails_decl, r_sm, "ruby", "rails"
-        )
-        if diff_sm:
-            rails_options.append(
-                {
-                    "id": "minor",
-                    "label": f"Minor rails: v{_clean_version_str(r_sm)}",
-                    "badge": "Minor / Feature",
-                    "badge_class": "v-chip-safe",
-                    "command": f"bundle update {cmd_subpkg}",
-                    "validation": "bundle exec rails test",
-                    "diff": diff_sm,
-                }
-            )
-
-    if r_abs and " or " not in str(r_abs):
-        diff_abs = generate_remediation_diff(
-            manifest_path, rails_line_idx, rails_decl, r_abs, "ruby", "rails"
-        )
-        if diff_abs:
-            rails_options.append(
-                {
-                    "id": "major",
-                    "label": f"Major rails: v{_clean_version_str(r_abs)}",
-                    "badge": "Major / Breaking",
-                    "badge_class": "v-chip-major",
-                    "command": f"bundle update {cmd_subpkg}",
-                    "validation": "bundle exec rails test",
-                    "diff": diff_abs,
-                }
-            )
+    rails_options = _build_standard_remediation_options(
+        manifest_path,
+        rails_line_idx,
+        rails_decl,
+        r_patch,
+        r_sm,
+        r_abs,
+        "ruby",
+        "rails",
+        f"bundle update {cmd_subpkg}",
+        "bundle exec rails test",
+        label_suffix="rails",
+    )
 
     diagnostic_msg = (
         f"'{name}' is a core Ruby on Rails component with strict version coupling to the 'rails' framework. "
@@ -11219,6 +11160,85 @@ def _clean_version_str(v):
     return RE_OPERATOR_PREFIX.sub("", v)
 
 
+def _filter_remediation_versions(installed, declared, patch, sm, abs_ver):
+    """Filters out patch, same-major, and absolute remediation versions if they match installed/declared or are redundant."""
+    clean_inst_v = _clean_version_str(installed)
+    clean_decl_v = _clean_version_str(declared)
+
+    clean_patch = _clean_version_str(patch) if patch else None
+    if clean_patch and clean_patch in {clean_inst_v, clean_decl_v}:
+        patch = None
+        clean_patch = None
+
+    clean_sm = _clean_version_str(sm) if sm else None
+    if clean_sm and (
+        clean_sm in {clean_inst_v, clean_decl_v} or clean_sm == clean_patch
+    ):
+        sm = None
+        clean_sm = None
+
+    clean_abs = _clean_version_str(abs_ver) if abs_ver else None
+    if (
+        abs_ver
+        and " or " not in str(abs_ver)
+        and clean_abs
+        and (
+            clean_abs in {clean_inst_v, clean_decl_v}
+            or clean_abs == clean_sm
+            or clean_abs == clean_patch
+        )
+    ):
+        abs_ver = None
+
+    return patch, sm, abs_ver
+
+
+def _build_standard_remediation_options(
+    manifest_path,
+    line_idx,
+    decl,
+    patch,
+    sm,
+    abs_ver,
+    tech,
+    pkg_name,
+    cmd=None,
+    val=None,
+    label_suffix="",
+):
+    """Builds standard Patch, Minor, and Major remediation option objects."""
+    options = []
+    suffix = f" {label_suffix}" if label_suffix else ""
+    specs = [
+        ("patch", patch, f"Patch{suffix}: v", "Patch / Bugfix", "v-chip-ok"),
+        ("minor", sm, f"Minor{suffix}: v", "Minor / Feature", "v-chip-safe"),
+        ("major", abs_ver, f"Major{suffix}: v", "Major / Breaking", "v-chip-major"),
+    ]
+    for opt_id, ver, prefix, badge, badge_cls in specs:
+        if not ver or (opt_id == "major" and " or " in str(ver)):
+            continue
+        diff = (
+            generate_remediation_diff(
+                manifest_path, line_idx, decl, ver, tech, pkg_name
+            )
+            if line_idx
+            else generate_addition_remediation_diff(manifest_path, pkg_name, ver, tech)
+        )
+        if diff:
+            options.append(
+                {
+                    "id": opt_id,
+                    "label": f"{prefix}{_clean_version_str(ver)}",
+                    "badge": badge,
+                    "badge_class": badge_cls,
+                    "command": cmd,
+                    "validation": val,
+                    "diff": diff,
+                }
+            )
+    return options
+
+
 def _populate_direct_strategies(
     r,
     manifest_path,
@@ -11292,74 +11312,20 @@ def _populate_direct_strategies(
                     }
                 )
 
-    if latest_patch:
-        diff_patch = (
-            generate_remediation_diff(
-                manifest_path, found_line_idx, declared, latest_patch, tech, name
-            )
-            if found_line_idx
-            else generate_addition_remediation_diff(
-                manifest_path, name, latest_patch, tech
-            )
+    direct_options.extend(
+        _build_standard_remediation_options(
+            manifest_path,
+            found_line_idx,
+            declared,
+            latest_patch,
+            latest_sm,
+            latest_abs,
+            tech,
+            name,
+            cmd_direct,
+            val_direct,
         )
-        if diff_patch:
-            direct_options.append(
-                {
-                    "id": "patch",
-                    "label": f"Patch: v{_clean_version_str(latest_patch)}",
-                    "badge": "Patch / Bugfix",
-                    "badge_class": "v-chip-ok",
-                    "command": cmd_direct,
-                    "validation": val_direct,
-                    "diff": diff_patch,
-                }
-            )
-
-    if latest_sm:
-        diff_sm = (
-            generate_remediation_diff(
-                manifest_path, found_line_idx, declared, latest_sm, tech, name
-            )
-            if found_line_idx
-            else generate_addition_remediation_diff(
-                manifest_path, name, latest_sm, tech
-            )
-        )
-        if diff_sm:
-            direct_options.append(
-                {
-                    "id": "minor",
-                    "label": f"Minor: v{_clean_version_str(latest_sm)}",
-                    "badge": "Minor / Feature",
-                    "badge_class": "v-chip-safe",
-                    "command": cmd_direct,
-                    "validation": val_direct,
-                    "diff": diff_sm,
-                }
-            )
-
-    if latest_abs and " or " not in str(latest_abs):
-        diff_abs = (
-            generate_remediation_diff(
-                manifest_path, found_line_idx, declared, latest_abs, tech, name
-            )
-            if found_line_idx
-            else generate_addition_remediation_diff(
-                manifest_path, name, latest_abs, tech
-            )
-        )
-        if diff_abs:
-            direct_options.append(
-                {
-                    "id": "major",
-                    "label": f"Major: v{_clean_version_str(latest_abs)}",
-                    "badge": "Major / Breaking",
-                    "badge_class": "v-chip-major",
-                    "command": cmd_direct,
-                    "validation": val_direct,
-                    "diff": diff_abs,
-                }
-            )
+    )
 
     if direct_options:
         return [
@@ -11389,8 +11355,7 @@ def _populate_parent_strategies(
 
     # Optimization: Pre-index results by (name, project_path) for O(1) hash map lookups instead of O(N) list searches
     results_by_name_path = {
-        (item.get("name"), item.get("project_path")): item
-        for item in results
+        (item.get("name"), item.get("project_path")): item for item in results
     }
 
     seen_parents = set()
@@ -11427,83 +11392,26 @@ def _populate_parent_strategies(
             "latest"
         )
 
-        p_clean_inst_v = _clean_version_str(p_clean_inst)
-        p_clean_decl_v = _clean_version_str(p_decl)
+        p_patch, p_sm, p_abs = _filter_remediation_versions(
+            p_clean_inst, p_decl, p_patch, p_sm, p_abs
+        )
 
-        # Optimization: Cache cleaned version strings and use set lookups to eliminate redundant string operations
-        clean_p_patch = _clean_version_str(p_patch) if p_patch else None
-        if clean_p_patch and clean_p_patch in {p_clean_inst_v, p_clean_decl_v}:
-            p_patch = None
-            clean_p_patch = None
-
-        clean_p_sm = _clean_version_str(p_sm) if p_sm else None
-        if clean_p_sm and (
-            clean_p_sm in {p_clean_inst_v, p_clean_decl_v}
-            or clean_p_sm == clean_p_patch
-        ):
-            p_sm = None
-            clean_p_sm = None
-
-        clean_p_abs = _clean_version_str(p_abs) if p_abs else None
-        if clean_p_abs and (
-            clean_p_abs in {p_clean_inst_v, p_clean_decl_v}
-            or clean_p_abs == clean_p_sm
-            or clean_p_abs == clean_p_patch
-        ):
-            p_abs = None
-
-        parent_options = []
         cmd_parent = f"bundle update {p_name} {name}" if tech == "ruby" else None
         val_parent = "bundle exec rails test" if tech == "ruby" else None
 
-        if p_patch:
-            p_diff = generate_remediation_diff(
-                manifest_path, parent_line_idx, p_decl, p_patch, tech, p_name
-            )
-            if p_diff:
-                parent_options.append(
-                    {
-                        "id": "patch",
-                        "label": f"Patch {p_name}: v{_clean_version_str(p_patch)}",
-                        "badge": "Patch / Bugfix",
-                        "badge_class": "v-chip-ok",
-                        "command": cmd_parent,
-                        "validation": val_parent,
-                        "diff": p_diff,
-                    }
-                )
-        if p_sm:
-            p_diff = generate_remediation_diff(
-                manifest_path, parent_line_idx, p_decl, p_sm, tech, p_name
-            )
-            if p_diff:
-                parent_options.append(
-                    {
-                        "id": "minor",
-                        "label": f"Minor {p_name}: v{_clean_version_str(p_sm)}",
-                        "badge": "Minor / Feature",
-                        "badge_class": "v-chip-safe",
-                        "command": cmd_parent,
-                        "validation": val_parent,
-                        "diff": p_diff,
-                    }
-                )
-        if p_abs:
-            p_diff = generate_remediation_diff(
-                manifest_path, parent_line_idx, p_decl, p_abs, tech, p_name
-            )
-            if p_diff:
-                parent_options.append(
-                    {
-                        "id": "major",
-                        "label": f"Major {p_name}: v{_clean_version_str(p_abs)}",
-                        "badge": "Major / Breaking",
-                        "badge_class": "v-chip-major",
-                        "command": cmd_parent,
-                        "validation": val_parent,
-                        "diff": p_diff,
-                    }
-                )
+        parent_options = _build_standard_remediation_options(
+            manifest_path,
+            parent_line_idx,
+            p_decl,
+            p_patch,
+            p_sm,
+            p_abs,
+            tech,
+            p_name,
+            cmd_parent,
+            val_parent,
+            label_suffix=p_name,
+        )
 
         if parent_options:
             target_v = p_abs or p_sm or p_patch
@@ -11846,35 +11754,9 @@ def populate_remediation_recommendations(results, default_project_path):
         latest_sm = r.get("latest_same_major")
         latest_abs = r.get("latest_absolute") or r.get("latest")
 
-        clean_inst_v = _clean_version_str(clean_installed)
-        clean_decl_v = _clean_version_str(declared)
-
-        # Optimization: Cache cleaned version strings and use set lookups to eliminate redundant string operations
-        clean_latest_patch = _clean_version_str(latest_patch) if latest_patch else None
-        if clean_latest_patch and clean_latest_patch in {clean_inst_v, clean_decl_v}:
-            latest_patch = None
-            clean_latest_patch = None
-
-        clean_latest_sm = _clean_version_str(latest_sm) if latest_sm else None
-        if clean_latest_sm and (
-            clean_latest_sm in {clean_inst_v, clean_decl_v}
-            or clean_latest_sm == clean_latest_patch
-        ):
-            latest_sm = None
-            clean_latest_sm = None
-
-        clean_latest_abs = _clean_version_str(latest_abs) if latest_abs else None
-        if (
-            latest_abs
-            and " or " not in str(latest_abs)
-            and clean_latest_abs
-            and (
-                clean_latest_abs in {clean_inst_v, clean_decl_v}
-                or clean_latest_abs == clean_latest_sm
-                or clean_latest_abs == clean_latest_patch
-            )
-        ):
-            latest_abs = None
+        latest_patch, latest_sm, latest_abs = _filter_remediation_versions(
+            clean_installed, declared, latest_patch, latest_sm, latest_abs
+        )
 
         manifest_files = _get_manifest_files(
             project_path, tech, r.get("is_engine", False)
