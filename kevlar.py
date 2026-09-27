@@ -15,7 +15,6 @@ import gzip
 import html
 import json
 import os
-import platform
 import random
 import re
 import string
@@ -317,8 +316,6 @@ RE_CVSS4_SEV = re.compile(r"(CVSS:4\.[0-9a-zA-Z/:.]+)")
 RE_CVSS3_SEV = re.compile(r"(CVSS:3\.[0-9a-zA-Z/:.]+)")
 RE_CVSS2_SEV = re.compile(r"(CVSS:2\.[0-9a-zA-Z/:.]+)")
 RE_AV_SEV = re.compile(r"(AV:[NAL]/AC:[HML]/Au:[MSN]/C:[NPC]/I:[NPC]/A:[NPC])")
-RE_METRIC_SLASH = re.compile(r"/([a-zA-Z0-9_]+)(?=[:/])([nhml])")
-RE_METRIC_COLON = re.compile(r"(?:^|/)([a-zA-Z0-9_]+):([nhml])")
 
 SEMVER_REGEX = re.compile(
     r"^v?(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)"
@@ -733,22 +730,19 @@ def get_severity_level(vuln):
 
     # 3. Fallback metric-based heuristic (similar to normalize_severity_to_text)
     s = severity.lower()
+    import re as _re
 
     def _metric(vector, key):
-        k = key.lower()
-        m = RE_METRIC_SLASH.search(vector)
-        if m and m.group(1) == k:
-            return m.group(2)
-        m = RE_METRIC_COLON.search(vector)
-        if m and m.group(1) == k:
-            return m.group(2)
-        return "n"
+        m = _re.search(r"/" + key.lower() + r"(?=[:/])([nhml])", vector)
+        if not m:
+            m = _re.search(r"(?:^|/)" + key.lower() + r":([nhml])", vector)
+        return m.group(1) if m else "n"
 
     if "cvss:3" in s or "cvss:2" in s or "av:" in s:
-        c = _metric(s, "c")
-        i = _metric(s, "i")
-        a = _metric(s, "a")
-        sc = _metric(s, "s")
+        c = _metric(s, "C")
+        i = _metric(s, "I")
+        a = _metric(s, "A")
+        sc = _metric(s, "S")
         if sc == "c" and (c == "h" or i == "h"):
             return "critical"
         if c == "h" or i == "h" or a == "h":
@@ -758,9 +752,9 @@ def get_severity_level(vuln):
         return "low"
 
     if "cvss:4" in s:
-        vc = _metric(s, "vc")
-        vi = _metric(s, "vi")
-        va = _metric(s, "va")
+        vc = _metric(s, "VC")
+        vi = _metric(s, "VI")
+        va = _metric(s, "VA")
         if vc == "h" and vi == "h":
             return "critical"
         if vc == "h" or vi == "h" or va == "h":
@@ -3800,6 +3794,8 @@ def evaluate_comparison_op(left_val, left_name, op, right_val, right_name):
 
 def get_env_markers():
     """Builds environment markers dictionary for the current interpreter."""
+    import platform
+
     py_version_tuple = platform.python_version_tuple()
     python_version = f"{py_version_tuple[0]}.{py_version_tuple[1]}"
     python_full_version = platform.python_version()
