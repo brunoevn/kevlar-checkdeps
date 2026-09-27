@@ -15,6 +15,7 @@ import gzip
 import html
 import json
 import os
+import platform
 import random
 import re
 import string
@@ -175,7 +176,7 @@ class ScanResultRow(TypedDict, total=False):
     remediation: Optional[Dict[str, Any]]
 
 
-VERSION = "1.11.1"
+VERSION = "1.11.0"
 
 # External APIs Configuration
 URL_NPM_REGISTRY = "https://registry.npmjs.org/"
@@ -290,8 +291,6 @@ TECHNOLOGIES = {
 
 # Cached Regex patterns for performance
 RE_PATH_TRAVERSAL = re.compile(r"^(?:\.\./|\./)+")
-RE_MAVEN_PLACEHOLDER = re.compile(r"^\s*\$\{\s*(.*?)\s*\}\s*$")
-RE_NUGET_PLACEHOLDER = re.compile(r"^\s*\$\(\s*(.*?)\s*\)\s*$")
 RE_NODE_VER = re.compile(r"^v?\d+")
 RE_SEMVER_ALPHA = re.compile(r"([a-zA-Z]+.*)$")
 RE_SEMVER_DIGITS = re.compile(r"\d+")
@@ -318,44 +317,14 @@ RE_CVSS4_SEV = re.compile(r"(CVSS:4\.[0-9a-zA-Z/:.]+)")
 RE_CVSS3_SEV = re.compile(r"(CVSS:3\.[0-9a-zA-Z/:.]+)")
 RE_CVSS2_SEV = re.compile(r"(CVSS:2\.[0-9a-zA-Z/:.]+)")
 RE_AV_SEV = re.compile(r"(AV:[NAL]/AC:[HML]/Au:[MSN]/C:[NPC]/I:[NPC]/A:[NPC])")
-
-# Optimization: Precompile metric patterns for CVSS vector component extraction to avoid dynamic recompilation in get_severity_level
-RE_CVSS_METRIC_PATTERNS = {
-    key: (
-        re.compile(rf"/{key.lower()}(?=[:/])([nhml])"),
-        re.compile(rf"(?:^|/){key.lower()}:([nhml])"),
-    )
-    for key in ("C", "I", "A", "S", "VC", "VI", "VA")
-}
+RE_METRIC_SLASH = re.compile(r"/([a-zA-Z0-9_]+)(?=[:/])([nhml])")
+RE_METRIC_COLON = re.compile(r"(?:^|/)([a-zA-Z0-9_]+):([nhml])")
 
 SEMVER_REGEX = re.compile(
     r"^v?(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)"
     r"(?:-(?P<prerelease>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
     r"(?:\+(?P<buildmetadata>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$"
 )
-
-
-@functools.lru_cache(maxsize=1024)
-def _get_maven_nuget_prop_regex(prop_name_val):
-    # Optimization: Cache property definition regexes at module level for Maven and NuGet to allow LRU cache reuse across calls
-    return re.compile(
-        r"<\s*"
-        + re.escape(prop_name_val)
-        + r"\s*>\s*(.*?)\s*<\s*/\s*"
-        + re.escape(prop_name_val)
-        + r"\s*>",
-        re.IGNORECASE,
-    )
-
-
-@functools.lru_cache(maxsize=1024)
-def _get_gradle_prop_regex(prop_name_val):
-    # Optimization: Cache property definition regexes at module level for Gradle to allow LRU cache reuse across calls
-    return re.compile(
-        r"^\s*([a-zA-Z0-9_.-]+)?\s*"
-        + re.escape(prop_name_val)
-        + r'\s*=\s*["\']([^"\']+)["\']'
-    )
 
 RE_MARKER_TOKEN = re.compile(
     r"\s*("
@@ -448,12 +417,6 @@ RE_MANIFEST_INDEXERS = {
 }
 
 RE_HTML_TAGS = re.compile(r"<[^>]+>")
-
-# Optimization: Precompile static regexes at global scope to avoid cache lookup and call overhead in hot loops
-RE_SUPPRESSION_VER = re.compile(r"^\d+\.\d+(\.\d+)?$")
-RE_SLN_PATH = re.compile(r'Path\s*=\s*"([^"]+)"', re.IGNORECASE)
-RE_SARIF_NAME = re.compile(r"[^a-zA-Z0-9]")
-RE_KEVLAR_VERSION = re.compile(r'VERSION\s*=\s*["\']([^"\']+)["\']')
 
 
 def init_colors_and_encoding():
@@ -682,20 +645,6 @@ def calculate_cvss4_score_approx(vector_str):
         return None
 
 
-def _cvss_score_to_severity(score):
-    """Optimization: Helper function to map numeric CVSS score to severity string."""
-    if score is not None:
-        if score >= 9.0:
-            return "critical"
-        if score >= 7.0:
-            return "high"
-        if score >= 4.0:
-            return "medium"
-        if score >= 0.1:
-            return "low"
-    return None
-
-
 def get_severity_level(vuln):
     """Determines the severity level (malicious, critical, high, medium, low, unknown) of a vulnerability."""
     # FIXED: Unified severity heuristics globally
@@ -735,15 +684,31 @@ def get_severity_level(vuln):
     if "CVSS" in sev_upper or "AV:" in sev_upper:
         m4 = RE_CVSS4_SEV.search(sev_upper)
         if m4:
-            s_sev = _cvss_score_to_severity(calculate_cvss4_score_approx(m4.group(1)))
-            if s_sev:
-                return s_sev
+            vector = m4.group(1)
+            score = calculate_cvss4_score_approx(vector)
+            if score is not None:
+                if score >= 9.0:
+                    return "critical"
+                elif score >= 7.0:
+                    return "high"
+                elif score >= 4.0:
+                    return "medium"
+                elif score >= 0.1:
+                    return "low"
 
         m3 = RE_CVSS3_SEV.search(sev_upper)
         if m3:
-            s_sev = _cvss_score_to_severity(calculate_cvss3_score(m3.group(1)))
-            if s_sev:
-                return s_sev
+            vector = m3.group(1)
+            score = calculate_cvss3_score(vector)
+            if score is not None:
+                if score >= 9.0:
+                    return "critical"
+                elif score >= 7.0:
+                    return "high"
+                elif score >= 4.0:
+                    return "medium"
+                elif score >= 0.1:
+                    return "low"
 
         vector2 = None
         m2 = RE_CVSS2_SEV.search(sev_upper)
@@ -755,33 +720,35 @@ def get_severity_level(vuln):
                 vector2 = m_raw2.group(1)
 
         if vector2:
-            s_sev = _cvss_score_to_severity(calculate_cvss2_score(vector2))
-            if s_sev:
-                return s_sev
+            score = calculate_cvss2_score(vector2)
+            if score is not None:
+                if score >= 9.0:
+                    return "critical"
+                elif score >= 7.0:
+                    return "high"
+                elif score >= 4.0:
+                    return "medium"
+                elif score >= 0.1:
+                    return "low"
 
     # 3. Fallback metric-based heuristic (similar to normalize_severity_to_text)
     s = severity.lower()
 
-    # Optimization: Use global precompiled regexes for O(1) pattern retrieval without local import or recompilation overhead
     def _metric(vector, key):
-        key_upper = key.upper()
-        patterns = RE_CVSS_METRIC_PATTERNS.get(key_upper)
-        if patterns:
-            p1, p2 = patterns
-        else:
-            k_lower = key_upper.lower()
-            p1 = re.compile(rf"/{k_lower}(?=[:/])([nhml])")
-            p2 = re.compile(rf"(?:^|/){k_lower}:([nhml])")
-        m = p1.search(vector)
-        if not m:
-            m = p2.search(vector)
-        return m.group(1) if m else "n"
+        k = key.lower()
+        m = RE_METRIC_SLASH.search(vector)
+        if m and m.group(1) == k:
+            return m.group(2)
+        m = RE_METRIC_COLON.search(vector)
+        if m and m.group(1) == k:
+            return m.group(2)
+        return "n"
 
     if "cvss:3" in s or "cvss:2" in s or "av:" in s:
-        c = _metric(s, "C")
-        i = _metric(s, "I")
-        a = _metric(s, "A")
-        sc = _metric(s, "S")
+        c = _metric(s, "c")
+        i = _metric(s, "i")
+        a = _metric(s, "a")
+        sc = _metric(s, "s")
         if sc == "c" and (c == "h" or i == "h"):
             return "critical"
         if c == "h" or i == "h" or a == "h":
@@ -791,9 +758,9 @@ def get_severity_level(vuln):
         return "low"
 
     if "cvss:4" in s:
-        vc = _metric(s, "VC")
-        vi = _metric(s, "VI")
-        va = _metric(s, "VA")
+        vc = _metric(s, "vc")
+        vi = _metric(s, "vi")
+        va = _metric(s, "va")
         if vc == "h" and vi == "h":
             return "critical"
         if vc == "h" or vi == "h" or va == "h":
@@ -3214,8 +3181,7 @@ def validate_suppressions_schema(data):
 
     # Validate version pattern (e.g. 1.0 or 1.0.0)
     version = metadata["version"].strip()
-    # Optimization: Use global compiled regex to avoid cache lookup and call overhead
-    if not RE_SUPPRESSION_VER.match(version):
+    if not re.match(r"^\d+\.\d+(\.\d+)?$", version):
         raise ValueError(
             f"Metadata version '{version}' is invalid. Must match pattern 'X.Y' or 'X.Y.Z'."
         )
@@ -3834,8 +3800,6 @@ def evaluate_comparison_op(left_val, left_name, op, right_val, right_name):
 
 def get_env_markers():
     """Builds environment markers dictionary for the current interpreter."""
-    import platform
-
     py_version_tuple = platform.python_version_tuple()
     python_version = f"{py_version_tuple[0]}.{py_version_tuple[1]}"
     python_full_version = platform.python_version()
@@ -4707,8 +4671,7 @@ def parse_sln_file(sln_path):
             except Exception:
                 with open(sln_path, "r", encoding="utf-8-sig", errors="ignore") as f:
                     content = f.read()
-                # Optimization: Use global compiled regex to avoid cache lookup and call overhead
-                matches = RE_SLN_PATH.findall(content)
+                matches = re.findall(r'Path\s*=\s*"([^"]+)"', content, re.IGNORECASE)
                 for m in matches:
                     norm_path = m.replace("\\", "/")
                     if norm_path.endswith((".csproj", ".vbproj", ".fsproj")):
@@ -8984,8 +8947,7 @@ class SarifRuleRegistry:
         self._rules.append(
             {
                 "id": vuln_id,
-                # Optimization: Use global compiled regex to avoid cache lookup and call overhead
-                "name": RE_SARIF_NAME.sub("", vuln_id) or "SecurityVulnerability",
+                "name": re.sub(r"[^a-zA-Z0-9]", "", vuln_id) or "SecurityVulnerability",
                 "shortDescription": {"text": summary.strip()},
                 "fullDescription": {"text": (details or summary).strip()},
                 "defaultConfiguration": {"level": sarif_level},
@@ -10249,6 +10211,25 @@ def _resolve_property_placeholder(
 ):
     """Resolves Maven/Gradle/NuGet property placeholders to concrete files and line numbers."""
 
+    @functools.lru_cache(maxsize=1024)
+    def _get_maven_nuget_prop_regex(prop_name_val):
+        return re.compile(
+            r"<\s*"
+            + re.escape(prop_name_val)
+            + r"\s*>\s*(.*?)\s*<\s*/\s*"
+            + re.escape(prop_name_val)
+            + r"\s*>",
+            re.IGNORECASE,
+        )
+
+    @functools.lru_cache(maxsize=1024)
+    def _get_gradle_prop_regex(prop_name_val):
+        return re.compile(
+            r"^\s*([a-zA-Z0-9_.-]+)?\s*"
+            + re.escape(prop_name_val)
+            + r'\s*=\s*["\']([^"\']+)["\']'
+        )
+
     def _search_lines_for_property(lines_list, prop_name_val, tech_type):
         if tech_type in {"maven", "nuget"}:
             pattern = _get_maven_nuget_prop_regex(prop_name_val)
@@ -10306,14 +10287,17 @@ def _resolve_property_placeholder(
     is_placeholder = False
     prop_name = None
     if tech == "maven":
-        # Optimization: Use pre-compiled regex RE_MAVEN_PLACEHOLDER to avoid re.match lookup overhead
-        m = RE_MAVEN_PLACEHOLDER.match(target_text)
+        m = (
+            re.match(r"^\s*\$\SafeWriter?\{\s*(.*?)\s*\}\s*$", target_text)
+            if hasattr(re, "match")
+            else None
+        )
+        m = re.match(r"^\s*\$\{\s*(.*?)\s*\}\s*$", target_text)
         if m:
             is_placeholder = True
             prop_name = m.group(1)
     elif tech == "nuget":
-        # Optimization: Use pre-compiled regex RE_NUGET_PLACEHOLDER to avoid re.match lookup overhead
-        m = RE_NUGET_PLACEHOLDER.match(target_text)
+        m = re.match(r"^\s*\$\(\s*(.*?)\s*\)\s*$", target_text)
         if m:
             is_placeholder = True
             prop_name = m.group(1)
@@ -11039,25 +11023,76 @@ def _populate_rails_remediation_strategies(
     rails_clean_inst = (
         rails_inst[0] if (isinstance(rails_inst, list) and rails_inst) else rails_inst
     )
+    clean_inst_v = _clean_version_str(rails_clean_inst)
+    clean_decl_v = _clean_version_str(rails_decl)
 
-    r_patch, r_sm, r_abs = _filter_remediation_versions(
-        rails_clean_inst, rails_decl, r_patch, r_sm, r_abs
-    )
+    if r_patch and _clean_version_str(r_patch) in (clean_inst_v, clean_decl_v):
+        r_patch = None
+    if r_sm and (
+        _clean_version_str(r_sm) in (clean_inst_v, clean_decl_v)
+        or _clean_version_str(r_sm) == _clean_version_str(r_patch)
+    ):
+        r_sm = None
+    if r_abs and (
+        _clean_version_str(r_abs) in (clean_inst_v, clean_decl_v)
+        or _clean_version_str(r_abs) == _clean_version_str(r_sm)
+        or _clean_version_str(r_abs) == _clean_version_str(r_patch)
+    ):
+        r_abs = None
 
+    rails_options = []
     cmd_subpkg = f"rails {name}" if name != "rails" else "rails"
-    rails_options = _build_standard_remediation_options(
-        manifest_path,
-        rails_line_idx,
-        rails_decl,
-        r_patch,
-        r_sm,
-        r_abs,
-        "ruby",
-        "rails",
-        f"bundle update {cmd_subpkg}",
-        "bundle exec rails test",
-        label_suffix="rails",
-    )
+
+    if r_patch:
+        diff_patch = generate_remediation_diff(
+            manifest_path, rails_line_idx, rails_decl, r_patch, "ruby", "rails"
+        )
+        if diff_patch:
+            rails_options.append(
+                {
+                    "id": "patch",
+                    "label": f"Patch rails: v{_clean_version_str(r_patch)}",
+                    "badge": "Patch / Bugfix",
+                    "badge_class": "v-chip-ok",
+                    "command": f"bundle update {cmd_subpkg}",
+                    "validation": "bundle exec rails test",
+                    "diff": diff_patch,
+                }
+            )
+
+    if r_sm:
+        diff_sm = generate_remediation_diff(
+            manifest_path, rails_line_idx, rails_decl, r_sm, "ruby", "rails"
+        )
+        if diff_sm:
+            rails_options.append(
+                {
+                    "id": "minor",
+                    "label": f"Minor rails: v{_clean_version_str(r_sm)}",
+                    "badge": "Minor / Feature",
+                    "badge_class": "v-chip-safe",
+                    "command": f"bundle update {cmd_subpkg}",
+                    "validation": "bundle exec rails test",
+                    "diff": diff_sm,
+                }
+            )
+
+    if r_abs and " or " not in str(r_abs):
+        diff_abs = generate_remediation_diff(
+            manifest_path, rails_line_idx, rails_decl, r_abs, "ruby", "rails"
+        )
+        if diff_abs:
+            rails_options.append(
+                {
+                    "id": "major",
+                    "label": f"Major rails: v{_clean_version_str(r_abs)}",
+                    "badge": "Major / Breaking",
+                    "badge_class": "v-chip-major",
+                    "command": f"bundle update {cmd_subpkg}",
+                    "validation": "bundle exec rails test",
+                    "diff": diff_abs,
+                }
+            )
 
     diagnostic_msg = (
         f"'{name}' is a core Ruby on Rails component with strict version coupling to the 'rails' framework. "
@@ -11164,85 +11199,6 @@ def _clean_version_str(v):
     return RE_OPERATOR_PREFIX.sub("", v)
 
 
-def _filter_remediation_versions(installed, declared, patch, sm, abs_ver):
-    """Filters out patch, same-major, and absolute remediation versions if they match installed/declared or are redundant."""
-    clean_inst_v = _clean_version_str(installed)
-    clean_decl_v = _clean_version_str(declared)
-
-    clean_patch = _clean_version_str(patch) if patch else None
-    if clean_patch and clean_patch in {clean_inst_v, clean_decl_v}:
-        patch = None
-        clean_patch = None
-
-    clean_sm = _clean_version_str(sm) if sm else None
-    if clean_sm and (
-        clean_sm in {clean_inst_v, clean_decl_v} or clean_sm == clean_patch
-    ):
-        sm = None
-        clean_sm = None
-
-    clean_abs = _clean_version_str(abs_ver) if abs_ver else None
-    if (
-        abs_ver
-        and " or " not in str(abs_ver)
-        and clean_abs
-        and (
-            clean_abs in {clean_inst_v, clean_decl_v}
-            or clean_abs == clean_sm
-            or clean_abs == clean_patch
-        )
-    ):
-        abs_ver = None
-
-    return patch, sm, abs_ver
-
-
-def _build_standard_remediation_options(
-    manifest_path,
-    line_idx,
-    decl,
-    patch,
-    sm,
-    abs_ver,
-    tech,
-    pkg_name,
-    cmd=None,
-    val=None,
-    label_suffix="",
-):
-    """Builds standard Patch, Minor, and Major remediation option objects."""
-    options = []
-    suffix = f" {label_suffix}" if label_suffix else ""
-    specs = [
-        ("patch", patch, f"Patch{suffix}: v", "Patch / Bugfix", "v-chip-ok"),
-        ("minor", sm, f"Minor{suffix}: v", "Minor / Feature", "v-chip-safe"),
-        ("major", abs_ver, f"Major{suffix}: v", "Major / Breaking", "v-chip-major"),
-    ]
-    for opt_id, ver, prefix, badge, badge_cls in specs:
-        if not ver or (opt_id == "major" and " or " in str(ver)):
-            continue
-        diff = (
-            generate_remediation_diff(
-                manifest_path, line_idx, decl, ver, tech, pkg_name
-            )
-            if line_idx
-            else generate_addition_remediation_diff(manifest_path, pkg_name, ver, tech)
-        )
-        if diff:
-            options.append(
-                {
-                    "id": opt_id,
-                    "label": f"{prefix}{_clean_version_str(ver)}",
-                    "badge": badge,
-                    "badge_class": badge_cls,
-                    "command": cmd,
-                    "validation": val,
-                    "diff": diff,
-                }
-            )
-    return options
-
-
 def _populate_direct_strategies(
     r,
     manifest_path,
@@ -11316,20 +11272,74 @@ def _populate_direct_strategies(
                     }
                 )
 
-    direct_options.extend(
-        _build_standard_remediation_options(
-            manifest_path,
-            found_line_idx,
-            declared,
-            latest_patch,
-            latest_sm,
-            latest_abs,
-            tech,
-            name,
-            cmd_direct,
-            val_direct,
+    if latest_patch:
+        diff_patch = (
+            generate_remediation_diff(
+                manifest_path, found_line_idx, declared, latest_patch, tech, name
+            )
+            if found_line_idx
+            else generate_addition_remediation_diff(
+                manifest_path, name, latest_patch, tech
+            )
         )
-    )
+        if diff_patch:
+            direct_options.append(
+                {
+                    "id": "patch",
+                    "label": f"Patch: v{_clean_version_str(latest_patch)}",
+                    "badge": "Patch / Bugfix",
+                    "badge_class": "v-chip-ok",
+                    "command": cmd_direct,
+                    "validation": val_direct,
+                    "diff": diff_patch,
+                }
+            )
+
+    if latest_sm:
+        diff_sm = (
+            generate_remediation_diff(
+                manifest_path, found_line_idx, declared, latest_sm, tech, name
+            )
+            if found_line_idx
+            else generate_addition_remediation_diff(
+                manifest_path, name, latest_sm, tech
+            )
+        )
+        if diff_sm:
+            direct_options.append(
+                {
+                    "id": "minor",
+                    "label": f"Minor: v{_clean_version_str(latest_sm)}",
+                    "badge": "Minor / Feature",
+                    "badge_class": "v-chip-safe",
+                    "command": cmd_direct,
+                    "validation": val_direct,
+                    "diff": diff_sm,
+                }
+            )
+
+    if latest_abs and " or " not in str(latest_abs):
+        diff_abs = (
+            generate_remediation_diff(
+                manifest_path, found_line_idx, declared, latest_abs, tech, name
+            )
+            if found_line_idx
+            else generate_addition_remediation_diff(
+                manifest_path, name, latest_abs, tech
+            )
+        )
+        if diff_abs:
+            direct_options.append(
+                {
+                    "id": "major",
+                    "label": f"Major: v{_clean_version_str(latest_abs)}",
+                    "badge": "Major / Breaking",
+                    "badge_class": "v-chip-major",
+                    "command": cmd_direct,
+                    "validation": val_direct,
+                    "diff": diff_abs,
+                }
+            )
 
     if direct_options:
         return [
@@ -11357,11 +11367,6 @@ def _populate_parent_strategies(
     if not r.get("required_by"):
         return strategies
 
-    # Optimization: Pre-index results by (name, project_path) for O(1) hash map lookups instead of O(N) list searches
-    results_by_name_path = {
-        (item.get("name"), item.get("project_path")): item for item in results
-    }
-
     seen_parents = set()
     valid_parents = []
     for parent_name in r.get("required_by", []):
@@ -11369,8 +11374,14 @@ def _populate_parent_strategies(
             continue
         seen_parents.add(parent_name)
 
-        parent_candidate = results_by_name_path.get(
-            (parent_name, r.get("project_path"))
+        parent_candidate = next(
+            (
+                item
+                for item in results
+                if item.get("name") == parent_name
+                and item.get("project_path") == r.get("project_path")
+            ),
+            None,
         )
         if not parent_candidate:
             continue
@@ -11396,26 +11407,75 @@ def _populate_parent_strategies(
             "latest"
         )
 
-        p_patch, p_sm, p_abs = _filter_remediation_versions(
-            p_clean_inst, p_decl, p_patch, p_sm, p_abs
-        )
+        p_clean_inst_v = _clean_version_str(p_clean_inst)
+        p_clean_decl_v = _clean_version_str(p_decl)
 
+        if p_patch and _clean_version_str(p_patch) in (p_clean_inst_v, p_clean_decl_v):
+            p_patch = None
+        if p_sm and (
+            _clean_version_str(p_sm) in (p_clean_inst_v, p_clean_decl_v)
+            or _clean_version_str(p_sm) == _clean_version_str(p_patch)
+        ):
+            p_sm = None
+        if p_abs and (
+            _clean_version_str(p_abs) in (p_clean_inst_v, p_clean_decl_v)
+            or _clean_version_str(p_abs) == _clean_version_str(p_sm)
+            or _clean_version_str(p_abs) == _clean_version_str(p_patch)
+        ):
+            p_abs = None
+
+        parent_options = []
         cmd_parent = f"bundle update {p_name} {name}" if tech == "ruby" else None
         val_parent = "bundle exec rails test" if tech == "ruby" else None
 
-        parent_options = _build_standard_remediation_options(
-            manifest_path,
-            parent_line_idx,
-            p_decl,
-            p_patch,
-            p_sm,
-            p_abs,
-            tech,
-            p_name,
-            cmd_parent,
-            val_parent,
-            label_suffix=p_name,
-        )
+        if p_patch:
+            p_diff = generate_remediation_diff(
+                manifest_path, parent_line_idx, p_decl, p_patch, tech, p_name
+            )
+            if p_diff:
+                parent_options.append(
+                    {
+                        "id": "patch",
+                        "label": f"Patch {p_name}: v{_clean_version_str(p_patch)}",
+                        "badge": "Patch / Bugfix",
+                        "badge_class": "v-chip-ok",
+                        "command": cmd_parent,
+                        "validation": val_parent,
+                        "diff": p_diff,
+                    }
+                )
+        if p_sm:
+            p_diff = generate_remediation_diff(
+                manifest_path, parent_line_idx, p_decl, p_sm, tech, p_name
+            )
+            if p_diff:
+                parent_options.append(
+                    {
+                        "id": "minor",
+                        "label": f"Minor {p_name}: v{_clean_version_str(p_sm)}",
+                        "badge": "Minor / Feature",
+                        "badge_class": "v-chip-safe",
+                        "command": cmd_parent,
+                        "validation": val_parent,
+                        "diff": p_diff,
+                    }
+                )
+        if p_abs:
+            p_diff = generate_remediation_diff(
+                manifest_path, parent_line_idx, p_decl, p_abs, tech, p_name
+            )
+            if p_diff:
+                parent_options.append(
+                    {
+                        "id": "major",
+                        "label": f"Major {p_name}: v{_clean_version_str(p_abs)}",
+                        "badge": "Major / Breaking",
+                        "badge_class": "v-chip-major",
+                        "command": cmd_parent,
+                        "validation": val_parent,
+                        "diff": p_diff,
+                    }
+                )
 
         if parent_options:
             target_v = p_abs or p_sm or p_patch
@@ -11758,9 +11818,29 @@ def populate_remediation_recommendations(results, default_project_path):
         latest_sm = r.get("latest_same_major")
         latest_abs = r.get("latest_absolute") or r.get("latest")
 
-        latest_patch, latest_sm, latest_abs = _filter_remediation_versions(
-            clean_installed, declared, latest_patch, latest_sm, latest_abs
-        )
+        clean_inst_v = _clean_version_str(clean_installed)
+        clean_decl_v = _clean_version_str(declared)
+
+        if latest_patch and _clean_version_str(latest_patch) in (
+            clean_inst_v,
+            clean_decl_v,
+        ):
+            latest_patch = None
+        if latest_sm and (
+            _clean_version_str(latest_sm) in (clean_inst_v, clean_decl_v)
+            or _clean_version_str(latest_sm) == _clean_version_str(latest_patch)
+        ):
+            latest_sm = None
+        if (
+            latest_abs
+            and " or " not in str(latest_abs)
+            and (
+                _clean_version_str(latest_abs) in (clean_inst_v, clean_decl_v)
+                or _clean_version_str(latest_abs) == _clean_version_str(latest_sm)
+                or _clean_version_str(latest_abs) == _clean_version_str(latest_patch)
+            )
+        ):
+            latest_abs = None
 
         manifest_files = _get_manifest_files(
             project_path, tech, r.get("is_engine", False)
@@ -12863,8 +12943,7 @@ def check_for_updates():
         with safe_urlopen(req, timeout=5) as response:
             content = response.read(1024).decode("utf-8")
 
-        # Optimization: Use global compiled regex to avoid cache lookup and call overhead
-        match = RE_KEVLAR_VERSION.search(content)
+        match = re.search(r'VERSION\s*=\s*["\']([^"\']+)["\']', content)
         if match:
             latest_version = match.group(1)
     except Exception as e:
