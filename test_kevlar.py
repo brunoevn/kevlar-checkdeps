@@ -3176,6 +3176,79 @@ class TestKevlar(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_lru_cached_property_regex_and_resolution(self):
+        """Validates that _get_maven_nuget_prop_regex and _get_gradle_prop_regex cache at module level
+        and resolve Maven, NuGet, and Gradle placeholders correctly with cache hits.
+        """
+        import shutil
+        import tempfile
+
+        # 1. Verify module-level LRU cache persistence
+        kevlar._get_maven_nuget_prop_regex.cache_clear()
+        kevlar._get_gradle_prop_regex.cache_clear()
+
+        r1 = kevlar._get_maven_nuget_prop_regex("testProp")
+        r2 = kevlar._get_maven_nuget_prop_regex("testProp")
+        self.assertIs(r1, r2)
+        info_m = kevlar._get_maven_nuget_prop_regex.cache_info()
+        self.assertGreaterEqual(info_m.hits, 1)
+
+        g1 = kevlar._get_gradle_prop_regex("testGradleProp")
+        g2 = kevlar._get_gradle_prop_regex("testGradleProp")
+        self.assertIs(g1, g2)
+        info_g = kevlar._get_gradle_prop_regex.cache_info()
+        self.assertGreaterEqual(info_g.hits, 1)
+
+        # 2. Test NuGet placeholder resolution via generate_remediation_diff
+        temp_dir = tempfile.mkdtemp()
+        try:
+            nuget_csproj = (
+                '<Project Sdk="Microsoft.NET.Sdk">\n'
+                '    <PropertyGroup>\n'
+                '        <NewtonsoftVersion>12.0.1</NewtonsoftVersion>\n'
+                '    </PropertyGroup>\n'
+                '    <ItemGroup>\n'
+                '        <PackageReference Include="Newtonsoft.Json" Version="$(NewtonsoftVersion)" />\n'
+                '    </ItemGroup>\n'
+                '</Project>\n'
+            )
+            csproj_path = os.path.join(temp_dir, "App.csproj")
+            with open(csproj_path, "w", encoding="utf-8") as f:
+                f.write(nuget_csproj)
+
+            diff_nuget = kevlar.generate_remediation_diff(
+                csproj_path,
+                line_index=6,
+                declared_ver="12.0.1",
+                latest_ver="13.0.3",
+                tech="nuget",
+                package_name="Newtonsoft.Json",
+            )
+            self.assertIsNotNone(diff_nuget)
+            self.assertEqual(diff_nuget["line_number"], 3)  # Resolved to <NewtonsoftVersion> property
+            self.assertTrue(
+                any(
+                    '<span class="diff-add-chunk">13.0.3</span>' in item["html"]
+                    for item in diff_nuget["suggested_code"]
+                )
+            )
+
+            # 3. Repeat call to verify cache hit across multiple resolutions
+            hits_before = kevlar._get_maven_nuget_prop_regex.cache_info().hits
+            diff_nuget_repeat = kevlar.generate_remediation_diff(
+                csproj_path,
+                line_index=6,
+                declared_ver="12.0.1",
+                latest_ver="13.0.3",
+                tech="nuget",
+                package_name="Newtonsoft.Json",
+            )
+            self.assertIsNotNone(diff_nuget_repeat)
+            hits_after = kevlar._get_maven_nuget_prop_regex.cache_info().hits
+            self.assertGreaterEqual(hits_after, hits_before + 1)
+        finally:
+            shutil.rmtree(temp_dir)
+
     def test_npm_checker_only_engines(self):
         import json
         import shutil
