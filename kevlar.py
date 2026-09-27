@@ -357,6 +357,7 @@ def _get_gradle_prop_regex(prop_name_val):
         + r'\s*=\s*["\']([^"\']+)["\']'
     )
 
+
 RE_MARKER_TOKEN = re.compile(
     r"\s*("
     r"\bnot\s+in\b|\bin\b|"
@@ -2245,9 +2246,10 @@ def parse_yarn_lock(filepath):
                             )
                             current_integrity = format_yarn_berry_checksum(checksum_val)
 
-                        elif any(
-                            stripped.startswith(k)
-                            for k in (
+                        # Optimization: Use direct tuple passing with startswith() instead of generator expression with any()
+                        # to leverage Python's C-level string matching and avoid iterator overhead in yarn.lock parsing loop.
+                        elif stripped.startswith(
+                            (
                                 "dependencies:",
                                 "optionalDependencies:",
                                 "peerDependencies:",
