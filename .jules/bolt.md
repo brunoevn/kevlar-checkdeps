@@ -32,3 +32,8 @@
 ## 2026-09-27 - Hoist Inner LRU-cached Regex Functions to Global Scope
 **Learning:** Defining inner functions decorated with `@functools.lru_cache` inside outer functions creates a new function object and a fresh, empty cache on every outer function invocation, completely invalidating the LRU cache benefits.
 **Action:** Always define `@functools.lru_cache`-decorated helper functions at the module level so the cache persists across invocations.
+
+## 2026-09-27 - Direct Tuple Passing for Prefix Matching in Hot Loops
+**Learning:** Using `any(s.startswith(k) for k in (...))` allocates a generator expression and introduces iterator overhead per line in hot parsing loops. Python's `str.startswith()` natively accepts a tuple of strings, which executes at C-level speed and reuses compile-time constant tuples with zero allocation overhead.
+**Action:** Always pass tuples directly to `str.startswith((...))` and `str.endswith((...))` instead of using generator expressions with `any()`.
+
