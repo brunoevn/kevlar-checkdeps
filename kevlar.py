@@ -334,6 +334,29 @@ SEMVER_REGEX = re.compile(
     r"(?:\+(?P<buildmetadata>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$"
 )
 
+
+@functools.lru_cache(maxsize=1024)
+def _get_maven_nuget_prop_regex(prop_name_val):
+    # Optimization: Cache property definition regexes at module level for Maven and NuGet to allow LRU cache reuse across calls
+    return re.compile(
+        r"<\s*"
+        + re.escape(prop_name_val)
+        + r"\s*>\s*(.*?)\s*<\s*/\s*"
+        + re.escape(prop_name_val)
+        + r"\s*>",
+        re.IGNORECASE,
+    )
+
+
+@functools.lru_cache(maxsize=1024)
+def _get_gradle_prop_regex(prop_name_val):
+    # Optimization: Cache property definition regexes at module level for Gradle to allow LRU cache reuse across calls
+    return re.compile(
+        r"^\s*([a-zA-Z0-9_.-]+)?\s*"
+        + re.escape(prop_name_val)
+        + r'\s*=\s*["\']([^"\']+)["\']'
+    )
+
 RE_MARKER_TOKEN = re.compile(
     r"\s*("
     r"\bnot\s+in\b|\bin\b|"
@@ -10225,25 +10248,6 @@ def _resolve_property_placeholder(
     manifest_path, target_text, tech, lines, line_idx_to_change, declared_ver
 ):
     """Resolves Maven/Gradle/NuGet property placeholders to concrete files and line numbers."""
-
-    @functools.lru_cache(maxsize=1024)
-    def _get_maven_nuget_prop_regex(prop_name_val):
-        return re.compile(
-            r"<\s*"
-            + re.escape(prop_name_val)
-            + r"\s*>\s*(.*?)\s*<\s*/\s*"
-            + re.escape(prop_name_val)
-            + r"\s*>",
-            re.IGNORECASE,
-        )
-
-    @functools.lru_cache(maxsize=1024)
-    def _get_gradle_prop_regex(prop_name_val):
-        return re.compile(
-            r"^\s*([a-zA-Z0-9_.-]+)?\s*"
-            + re.escape(prop_name_val)
-            + r'\s*=\s*["\']([^"\']+)["\']'
-        )
 
     def _search_lines_for_property(lines_list, prop_name_val, tech_type):
         if tech_type in {"maven", "nuget"}:

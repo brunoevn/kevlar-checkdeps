@@ -28,3 +28,7 @@
 ## 2026-08-27 - Result Pre-indexing for Remediation Strategy Lookups
 **Learning:** Performing a linear search `next(item for item in results if item.get("name") == parent_name ...)` inside loops over transitive dependencies creates an O(K * M) bottleneck. Pre-indexing results into a dictionary keyed by `(name, project_path)` reduces lookup time to O(1) per parent.
 **Action:** Pre-index multi-attribute candidate lists into hashtables/dictionaries prior to running item-by-item lookup loops.
+
+## 2026-09-27 - Hoist Inner LRU-cached Regex Functions to Global Scope
+**Learning:** Defining inner functions decorated with `@functools.lru_cache` inside outer functions creates a new function object and a fresh, empty cache on every outer function invocation, completely invalidating the LRU cache benefits.
+**Action:** Always define `@functools.lru_cache`-decorated helper functions at the module level so the cache persists across invocations.
