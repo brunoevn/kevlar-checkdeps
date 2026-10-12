@@ -1449,6 +1449,117 @@ class TestKevlar(unittest.TestCase):
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
+    def test_clean_jsonc(self):
+        import json
+        raw = """{
+            // line comment
+            /* block comment */
+            "name": "example",
+            "url": "https://example.com/a//b",
+            "escaped": "foo \\" bar",
+            "deps": [
+                "a",
+                "b", // inline comment
+            ],
+            "obj": {
+                "key": "val",
+            },
+        }"""
+        cleaned = kevlar.clean_jsonc(raw)
+        data = json.loads(cleaned)
+        self.assertEqual(data["name"], "example")
+        self.assertEqual(data["url"], "https://example.com/a//b")
+        self.assertEqual(data["deps"], ["a", "b"])
+        self.assertEqual(data["obj"], {"key": "val"})
+
+    def test_parse_bun_lock(self):
+        import tempfile
+        content = """{
+  "lockfileVersion": 2,
+  "workspaces": {
+    "": {
+      "dependencies": {
+        "react": "^19.0.0",
+        "@scope/direct": "^1.0.0",
+      },
+      "devDependencies": {
+        "typescript": "^5.0.0",
+      },
+    },
+  },
+  "packages": {
+    "react": ["react@19.0.0", "", {"dependencies": {"loose-envify": "^1.1.0"}}, "sha512-reacthash=="],
+    "@scope/direct": ["@scope/direct@1.0.0", "", {}, "sha512-scopehash=="],
+    "typescript": ["typescript@5.0.0", "", {}, "sha512-tshash=="],
+    "react/loose-envify": ["loose-envify@1.1.0", "", {"dependencies": {"js-tokens": "^4.0.0"}}, "sha512-loosehash=="],
+    "js-tokens": ["js-tokens@4.0.0", "", {}, "sha512-tokenhash=="],
+  },
+}"""
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".lock", encoding="utf-8") as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        try:
+            resolved, parents, integrity, direct_versions = kevlar.parse_bun_lock(tmp_path)
+            self.assertEqual(resolved.get("react"), ["19.0.0"])
+            self.assertEqual(resolved.get("@scope/direct"), ["1.0.0"])
+            self.assertEqual(resolved.get("typescript"), ["5.0.0"])
+            self.assertEqual(resolved.get("loose-envify"), ["1.1.0"])
+            self.assertEqual(resolved.get("js-tokens"), ["4.0.0"])
+
+            # Check direct_versions
+            self.assertEqual(direct_versions.get("react"), "19.0.0")
+            self.assertEqual(direct_versions.get("@scope/direct"), "1.0.0")
+            self.assertEqual(direct_versions.get("typescript"), "5.0.0")
+
+            # Check parents
+            self.assertIn("root", parents.get("react", []))
+            self.assertIn("root", parents.get("@scope/direct", []))
+            self.assertIn("root", parents.get("typescript", []))
+            self.assertIn("react", parents.get("loose-envify", []))
+            self.assertIn("loose-envify", parents.get("js-tokens", []))
+
+            # Check integrity
+            self.assertEqual(integrity.get(("react", "19.0.0")), "sha512-reacthash==")
+            self.assertEqual(integrity.get(("@scope/direct", "1.0.0")), "sha512-scopehash==")
+            self.assertEqual(integrity.get(("loose-envify", "1.1.0")), "sha512-loosehash==")
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def test_find_npm_files_bun_lock(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pkg_file = os.path.join(tmpdir, "package.json")
+            bun_file = os.path.join(tmpdir, "bun.lock")
+            with open(pkg_file, "w", encoding="utf-8") as f:
+                f.write('{"name": "test", "packageManager": "bun@1.2.0"}')
+            with open(bun_file, "w", encoding="utf-8") as f:
+                f.write('{"lockfileVersion": 2}')
+
+            found_pkg, found_lock = kevlar.find_npm_files(tmpdir)
+            self.assertEqual(found_pkg, pkg_file)
+            self.assertEqual(found_lock, bun_file)
+
+            found_pkg2, found_lock2 = kevlar.find_npm_files(bun_file)
+            self.assertEqual(found_pkg2, pkg_file)
+            self.assertEqual(found_lock2, bun_file)
+
+    def test_prepare_npm_lock_data_bun_lock(self):
+        import shutil
+        import tempfile
+        content = '{"lockfileVersion": 2, "packages": {"foo": ["foo@1.0.0", "", {}, "sha512-foohash=="]}}'
+        td = tempfile.mkdtemp()
+        bun_lock_path = os.path.join(td, "bun.lock")
+        try:
+            with open(bun_lock_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            lock_data, parents_data, integrity_data, direct_ver = kevlar._prepare_npm_lock_data(bun_lock_path)
+            self.assertIn("foo", lock_data)
+            self.assertEqual(integrity_data.get(("foo", "1.0.0")), "sha512-foohash==")
+            self.assertEqual(direct_ver.get("foo"), "1.0.0")
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+
 
     def test_python_lock_parsers(self):
         import json
@@ -3173,6 +3284,79 @@ class TestKevlar(unittest.TestCase):
             self.assertEqual(diff_gradle["line_number"], 2)  # Resolved to ext block variable line
             self.assertTrue(any('<span class="diff-add-chunk">4.3.30.RELEASE</span>' in item["html"] for item in diff_gradle["suggested_code"]))
             
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_lru_cached_property_regex_and_resolution(self):
+        """Validates that _get_maven_nuget_prop_regex and _get_gradle_prop_regex cache at module level
+        and resolve Maven, NuGet, and Gradle placeholders correctly with cache hits.
+        """
+        import shutil
+        import tempfile
+
+        # 1. Verify module-level LRU cache persistence
+        kevlar._get_maven_nuget_prop_regex.cache_clear()
+        kevlar._get_gradle_prop_regex.cache_clear()
+
+        r1 = kevlar._get_maven_nuget_prop_regex("testProp")
+        r2 = kevlar._get_maven_nuget_prop_regex("testProp")
+        self.assertIs(r1, r2)
+        info_m = kevlar._get_maven_nuget_prop_regex.cache_info()
+        self.assertGreaterEqual(info_m.hits, 1)
+
+        g1 = kevlar._get_gradle_prop_regex("testGradleProp")
+        g2 = kevlar._get_gradle_prop_regex("testGradleProp")
+        self.assertIs(g1, g2)
+        info_g = kevlar._get_gradle_prop_regex.cache_info()
+        self.assertGreaterEqual(info_g.hits, 1)
+
+        # 2. Test NuGet placeholder resolution via generate_remediation_diff
+        temp_dir = tempfile.mkdtemp()
+        try:
+            nuget_csproj = (
+                '<Project Sdk="Microsoft.NET.Sdk">\n'
+                '    <PropertyGroup>\n'
+                '        <NewtonsoftVersion>12.0.1</NewtonsoftVersion>\n'
+                '    </PropertyGroup>\n'
+                '    <ItemGroup>\n'
+                '        <PackageReference Include="Newtonsoft.Json" Version="$(NewtonsoftVersion)" />\n'
+                '    </ItemGroup>\n'
+                '</Project>\n'
+            )
+            csproj_path = os.path.join(temp_dir, "App.csproj")
+            with open(csproj_path, "w", encoding="utf-8") as f:
+                f.write(nuget_csproj)
+
+            diff_nuget = kevlar.generate_remediation_diff(
+                csproj_path,
+                line_index=6,
+                declared_ver="12.0.1",
+                latest_ver="13.0.3",
+                tech="nuget",
+                package_name="Newtonsoft.Json",
+            )
+            self.assertIsNotNone(diff_nuget)
+            self.assertEqual(diff_nuget["line_number"], 3)  # Resolved to <NewtonsoftVersion> property
+            self.assertTrue(
+                any(
+                    '<span class="diff-add-chunk">13.0.3</span>' in item["html"]
+                    for item in diff_nuget["suggested_code"]
+                )
+            )
+
+            # 3. Repeat call to verify cache hit across multiple resolutions
+            hits_before = kevlar._get_maven_nuget_prop_regex.cache_info().hits
+            diff_nuget_repeat = kevlar.generate_remediation_diff(
+                csproj_path,
+                line_index=6,
+                declared_ver="12.0.1",
+                latest_ver="13.0.3",
+                tech="nuget",
+                package_name="Newtonsoft.Json",
+            )
+            self.assertIsNotNone(diff_nuget_repeat)
+            hits_after = kevlar._get_maven_nuget_prop_regex.cache_info().hits
+            self.assertGreaterEqual(hits_after, hits_before + 1)
         finally:
             shutil.rmtree(temp_dir)
 
