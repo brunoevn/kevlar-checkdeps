@@ -11,7 +11,7 @@ Designed with a modular and extensible architecture, it supports checking direct
 ## Key Features
 
 - **Multi-Ecosystem Support**: Audits:
-  - **Node.js (`npm`) & Engines**: supporting `package.json` (including `peerDependencies` and `optionalDependencies`), `package-lock.json`, Yarn `yarn.lock` (supporting both Yarn Classic v1 and Yarn Berry v2/v3/v4 modern formats with checksum normalization), and pnpm `pnpm-lock.yaml` (supporting lockfile v5, v6, and v9). Audits declared Node.js version constraints (`engines.node`, `.nvmrc`, `.node-version`) against EOL and maintenance schedules fetched dynamically from official sources.
+  - **Node.js (`npm`) & Engines**: supporting `package.json` (including `peerDependencies` and `optionalDependencies`), `package-lock.json`, Yarn `yarn.lock` (supporting both Yarn Classic v1 and Yarn Berry v2/v3/v4 modern formats with checksum normalization), pnpm `pnpm-lock.yaml` (supporting lockfile v5, v6, and v9), and Bun `bun.lock` (Bun v1.2+ JSONC text format). Audits declared Node.js version constraints (`engines.node`, `.nvmrc`, `.node-version`) against EOL and maintenance schedules fetched dynamically from official sources.
   - **Python (`pip`)**: supporting `requirements.txt` (including `-r` file inclusions, PEP 508 environment markers, and direct `@` URLs), Poetry `poetry.lock` + `pyproject.toml`, Pipenv `Pipfile.lock`, and PDM `pdm.lock`.
   - **.NET (`nuget`)**: supporting C# `.csproj`, VB.NET `.vbproj`, F# `.fsproj`, Solution files (`.sln`), and Central Package Management (`Directory.Packages.props`).
   - **PHP (`php`)**: supporting `composer.json` and `composer.lock`.
@@ -30,7 +30,7 @@ Designed with a modular and extensible architecture, it supports checking direct
 - **Security Vulnerability Audits**: Queries the public Google OSV database to identify active vulnerabilities, including CVE/GHSA IDs, CVSS vectors, and advisory summaries.
 - **Malicious Code Detection (`MAL-`)**: Automatically classifies packages flagged with `MAL-` vulnerability IDs (indicating known malicious payload distributions) under a high-priority `malicious` severity. These threats are prioritized at the top of all reports, decorated with dedicated UI indicators (such as `☠️ MALICIOUS CODE` badges, custom glow filters in HTML reports, and a dedicated **`Malicious`** stat card positioned directly above `Outdated`), tracked separately in final summaries, and can be isolated via interactive dashboard filters.
 - **Transitive Parent Tracing**:
-  - For `npm`: Recursively builds a dependency graph from `package-lock.json`, Yarn `yarn.lock`, or pnpm `pnpm-lock.yaml` (including workspace `importers` blocks).
+  - For `npm`: Recursively builds a dependency graph from `package-lock.json`, Yarn `yarn.lock`, pnpm `pnpm-lock.yaml`, or Bun `bun.lock` (including workspace `importers` blocks).
   - For `pip`: Parses transitives from lockfiles (`poetry.lock`, `Pipfile.lock`, `pdm.lock`) or `# via parent_name` comments inside `requirements.txt`.
   - For `nuget`: Reconstructs the parent-child graph from `obj/project.assets.json`.
   - For `php`: Reconstructs the parent-child graph from `composer.lock`.
@@ -44,7 +44,7 @@ Designed with a modular and extensible architecture, it supports checking direct
 - **Terminal Compatibility Fallback**: Automatically detects standard terminal encoding capabilities, switching seamlessly from Unicode characters to clean ASCII frames to prevent encoding crashes on Windows consoles.
 - **JSON, Markdown, HTML & SARIF Exports**: Supports exporting results to formatted Markdown tables, raw JSON datasets, interactive HTML dashboards, or standard SARIF v2.1.0 JSON reports.
 - **Lockfile & Registry Checksum Auditing**:
-  - For Node.js (`npm`), cross-validates local lockfile integrity hashes against official registry metadata, flagging **Missing Checksums**, **Weak Algorithms** (SHA-1), and critical **Integrity Mismatches**.
+  - For Node.js (`npm`), cross-validates local lockfile integrity hashes (from `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, or `bun.lock`) against official registry metadata, flagging **Missing Checksums**, **Weak Algorithms** (SHA-1), and critical **Integrity Mismatches**.
   - For Go (`go`), parses `go.sum` and cross-validates cryptographic `h1:` hashes against Google's official Go Checksum Database (`sum.golang.org`), flagging missing lockfile checksums and critical integrity mismatches.
 - **Advanced HTML Filtering Controls**: Interactive HTML dashboards include:
   - **AND Intersection Filtering**: Combine multiple filters (e.g., *Outdated* + *Vulnerable*) to show only packages matching all selected categories.
@@ -128,9 +128,12 @@ python kevlar.py --tech nuget --path ./dotnet_project --vuls
 
 ### 3. Scan All Dependencies (Direct + Transitive)
 Add the `--all` (or `-a`) flag to scan the entire tree resolved in lockfiles/assets:
-- **For Node.js (npm)**:
+- **For Node.js (npm, yarn, pnpm, bun)**:
   ```powershell
   python kevlar.py --tech npm --path ./nodejs_project --all --vuls
+
+  # Or explicitly specify a lockfile (e.g. Bun lockfile)
+  python kevlar.py --path ./nodejs_project --lockfile ./nodejs_project/bun.lock --all
   ```
 - **For .NET (nuget)**:
   ```powershell
@@ -203,7 +206,8 @@ python kevlar.py --update
 | `--version` | `-V` | | Show program's version number and exit. |
 | `--help` | `-h` | | Show help message and exit. |
 | `--tech` | `-t` | `"auto"` | The package manager / technology to check. Choices: `npm`, `pip`, `nuget`, `php`, `maven`, `go`, `rust`, `ruby`, `gradle`, `android`, `auto`. When omitted, it automatically detects the technology at the target `--path`. |
-| `--path` | `-p` | `.` | Directory containing the package files (e.g. `.csproj`, `composer.json`, `package.json`, `pom.xml`, `go.mod`, `requirements.txt`, `Cargo.toml`, `Gemfile`, `build.gradle`, `libs.versions.toml`, etc.). |
+| `--path` | `-p` | `.` | Directory containing the package files (e.g. `.csproj`, `composer.json`, `package.json`, `pom.xml`, `go.mod`, `requirements.txt`, `Cargo.toml`, `Gemfile`, `build.gradle`, `libs.versions.toml`, etc.), or direct file path to a manifest/lockfile. |
+| `--lockfile` | `-l` | `None` | Explicit path to a lockfile (e.g. `bun.lock`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`). When omitted, Kevlar automatically resolves the active lockfile or prioritizes by `package.json` `packageManager` / file modification time. |
 | `--vuls` | `-v` | `False` | Enable security vulnerability queries via Google OSV API. |
 | `--all` | `-a` | `False` | Scan all dependencies resolved in lockfile, rather than direct ones. |
 | `--concurrent` | `-c` | `10` | Number of concurrent network request threads to run. |
