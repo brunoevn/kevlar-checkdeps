@@ -229,7 +229,14 @@ BORDER_CHARS = {
 # The "runner" key is populated at the bottom of the script to prevent NameErrors with checker functions.
 TECHNOLOGIES = {
     "npm": {
-        "files": ["package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml"],
+        "files": [
+            "package.json",
+            "package-lock.json",
+            "yarn.lock",
+            "pnpm-lock.yaml",
+            "bun.lock",
+            "bun.lockb",
+        ],
         "osv_ecosystem": "npm",
         "runner": None,
     },
@@ -2046,19 +2053,179 @@ def hex_to_base64(hex_str):
         return None
 
 
-def find_npm_files(base_path):
-    """Finds package.json and lockfile (package-lock.json, yarn.lock, pnpm-lock.yaml) in path."""
+def clean_jsonc(text):
+    """Strips comments (// and /* ... */) and trailing commas from JSONC text."""
+    # Pass 1: Remove comments while respecting strings
+    no_comments = []
+    in_string = False
+    escape = False
+    i = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if in_string:
+            no_comments.append(c)
+            if escape:
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == '"':
+                in_string = False
+            i += 1
+        else:
+            if c == '"':
+                in_string = True
+                no_comments.append(c)
+                i += 1
+            elif c == "/" and i + 1 < n and text[i + 1] == "/":
+                i += 2
+                while i < n and text[i] != "\n":
+                    i += 1
+                if i < n:
+                    no_comments.append("\n")
+                    i += 1
+            elif c == "/" and i + 1 < n and text[i + 1] == "*":
+                i += 2
+                while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                    i += 1
+                i += 2
+            else:
+                no_comments.append(c)
+                i += 1
+
+    intermediate = "".join(no_comments)
+
+    # Pass 2: Remove trailing commas before } or ] while respecting strings
+    out = []
+    in_string = False
+    escape = False
+    i = 0
+    n = len(intermediate)
+    while i < n:
+        c = intermediate[i]
+        if in_string:
+            out.append(c)
+            if escape:
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == '"':
+                in_string = False
+            i += 1
+        else:
+            if c == '"':
+                in_string = True
+                out.append(c)
+                i += 1
+            elif c == ",":
+                j = i + 1
+                while j < n and intermediate[j] in " \t\r\n":
+                    j += 1
+                if j < n and intermediate[j] in "}]":
+                    i += 1
+                else:
+                    out.append(c)
+                    i += 1
+            else:
+                out.append(c)
+                i += 1
+
+    return "".join(out)
+
+
+def find_npm_files(base_path, lockfile_override=None):
+    """Finds package.json and lockfile (package-lock.json, yarn.lock, pnpm-lock.yaml, bun.lock) in path."""
+    if lockfile_override:
+        resolved_override = None
+        if os.path.exists(lockfile_override):
+            resolved_override = lockfile_override
+        elif os.path.exists(os.path.join(base_path, lockfile_override)):
+            resolved_override = os.path.join(base_path, lockfile_override)
+
+        if resolved_override:
+            lock_path = resolved_override
+            if os.path.isfile(base_path) and base_path.endswith("package.json"):
+                pkg_path = base_path
+            elif os.path.isdir(base_path):
+                candidate = os.path.join(base_path, "package.json")
+                pkg_path = candidate if os.path.exists(candidate) else None
+            else:
+                candidate = os.path.join(
+                    os.path.dirname(resolved_override), "package.json"
+                )
+                pkg_path = candidate if os.path.exists(candidate) else None
+            return (pkg_path, lock_path)
+        else:
+            print(
+                f"{COLOR_YELLOW}{ICON_WARN} Specified lockfile not found: {lockfile_override}{COLOR_RESET}"
+            )
+
+    if os.path.isfile(base_path):
+        basename = os.path.basename(base_path)
+        if basename in (
+            "package-lock.json",
+            "yarn.lock",
+            "pnpm-lock.yaml",
+            "bun.lock",
+            "bun.lockb",
+        ):
+            candidate = os.path.join(os.path.dirname(base_path), "package.json")
+            return (candidate if os.path.exists(candidate) else None, base_path)
+        if basename == "package.json":
+            dir_path = os.path.dirname(base_path) or "."
+            return find_npm_files(dir_path)
+
     pkg_path = os.path.join(base_path, "package.json")
+    pkg_exists = os.path.exists(pkg_path)
 
-    lock_files = ["package-lock.json", "yarn.lock", "pnpm-lock.yaml"]
+    lock_files = [
+        "bun.lock",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "bun.lockb",
+        "package-lock.json",
+    ]
+    existing_locks = [
+        lf for lf in lock_files if os.path.exists(os.path.join(base_path, lf))
+    ]
+
     lock_path = None
-    for lf in lock_files:
-        path = os.path.join(base_path, lf)
-        if os.path.exists(path):
-            lock_path = path
-            break
+    if existing_locks:
+        if len(existing_locks) == 1:
+            lock_path = os.path.join(base_path, existing_locks[0])
+        else:
+            preferred_lf = None
+            if pkg_exists:
+                try:
+                    with open(pkg_path, "r", encoding="utf-8") as pf:
+                        pkg_raw = json.load(pf)
+                        pm = pkg_raw.get("packageManager", "").lower()
+                        if "bun" in pm and "bun.lock" in existing_locks:
+                            preferred_lf = "bun.lock"
+                        elif "pnpm" in pm and "pnpm-lock.yaml" in existing_locks:
+                            preferred_lf = "pnpm-lock.yaml"
+                        elif "yarn" in pm and "yarn.lock" in existing_locks:
+                            preferred_lf = "yarn.lock"
+                        elif "npm" in pm and "package-lock.json" in existing_locks:
+                            preferred_lf = "package-lock.json"
+                except Exception:
+                    pass
 
-    return (pkg_path if os.path.exists(pkg_path) else None, lock_path)
+            if preferred_lf:
+                lock_path = os.path.join(base_path, preferred_lf)
+            else:
+                # Specialized package managers (bun, pnpm, yarn) take precedence over generic package-lock.json
+                specialized = [
+                    lf for lf in existing_locks if lf != "package-lock.json"
+                ]
+                candidates = specialized if specialized else existing_locks
+                # If multiple candidates remain, pick the newest modification time
+                lock_path = max(
+                    [os.path.join(base_path, lf) for lf in candidates],
+                    key=lambda p: os.path.getmtime(p),
+                )
+
+    return (pkg_path if pkg_exists else None, lock_path)
 
 
 def format_yarn_berry_checksum(checksum_val):
@@ -2599,6 +2766,102 @@ def parse_package_lock(filepath):
     except Exception as e:
         print(
             f"{COLOR_YELLOW}{ICON_WARN} Warning reading package-lock.json: {e}{COLOR_RESET}"
+        )
+        return {}, {}, {}, {}
+
+
+def parse_bun_lock(filepath):
+    """Parses bun.lock (Bun v1.2+ JSONC lockfile) to extract resolved versions, parent relations, and integrity hashes.
+    Returns:
+        tuple: (resolved, parents, integrity, direct_versions) where integrity is (name, version) -> integrity_str
+    """
+    resolved = {}
+    parents = {}
+    integrity_dict = {}
+    direct_versions = {}
+
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            raw = f.read()
+
+        data = json.loads(clean_jsonc(raw))
+
+        # 1. Process workspaces (direct dependencies have parent "root")
+        workspaces = data.get("workspaces", {})
+        if isinstance(workspaces, dict):
+            for ws_name, ws_info in workspaces.items():
+                if not isinstance(ws_info, dict):
+                    continue
+                for dep_type in (
+                    "dependencies",
+                    "devDependencies",
+                    "peerDependencies",
+                    "optionalDependencies",
+                ):
+                    deps = ws_info.get(dep_type, {})
+                    if isinstance(deps, dict):
+                        for child_name in deps:
+                            parents.setdefault(child_name, set()).add("root")
+
+        # 2. Process packages
+        packages = data.get("packages", {})
+        if isinstance(packages, dict):
+            for pkg_key, pkg_info in packages.items():
+                if not isinstance(pkg_info, list) or not pkg_info:
+                    continue
+
+                desc = pkg_info[0]
+                if not isinstance(desc, str):
+                    continue
+
+                if desc.startswith("@"):
+                    parts = desc[1:].rsplit("@", 1)
+                    pkg_name = "@" + parts[0]
+                    version = parts[1] if len(parts) > 1 else ""
+                else:
+                    parts = desc.rsplit("@", 1)
+                    pkg_name = parts[0]
+                    version = parts[1] if len(parts) > 1 else ""
+
+                if not pkg_name or not version:
+                    continue
+
+                resolved.setdefault(pkg_name, set()).add(version)
+
+                # If pkg_key matches pkg_name, it represents the top-level resolution
+                if pkg_key == pkg_name:
+                    direct_versions[pkg_name] = version
+
+                # Integrity hash
+                for item in pkg_info[1:]:
+                    if isinstance(item, str) and (
+                        item.startswith("sha512-")
+                        or item.startswith("sha256-")
+                        or item.startswith("sha1-")
+                    ):
+                        integrity_dict[(pkg_name, version)] = item
+                        break
+
+                # Child dependencies
+                for item in pkg_info[1:]:
+                    if isinstance(item, dict):
+                        for dep_type in (
+                            "dependencies",
+                            "devDependencies",
+                            "peerDependencies",
+                            "optionalDependencies",
+                        ):
+                            deps = item.get(dep_type, {})
+                            if isinstance(deps, dict):
+                                for child_name in deps:
+                                    parents.setdefault(child_name, set()).add(pkg_name)
+
+        parents_clean = {k: list(v) for k, v in parents.items()}
+        resolved_clean = {k: list(v) for k, v in resolved.items()}
+        return resolved_clean, parents_clean, integrity_dict, direct_versions
+    except Exception as e:
+        print(
+            f"{COLOR_YELLOW}{ICON_WARN} Warning reading bun.lock: {e}{COLOR_RESET}"
         )
         return {}, {}, {}, {}
 
@@ -3460,6 +3723,15 @@ def _prepare_npm_lock_data(lock_file):
         elif basename == "pnpm-lock.yaml":
             print(f"{COLOR_GRAY}{ICON_INFO} Reading pnpm-lock.yaml...{COLOR_RESET}")
             lock_data, parents_data, integrity_data = parse_pnpm_lock(lock_file)
+        elif basename == "bun.lock":
+            print(f"{COLOR_GRAY}{ICON_INFO} Reading bun.lock...{COLOR_RESET}")
+            lock_data, parents_data, integrity_data, direct_versions_lock = (
+                parse_bun_lock(lock_file)
+            )
+        elif basename == "bun.lockb":
+            print(
+                f"{COLOR_YELLOW}{ICON_WARN} bun.lockb is a binary format. Please run 'bun install' (Bun >=1.2) to generate bun.lock.{COLOR_RESET}"
+            )
     return lock_data, parents_data, integrity_data, direct_versions_lock
 
 
@@ -3588,7 +3860,8 @@ def _assign_npm_integrity_to_targets(targets, integrity_data):
 
 def run_npm_checker(args):
     """Main orchestrator for npm checker."""
-    pkg_file, lock_file = find_npm_files(args.path)
+    lock_override = getattr(args, "lockfile", None)
+    pkg_file, lock_file = find_npm_files(args.path, lockfile_override=lock_override)
 
     if not pkg_file and not lock_file:
         print(
@@ -10131,7 +10404,7 @@ def find_manifest_files(project_path, technology):
         return []
 
     tech_patterns = {
-        "npm": ["package.json"],
+        "npm": ["package.json", "bun.lock"],
         "pip": ["requirements.txt", "pyproject.toml", "Pipfile", "setup.py"],
         "nuget": [".csproj", ".vbproj", ".fsproj", "Directory.Packages.props"],
         "php": ["composer.json"],
@@ -12623,10 +12896,30 @@ TECHNOLOGIES["android"]["runner"] = run_gradle_checker
 
 
 def detect_technologies(dir_path):
-    """Detects which technologies are present in a given directory."""
+    """Detects which technologies are present in a given directory or file."""
     detected = []
-    if not os.path.exists(dir_path) or not os.path.isdir(dir_path):
+    if not os.path.exists(dir_path):
         return detected
+
+    if os.path.isfile(dir_path):
+        filename = os.path.basename(dir_path).lower()
+        for tech, info in TECHNOLOGIES.items():
+            matched = False
+            for pattern in info["files"]:
+                if pattern.startswith("."):
+                    if filename.endswith(pattern.lower()):
+                        matched = True
+                        break
+                else:
+                    if pattern.lower() == filename:
+                        matched = True
+                        break
+            if matched:
+                detected.append(tech)
+        if "gradle" in detected and "android" in detected:
+            detected.remove("android")
+        return detected
+
     try:
         files = os.listdir(dir_path)
     except Exception:
@@ -12958,6 +13251,12 @@ Examples:
         "-p",
         default=".",
         help="The directory path containing the package files (default: current directory).",
+    )
+    parser.add_argument(
+        "--lockfile",
+        "-l",
+        default=None,
+        help="Explicit path to a lockfile (e.g., bun.lock, package-lock.json, yarn.lock, pnpm-lock.yaml).",
     )
     parser.add_argument(
         "--all",
