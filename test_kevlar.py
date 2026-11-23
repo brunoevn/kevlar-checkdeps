@@ -5321,6 +5321,915 @@ require (
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_http_pool_keepalive_gzip_and_stale_retry(self):
+        """Test Phase 1 HTTP Keep-Alive connection reuse, transparent gzip decompression, and stale socket retry."""
+        import gzip
+        import json
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        payload_obj = {"status": "ok", "items": list(range(50))}
+        payload_bytes = json.dumps(payload_obj).encode("utf-8")
+        gz_bytes = gzip.compress(payload_bytes)
+        conn_counter = {"count": 0}
+        seen_gzip_header = {"yes": False}
+
+        class CountingServer(ThreadingHTTPServer):
+            def get_request(self):
+                conn_counter["count"] += 1
+                return super().get_request()
+
+        class KeepAliveGzipHandler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self):
+                ae = self.headers.get("Accept-Encoding", "")
+                if "gzip" in ae.lower():
+                    seen_gzip_header["yes"] = True
+                    body = gz_bytes
+                    self.send_response(200)
+                    self.send_header("Content-Encoding", "gzip")
+                else:
+                    body = payload_bytes
+                    self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        kevlar._HTTP_POOL.close_all()
+        server = CountingServer(("127.0.0.1", 0), KeepAliveGzipHandler)
+        port = server.server_address[1]
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        try:
+            url = f"http://127.0.0.1:{port}/keepalive-test"
+            for _ in range(5):
+                with kevlar.safe_urlopen(url, timeout=5) as resp:
+                    parsed = json.loads(resp.read().decode("utf-8"))
+                    self.assertEqual(parsed, payload_obj)
+            self.assertTrue(seen_gzip_header["yes"])
+            self.assertEqual(conn_counter["count"], 1)
+
+            # Force stale socket by closing server-side sockets cleanly via a fresh close-after-1 server
+            kevlar._HTTP_POOL.close_all()
+        finally:
+            server.shutdown()
+            server.server_close()
+
+        req_num = {"n": 0}
+
+        class DropSecondHandler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self):
+                req_num["n"] += 1
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload_bytes)))
+                self.end_headers()
+                self.wfile.write(payload_bytes)
+                if req_num["n"] == 1:
+                    # Abruptly close socket after 1st response while client thinks it is keep-alive
+                    self.close_connection = True
+
+            def log_message(self, *args):
+                pass
+
+        server2 = ThreadingHTTPServer(("127.0.0.1", 0), DropSecondHandler)
+        port2 = server2.server_address[1]
+        t2 = threading.Thread(target=server2.serve_forever, daemon=True)
+        t2.start()
+        try:
+            url2 = f"http://127.0.0.1:{port2}/stale-test"
+            with kevlar.safe_urlopen(url2, timeout=5) as r1:
+                self.assertEqual(json.loads(r1.read().decode("utf-8")), payload_obj)
+            # Second request encounters closed pooled socket and transparently reconnects
+            with kevlar.safe_urlopen(url2, timeout=5) as r2:
+                self.assertEqual(json.loads(r2.read().decode("utf-8")), payload_obj)
+            self.assertEqual(req_num["n"], 2)
+        finally:
+            kevlar._HTTP_POOL.close_all()
+            server2.shutdown()
+            server2.server_close()
+
+    def test_bounded_lru_dict_eviction_and_refresh(self):
+        """Test Phase 2 bounded LRU cache evicts oldest unused key and refreshes MRU on access."""
+        cache = kevlar._BoundedLRUDict(maxsize=2)
+        cache["a"] = 1
+        cache["b"] = 2
+        self.assertEqual(cache.get("a"), 1)  # refresh 'a' to MRU
+        cache["c"] = 3  # must evict 'b'
+        self.assertIn("a", cache)
+        self.assertIn("c", cache)
+        self.assertNotIn("b", cache)
+        self.assertEqual(len(cache), 2)
+
+    def test_check_npm_package_slim_cache_and_inline_repo(self):
+        """Test Phase 2 npm slimmed metadata cache drops heavy fields and avoids extra repo HTTP call."""
+        import json
+        from unittest.mock import MagicMock
+
+        npm_payload = {
+            "name": "slim-demo",
+            "dist-tags": {"latest": "2.0.0"},
+            "repository": {"type": "git", "url": "git+https://github.com/org/slim-demo.git"},
+            "versions": {
+                "1.0.0": {
+                    "version": "1.0.0",
+                    "dependencies": {f"heavy-dep-{i}": "^1.0.0" for i in range(50)},
+                    "dist": {"integrity": "sha512-abc", "tarball": "https://registry.npmjs.org/t.tgz"},
+                },
+                "2.0.0": {
+                    "version": "2.0.0",
+                    "deprecated": "Use v3",
+                    "dependencies": {f"heavy-dep-{i}": "^2.0.0" for i in range(50)},
+                    "dist": {"shasum": "deadbeef"},
+                },
+            },
+        }
+        call_count = {"n": 0}
+
+        def fake_urlopen(req, timeout=10):
+            call_count["n"] += 1
+            m = MagicMock()
+            m.read.return_value = json.dumps(npm_payload).encode("utf-8")
+            m.__enter__.return_value = m
+            return m
+
+        target = {"name": "slim-demo", "declared": "^1.0.0", "installed": ["1.0.0"]}
+        with patch("kevlar.safe_urlopen", side_effect=fake_urlopen):
+            res1 = kevlar.check_npm_package(target)
+            res2 = kevlar.check_npm_package(target)
+
+        # Only 1 HTTP call total: inline repo avoids resolve_npm_repo, 2nd call hits cache
+        self.assertEqual(call_count["n"], 1)
+        self.assertEqual(res1[0]["repo_url"], "https://github.com/org/slim-demo")
+        self.assertEqual(res2[0]["latest_absolute"], "2.0.0")
+
+        cached = kevlar._get_cached_registry_metadata("npm", "slim-demo")
+        self.assertIsNotNone(cached)
+        self.assertEqual(len(cached), 5)
+        self.assertNotIn("heavy-dep-0", repr(cached))
+
+    def test_clean_jsonc_preserves_strings_and_strips_comments_trailing_commas(self):
+        """Test Phase 3 regex-based clean_jsonc handles comments, URLs, escaped quotes, and trailing commas."""
+        import json
+
+        raw_jsonc = """{
+            // Top-level line comment
+            "url": "https://example.com/a//b/*not-a-comment*/",
+            "escaped": "hello \\" // still in string", /* inline block */
+            "arr": [
+                1,
+                2, /* trailing comment */
+            ],
+            "nested": {
+                "a": true,
+            },
+        }"""
+        cleaned = kevlar.clean_jsonc(raw_jsonc)
+        parsed = json.loads(cleaned)
+        self.assertEqual(parsed["url"], "https://example.com/a//b/*not-a-comment*/")
+        self.assertEqual(parsed["escaped"], 'hello " // still in string')
+        self.assertEqual(parsed["arr"], [1, 2])
+        self.assertEqual(parsed["nested"], {"a": True})
+
+    def test_find_latest_semver_tiers_single_pass_edge_cases(self):
+        """Test Phase 3 O(V) find_latest_semver_tiers handles stable tiers, v-prefix, build metadata, and prerelease fallback."""
+        versions = [
+            "1.2.3",
+            "1.2.4",
+            "v1.2.10",
+            "1.2.11-rc.1",
+            "1.5.0+build123",
+            "1.9.0-beta.2",
+            "2.0.0",
+            "2.3.1",
+            "3.0.0-alpha.1",
+        ]
+        patch_v, minor_v, abs_v = kevlar.find_latest_semver_tiers("1.2.3", versions)
+        self.assertEqual(patch_v, "v1.2.10")
+        self.assertEqual(minor_v, "1.5.0+build123")
+        self.assertEqual(abs_v, "2.3.1")
+
+        # Prerelease-only fallback when no stable versions exist
+        pre_only = ["0.1.0-alpha.1", "0.1.0-alpha.10", "0.2.0-beta.1", "0.2.0-beta.2"]
+        p2, m2, a2 = kevlar.find_latest_semver_tiers("0.1.0-alpha.1", pre_only)
+        self.assertEqual(p2, "0.1.0-alpha.10")
+        self.assertEqual(m2, "0.2.0-beta.2")
+        self.assertEqual(a2, "0.2.0-beta.2")
+
+    def test_find_projects_recursively_scandir_pruning(self):
+        """Test Phase 3 os.scandir directory traversal prunes ignored directories and discovers real projects."""
+        import shutil
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            real_dirs = [
+                (os.path.join(tmpdir, "svc-a"), "package.json", "{}"),
+                (os.path.join(tmpdir, "svc-b"), "Cargo.toml", "[package]\nname='b'\n"),
+                (os.path.join(tmpdir, "nested", "go-svc"), "go.mod", "module x\n"),
+            ]
+            ignored_dirs = [
+                (os.path.join(tmpdir, "svc-a", "node_modules", "dep"), "package.json", "{}"),
+                (os.path.join(tmpdir, ".git", "hooks"), "package.json", "{}"),
+                (os.path.join(tmpdir, "venv", "lib"), "requirements.txt", "flask==1.0\n"),
+                (os.path.join(tmpdir, "svc-b", "target", "debug"), "Cargo.toml", ""),
+            ]
+            for d, fname, body in real_dirs + ignored_dirs:
+                os.makedirs(d, exist_ok=True)
+                with open(os.path.join(d, fname), "w", encoding="utf-8") as f:
+                    f.write(body)
+
+            found = kevlar.find_projects_recursively(tmpdir)
+            found_norm = {os.path.normpath(p) for p, _techs in found}
+            expected_norm = {os.path.normpath(d) for d, _, _ in real_dirs}
+            self.assertEqual(found_norm, expected_norm)
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_parse_secure_xml_utf8_latin1_and_invalid_bytes(self):
+        """Test Phase 3 zero-copy UTF-8 fast path, Latin-1 encoding, invalid byte fallback, and XXE rejection."""
+        root_utf8 = kevlar.parse_secure_xml(b'<?xml version="1.0" encoding="utf-8"?><root><v>1.0.0</v></root>')
+        self.assertEqual(root_utf8.find("v").text, "1.0.0")
+
+        root_latin1 = kevlar.parse_secure_xml(
+            '<?xml version="1.0" encoding="iso-8859-1"?><root><v>café</v></root>'.encode("latin-1")
+        )
+        self.assertEqual(root_latin1.find("v").text, "café")
+
+        # Invalid UTF-8 byte falls back cleanly to errors='replace'
+        root_bad = kevlar.parse_secure_xml(b"<root><v>a\xffb</v></root>")
+        self.assertIn("\ufffd", root_bad.find("v").text)
+
+        # XXE DOCTYPE still rejected
+        with self.assertRaises(ValueError):
+            kevlar.parse_secure_xml(b'<!DOCTYPE foo [<!ENTITY x "y">]><foo/>')
+
+    def test_singleflight_coalesces_concurrent_fetches(self):
+        """Test Phase 4 _SingleFlight coalesces concurrent in-flight fetches into a single call and never poisons on error."""
+        import threading
+        import time
+        from concurrent.futures import ThreadPoolExecutor
+
+        call_count = {"n": 0}
+        count_lock = threading.Lock()
+        barrier = threading.Barrier(8, timeout=3.0)
+
+        def slow_fetch():
+            time.sleep(0.05)
+            with count_lock:
+                call_count["n"] += 1
+            return ("2.0.0", ("1.0.0", "2.0.0"))
+
+        def worker(_):
+            barrier.wait()
+            return kevlar._get_or_fetch_registry_metadata("npm", "shared-sf-pkg", slow_fetch)
+
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            results = list(ex.map(worker, range(8)))
+
+        self.assertEqual(call_count["n"], 1)
+        self.assertTrue(all(r == ("2.0.0", ("1.0.0", "2.0.0")) for r in results))
+
+        # Error must propagate without poisoning subsequent attempts
+        fail_calls = {"n": 0}
+
+        def failing_then_ok():
+            fail_calls["n"] += 1
+            if fail_calls["n"] == 1:
+                raise RuntimeError("transient error")
+            return ("ok",)
+
+        with self.assertRaises(RuntimeError):
+            kevlar._get_or_fetch_registry_metadata("npm", "flaky-sf-pkg", failing_then_ok)
+        self.assertEqual(
+            kevlar._get_or_fetch_registry_metadata("npm", "flaky-sf-pkg", failing_then_ok),
+            ("ok",),
+        )
+
+    def test_domain_semaphore_caps_concurrency_per_host(self):
+        """Test Phase 4 per-host domain semaphore deduplicates case-insensitively and isolates distinct hosts."""
+        sem1 = kevlar._get_domain_semaphore("Registry.NPMJS.org")
+        sem2 = kevlar._get_domain_semaphore("registry.npmjs.org")
+        sem_other = kevlar._get_domain_semaphore("pypi.org")
+        self.assertIs(sem1, sem2)
+        self.assertIsNot(sem1, sem_other)
+
+    def test_run_registry_and_osv_parallel_overlaps_io(self):
+        """Test Phase 4 _run_registry_and_osv_parallel truly overlaps registry, OSV, and extra network tasks."""
+        import threading
+
+        barrier = threading.Barrier(3, timeout=2.0)
+
+        def fake_registry():
+            barrier.wait()
+            return [{"name": "pkg-a", "installed": "1.0.0"}]
+
+        def fake_osv(targets, eco, mw):
+            barrier.wait()
+            return {("pkg-a", "1.0.0"): [{"id": "GHSA-overlap"}]}
+
+        def fake_extra():
+            barrier.wait()
+            return ("up-to-date", None, None, "22.x")
+
+        with patch("kevlar.check_osv_vulnerabilities", side_effect=fake_osv):
+            res, osv, extra = kevlar._run_registry_and_osv_parallel(
+                fake_registry,
+                [{"name": "pkg-a", "declared": "1.0.0", "installed": ["1.0.0"]}],
+                "npm",
+                4,
+                True,
+                extra_tasks={"node": fake_extra},
+            )
+
+        self.assertEqual(res[0]["name"], "pkg-a")
+        self.assertIn(("pkg-a", "1.0.0"), osv)
+        self.assertEqual(extra["node"][0], "up-to-date")
+
+    def test_check_osv_vulnerabilities_parallel_chunks_preserve_order(self):
+        """Test Phase 4 parallel OSV chunking preserves exact result index alignment despite out-of-order completion."""
+        import json
+        import time
+        from unittest.mock import MagicMock
+
+        targets = [
+            {"name": f"pkg-{i:04d}", "declared": "1.0.0", "installed": ["1.0.0"]}
+            for i in range(2200)
+        ]
+
+        def fake_osv_urlopen(req, timeout=15):
+            qs = json.loads(req.data.decode("utf-8"))["queries"]
+            first_name = qs[0]["package"]["name"]
+            # Delay first chunk so chunk 2 completes before chunk 0
+            if first_name == "pkg-0000":
+                time.sleep(0.05)
+            out = []
+            for q in qs:
+                pname = q["package"]["name"]
+                out.append({
+                    "vulns": [{
+                        "id": f"GHSA-{pname}",
+                        "summary": f"Advisory for {pname}",
+                        "severity": [{"type": "CVSS_V3", "score": "7.5"}],
+                    }]
+                })
+            m = MagicMock()
+            m.read.return_value = json.dumps({"results": out}).encode("utf-8")
+            m.__enter__.return_value = m
+            return m
+
+        with patch("kevlar.safe_urlopen", side_effect=fake_osv_urlopen):
+            vulns_map = kevlar.check_osv_vulnerabilities(targets, "npm", max_workers=4)
+
+        self.assertEqual(len(vulns_map), 2200)
+        for idx in (0, 500, 999, 1000, 1500, 2199):
+            pname = f"pkg-{idx:04d}"
+            self.assertEqual(vulns_map[(pname, "1.0.0")][0]["id"], f"GHSA-{pname}")
+
+    def test_run_scan_all_and_auto_tech_parallel_deterministic_order(self):
+        """Test Phase 4 parallel run_scan_all & run_auto_tech preserve deterministic order and never mutate args."""
+        import argparse
+        import json
+        import shutil
+        import tempfile
+        import time
+
+        tmpdir = tempfile.mkdtemp()
+        work_cwd = tempfile.mkdtemp()
+        orig_cwd = os.getcwd()
+        orig_runners = {k: v["runner"] for k, v in kevlar.TECHNOLOGIES.items()}
+        try:
+            proj_a = os.path.join(tmpdir, "01_alpha")
+            proj_b = os.path.join(tmpdir, "02_beta")
+            proj_c = os.path.join(tmpdir, "03_gamma")
+            os.makedirs(proj_a)
+            os.makedirs(proj_b)
+            os.makedirs(proj_c)
+            with open(os.path.join(proj_a, "package.json"), "w", encoding="utf-8") as f:
+                f.write('{"name": "alpha", "dependencies": {"pkg-alpha": "1.0.0"}}')
+            with open(os.path.join(proj_b, "requirements.txt"), "w", encoding="utf-8") as f:
+                f.write("pkg-beta==1.0.0\n")
+            with open(os.path.join(proj_c, "Cargo.toml"), "w", encoding="utf-8") as f:
+                f.write('[package]\nname = "gamma"\n[dependencies]\npkg-gamma = "1.0.0"\n')
+
+            def make_runner(pkg_name, delay):
+                def _runner(task_args):
+                    time.sleep(delay)
+                    return (
+                        [{
+                            "name": pkg_name,
+                            "declared": "1.0.0",
+                            "installed": "1.0.0",
+                            "latest": "2.0.0",
+                            "latest_same_major": "1.0.0",
+                            "latest_absolute": "2.0.0",
+                            "status": "major",
+                            "deprecated": None,
+                            "error": None,
+                            "dep_type": "Direct",
+                            "required_by": [],
+                            "vulnerabilities": [],
+                        }],
+                        {"dependencies": {pkg_name: "1.0.0"}, "devDependencies": {}, "all_direct": {pkg_name: "1.0.0"}},
+                        delay,
+                    )
+                return _runner
+
+            # Alpha is slowest, gamma finishes fastest — final SARIF order must still be alpha -> beta -> gamma
+            kevlar.TECHNOLOGIES["npm"]["runner"] = make_runner("pkg-alpha", 0.06)
+            kevlar.TECHNOLOGIES["pip"]["runner"] = make_runner("pkg-beta", 0.03)
+            kevlar.TECHNOLOGIES["rust"]["runner"] = make_runner("pkg-gamma", 0.005)
+
+            os.chdir(work_cwd)
+            parser = kevlar.setup_argparse()
+            args = parser.parse_args(["--scan-all", "--path", tmpdir, "--format", "sarif", "--no-show-console", "--concurrent", "6"])
+            with self.assertRaises(SystemExit) as cm:
+                kevlar.run_scan_all(args, parser)
+            self.assertEqual(cm.exception.code, 0)
+
+            # Shared args were never mutated
+            self.assertEqual(args.path, tmpdir)
+            self.assertIsNone(args.tech)
+
+            sarif_path = os.path.join(work_cwd, "report-consolidated.sarif")
+            self.assertTrue(os.path.exists(sarif_path))
+            with open(sarif_path, "r", encoding="utf-8") as f:
+                sarif = json.load(f)
+            self.assertEqual(len(sarif["runs"]), 3)
+            run_pkgs = [
+                run["results"][0]["message"]["text"] for run in sarif["runs"]
+            ]
+            self.assertIn("pkg-alpha", run_pkgs[0])
+            self.assertIn("pkg-beta", run_pkgs[1])
+            self.assertIn("pkg-gamma", run_pkgs[2])
+
+            # Test parallel run_auto_tech on hybrid directory (npm + pip)
+            hybrid_dir = os.path.join(tmpdir, "hybrid")
+            os.makedirs(hybrid_dir)
+            with open(os.path.join(hybrid_dir, "package.json"), "w", encoding="utf-8") as f:
+                f.write('{"name": "hybrid"}')
+            with open(os.path.join(hybrid_dir, "requirements.txt"), "w", encoding="utf-8") as f:
+                f.write("pkg-beta==1.0.0\n")
+
+            auto_args = argparse.Namespace(path=hybrid_dir, tech="auto", concurrent=4, all=False, vuls=False)
+            auto_res, _auto_pkg, _auto_el = kevlar.run_auto_tech(auto_args)
+            self.assertEqual(auto_args.tech, "auto")
+            self.assertEqual([r["name"] for r in auto_res], ["pkg-alpha", "pkg-beta"])
+        finally:
+            os.chdir(orig_cwd)
+            for k, r in orig_runners.items():
+                kevlar.TECHNOLOGIES[k]["runner"] = r
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            shutil.rmtree(work_cwd, ignore_errors=True)
+
+    def test_parse_npm_alias_spec_variants(self):
+        """Test _parse_npm_alias_spec across scoped/unscoped aliases, dist-tags, no-version aliases, and Yarn Berry specs."""
+        self.assertEqual(
+            kevlar._parse_npm_alias_spec("npm:@typescript/typescript6@6.0.2"),
+            ("@typescript/typescript6", "6.0.2"),
+        )
+        self.assertEqual(
+            kevlar._parse_npm_alias_spec("npm:typescript@7.0.2"),
+            ("typescript", "7.0.2"),
+        )
+        self.assertEqual(
+            kevlar._parse_npm_alias_spec("npm:esbuild-wasm@^0.23.0"),
+            ("esbuild-wasm", "^0.23.0"),
+        )
+        self.assertEqual(
+            kevlar._parse_npm_alias_spec("npm:@babel/core"),
+            ("@babel/core", "*"),
+        )
+        self.assertEqual(
+            kevlar._parse_npm_alias_spec("npm:lodash@latest"),
+            ("lodash", "latest"),
+        )
+        # Yarn Berry version-only npm: protocol specifiers (not package aliases)
+        self.assertEqual(kevlar._parse_npm_alias_spec("npm:^5.0.1"), (None, "^5.0.1"))
+        self.assertEqual(kevlar._parse_npm_alias_spec("npm:5.0.1"), (None, "5.0.1"))
+        # Standard SemVer specifier
+        self.assertEqual(kevlar._parse_npm_alias_spec("^4.17.21"), (None, "^4.17.21"))
+
+    def test_npm_aliases_collision_pnpm_end_to_end(self):
+        """Test real-world pnpm alias collision (typescript -> @typescript/typescript6 & typescript-7 -> typescript) end-to-end."""
+        import argparse
+        import json
+        import shutil
+        import tempfile
+        from unittest.mock import MagicMock
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(tmpdir, "package.json"), "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "name": "alias-api",
+                        "dependencies": {
+                            "@mendable/firecrawl-rs": "workspace:*",
+                            "typescript": "npm:@typescript/typescript6@6.0.2",
+                            "typescript-7": "npm:typescript@7.0.2",
+                        },
+                    },
+                    f,
+                    indent=2,
+                )
+
+            pnpm_lock = """lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      '@mendable/firecrawl-rs':
+        specifier: workspace:*
+        version: link:native
+      typescript:
+        specifier: npm:@typescript/typescript6@6.0.2
+        version: '@typescript/typescript6@6.0.2'
+      typescript-7:
+        specifier: npm:typescript@7.0.2
+        version: typescript@7.0.2
+packages:
+  '@typescript/typescript6@6.0.2':
+    resolution: {integrity: sha512-ts6hash==}
+  typescript@5.9.2:
+    resolution: {integrity: sha512-ts592hash==}
+  typescript@6.0.3:
+    resolution: {integrity: sha512-ts603hash==}
+  typescript@7.0.2:
+    resolution: {integrity: sha512-ts702hash==}
+snapshots:
+  '@typescript/typescript6@6.0.2':
+    dependencies:
+      '@typescript/old': typescript@6.0.3
+  typescript@5.9.2: {}
+  typescript@6.0.3: {}
+  typescript@7.0.2: {}
+"""
+            with open(os.path.join(tmpdir, "pnpm-lock.yaml"), "w", encoding="utf-8") as f:
+                f.write(pnpm_lock)
+
+            requested_urls = []
+            osv_queried_pkgs = []
+
+            def fake_urlopen(req, timeout=10):
+                url = req if isinstance(req, str) else req.full_url
+                requested_urls.append(url)
+                m = MagicMock()
+                if "querybatch" in url:
+                    qs = json.loads(req.data.decode("utf-8"))["queries"]
+                    res = []
+                    for q in qs:
+                        pname = q["package"]["name"]
+                        pver = q["version"]
+                        osv_queried_pkgs.append((pname, pver))
+                        if pname == "typescript" and pver == "7.0.2":
+                            res.append({
+                                "vulns": [{
+                                    "id": "GHSA-ts7-demo",
+                                    "summary": "Demo advisory on typescript 7.0.2",
+                                    "severity": [{"type": "CVSS_V3", "score": "5.3"}],
+                                }]
+                            })
+                        else:
+                            res.append({})
+                    m.read.return_value = json.dumps({"results": res}).encode("utf-8")
+                elif "%2Ftypescript6" in url:
+                    m.read.return_value = json.dumps({
+                        "name": "@typescript/typescript6",
+                        "dist-tags": {"latest": "6.0.2"},
+                        "versions": {
+                            "6.0.2": {"version": "6.0.2", "dist": {"integrity": "sha512-ts6hash=="}}
+                        },
+                    }).encode("utf-8")
+                elif url.endswith("/typescript"):
+                    m.read.return_value = json.dumps({
+                        "name": "typescript",
+                        "dist-tags": {"latest": "7.0.2"},
+                        "versions": {
+                            "5.9.2": {"version": "5.9.2", "dist": {"integrity": "sha512-ts592hash=="}},
+                            "6.0.3": {"version": "6.0.3", "dist": {"integrity": "sha512-ts603hash=="}},
+                            "7.0.2": {"version": "7.0.2", "dist": {"integrity": "sha512-ts702hash=="}},
+                        },
+                    }).encode("utf-8")
+                else:
+                    raise AssertionError(f"Unexpected registry URL requested: {url}")
+                m.__enter__.return_value = m
+                return m
+
+            args = argparse.Namespace(path=tmpdir, all=True, vuls=True, concurrent=4, lockfile=None)
+            with patch("kevlar.safe_urlopen", side_effect=fake_urlopen):
+                results, _pkg_data, _elapsed = kevlar.run_npm_checker(args)
+
+            kevlar.validate_configuration_drift(results)
+
+            # Must never query bogus alias name 'typescript-7' or local workspace '@mendable/firecrawl-rs'
+            self.assertFalse(any("typescript-7" in u for u in requested_urls))
+            self.assertFalse(any("firecrawl-rs" in u for u in requested_urls))
+            self.assertIn(("@typescript/typescript6", "6.0.2"), osv_queried_pkgs)
+            self.assertIn(("typescript", "7.0.2"), osv_queried_pkgs)
+
+            # Check each resolved row
+            by_key = {(r["name"], r["installed"]): r for r in results}
+            self.assertIn(("typescript", "6.0.2"), by_key)
+            self.assertIn(("typescript-7", "7.0.2"), by_key)
+            self.assertIn(("@mendable/firecrawl-rs", "workspace:*"), by_key)
+            self.assertIn(("typescript", "5.9.2"), by_key)
+            self.assertIn(("typescript", "6.0.3"), by_key)
+
+            ts_direct = by_key[("typescript", "6.0.2")]
+            self.assertEqual(ts_direct["dep_type"], "Direct")
+            self.assertEqual(ts_direct["status"], "up-to-date")
+            self.assertIsNone(ts_direct["error"])
+            self.assertFalse(ts_direct["missing_checksum"])
+
+            ts7_direct = by_key[("typescript-7", "7.0.2")]
+            self.assertEqual(ts7_direct["dep_type"], "Direct")
+            self.assertEqual(ts7_direct["status"], "up-to-date")
+            self.assertIsNone(ts7_direct["error"])
+            self.assertFalse(ts7_direct["missing_checksum"])
+            self.assertEqual(len(ts7_direct["vulnerabilities"]), 1)
+            self.assertEqual(ts7_direct["vulnerabilities"][0]["id"], "GHSA-ts7-demo")
+
+            ws_local = by_key[("@mendable/firecrawl-rs", "workspace:*")]
+            self.assertEqual(ws_local["status"], "local")
+            self.assertFalse(ws_local["missing_checksum"])
+
+            # Transitive real typescript versions remain Transitive and error-free
+            for tv in ("5.9.2", "6.0.3"):
+                tr = by_key[("typescript", tv)]
+                self.assertEqual(tr["dep_type"], "Transitive")
+                self.assertIsNone(tr["declared"])
+                self.assertIsNone(tr["error"])
+                self.assertFalse(tr["missing_checksum"])
+
+            # No private helper keys leaked
+            for r in results:
+                self.assertNotIn("_registry_name", r)
+                self.assertNotIn("_force_transitive", r)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_npm_aliases_package_lock_no_lockfile_and_drift_validation(self):
+        """Test npm: aliases with package-lock.json v3, package.json-only (no lockfile), and true vs false drift."""
+        import argparse
+        import json
+        import shutil
+        import tempfile
+        from unittest.mock import MagicMock
+
+        # 1. package-lock.json v3 alias alongside non-aliased same real package
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(tmpdir, "package.json"), "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "name": "lock-v3-alias",
+                        "dependencies": {
+                            "lodash": "^4.17.21",
+                            "lodash-legacy": "npm:lodash@4.17.15",
+                        },
+                    },
+                    f,
+                )
+            with open(os.path.join(tmpdir, "package-lock.json"), "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "name": "lock-v3-alias",
+                        "lockfileVersion": 3,
+                        "packages": {
+                            "": {
+                                "dependencies": {
+                                    "lodash": "^4.17.21",
+                                    "lodash-legacy": "npm:lodash@4.17.15",
+                                }
+                            },
+                            "node_modules/lodash": {
+                                "version": "4.17.21",
+                                "integrity": "sha512-new==",
+                            },
+                            "node_modules/lodash-legacy": {
+                                "name": "lodash",
+                                "version": "4.17.15",
+                                "integrity": "sha512-old==",
+                            },
+                        },
+                    },
+                    f,
+                )
+
+            def fake_lodash(req, timeout=10):
+                url = req if isinstance(req, str) else req.full_url
+                self.assertTrue(url.endswith("/lodash"), f"Unexpected URL: {url}")
+                m = MagicMock()
+                m.read.return_value = json.dumps({
+                    "name": "lodash",
+                    "dist-tags": {"latest": "4.17.21"},
+                    "versions": {
+                        "4.17.15": {"version": "4.17.15", "dist": {"integrity": "sha512-old=="}},
+                        "4.17.21": {"version": "4.17.21", "dist": {"integrity": "sha512-new=="}},
+                    },
+                }).encode("utf-8")
+                m.__enter__.return_value = m
+                return m
+
+            args = argparse.Namespace(path=tmpdir, all=True, vuls=False, concurrent=2, lockfile=None)
+            with patch("kevlar.safe_urlopen", side_effect=fake_lodash):
+                results, _, _ = kevlar.run_npm_checker(args)
+            kevlar.validate_configuration_drift(results)
+
+            by_name = {r["name"]: r for r in results}
+            self.assertEqual(by_name["lodash"]["installed"], "4.17.21")
+            self.assertEqual(by_name["lodash"]["status"], "up-to-date")
+            self.assertFalse(by_name["lodash"]["missing_checksum"])
+            self.assertEqual(by_name["lodash-legacy"]["installed"], "4.17.15")
+            self.assertEqual(by_name["lodash-legacy"]["status"], "patch")
+            self.assertIsNone(by_name["lodash-legacy"]["error"])
+            self.assertFalse(by_name["lodash-legacy"]["missing_checksum"])
+
+            # 2. No lockfile (package.json only) alias should strip prefix cleanly
+            os.remove(os.path.join(tmpdir, "package-lock.json"))
+            kevlar.clear_kevlar_cache()
+            with patch("kevlar.safe_urlopen", side_effect=fake_lodash):
+                res_nolock, _, _ = kevlar.run_npm_checker(args)
+            kevlar.validate_configuration_drift(res_nolock)
+            by_name_nl = {r["name"]: r for r in res_nolock}
+            self.assertEqual(by_name_nl["lodash-legacy"]["installed"], "4.17.15")
+            self.assertIsNone(by_name_nl["lodash-legacy"]["error"])
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        # 3. Direct validate_configuration_drift checks: genuine drift vs non-drift aliases & dist-tags
+        drift_rows = [
+            {
+                "name": "genuine-drift-alias",
+                "declared": "npm:typescript@7.0.2",
+                "installed": "6.0.2",
+                "status": "major",
+                "error": None,
+                "dep_type": "Direct",
+            },
+            {
+                "name": "unstripped-installed-alias",
+                "declared": "npm:typescript@7.0.2",
+                "installed": "npm:typescript@7.0.2",
+                "status": "up-to-date",
+                "error": None,
+                "dep_type": "Direct",
+            },
+            {
+                "name": "dist-tag-alias",
+                "declared": "npm:lodash@latest",
+                "installed": "4.17.21",
+                "status": "up-to-date",
+                "error": None,
+                "dep_type": "Direct",
+            },
+            {
+                "name": "no-version-alias",
+                "declared": "npm:@scope/pkg",
+                "installed": "1.2.3",
+                "status": "up-to-date",
+                "error": None,
+                "dep_type": "Direct",
+            },
+        ]
+        kevlar.validate_configuration_drift(drift_rows)
+        self.assertEqual(drift_rows[0]["status"], "error")
+        self.assertIn("Configuration Drift", drift_rows[0]["error"])
+        self.assertEqual(drift_rows[1]["status"], "up-to-date")
+        self.assertIsNone(drift_rows[1]["error"])
+        self.assertEqual(drift_rows[2]["status"], "up-to-date")
+        self.assertIsNone(drift_rows[2]["error"])
+        self.assertEqual(drift_rows[3]["status"], "up-to-date")
+        self.assertIsNone(drift_rows[3]["error"])
+
+    def test_validate_configuration_drift_ecosystem_native_semantics(self):
+        """Test ecosystem-native version semantics across Rust/Cargo, NuGet, Go, pip, Ruby, PHP, and npm."""
+        # 1. Operator support in check_semver_satisfies: ~=, ~>, !=, |, hyphen ranges
+        self.assertTrue(kevlar.check_semver_satisfies("1.4.9", "~=1.4.2"))
+        self.assertFalse(kevlar.check_semver_satisfies("1.5.0", "~=1.4.2"))
+        self.assertTrue(kevlar.check_semver_satisfies("1.9.0", "~=1.4"))
+        self.assertFalse(kevlar.check_semver_satisfies("2.0.0", "~=1.4"))
+        self.assertTrue(kevlar.check_semver_satisfies("1.6.0", ">=1.0.0, !=1.5.0"))
+        self.assertFalse(kevlar.check_semver_satisfies("1.5.0", ">=1.0.0, !=1.5.0"))
+        self.assertFalse(kevlar.check_semver_satisfies("1.5.3", ">=1.0.0, !=1.5.*"))
+        self.assertTrue(kevlar.check_semver_satisfies("1.6.0", ">=1.0.0, !=1.5.*"))
+        self.assertTrue(kevlar.check_semver_satisfies("7.1.3", "~> 7.0"))
+        self.assertFalse(kevlar.check_semver_satisfies("8.0.0", "~> 7.0"))
+        self.assertTrue(kevlar.check_semver_satisfies("7.1.9", "~> 7.1.2"))
+        self.assertFalse(kevlar.check_semver_satisfies("7.2.0", "~> 7.1.2"))
+        self.assertTrue(kevlar.check_semver_satisfies("8.2.0", "^7.0|^8.0"))
+        self.assertFalse(kevlar.check_semver_satisfies("9.0.0", "^7.0|^8.0"))
+        self.assertTrue(kevlar.check_semver_satisfies("2.1.0", "1.0.0 - 2.3.4"))
+        self.assertFalse(kevlar.check_semver_satisfies("2.4.0", "1.0.0 - 2.3.4"))
+
+        # 2. Ecosystem-aware validate_configuration_drift matrix
+        rows = [
+            # Rust bare caret: 2.6.0 -> ^2.6.0 (valid 2.9.0, drift on 3.0.0 and 2.5.0)
+            {"name": "lol_html", "technology": "rust", "declared": "2.6.0", "installed": "2.9.0", "status": "up-to-date", "error": None, "dep_type": "Direct"},
+            {"name": "napi", "technology": "rust", "declared": "3.0.0", "installed": "3.15.0", "status": "up-to-date", "error": None, "dep_type": "Direct"},
+            {"name": "chrono", "technology": "rust", "declared": "0.4", "installed": "0.4.38", "status": "up-to-date", "error": None, "dep_type": "Direct"},
+            {"name": "rust-major-drift", "technology": "rust", "declared": "2.6.0", "installed": "3.0.0", "status": "up-to-date", "error": None, "dep_type": "Direct"},
+            {"name": "rust-downgrade-drift", "technology": "rust", "declared": "2.6.0", "installed": "2.5.0", "status": "up-to-date", "error": None, "dep_type": "Direct"},
+            {"name": "rust-exact-pin-drift", "technology": "rust", "declared": "=2.6.0", "installed": "2.9.0", "status": "up-to-date", "error": None, "dep_type": "Direct"},
+            # NuGet bare minimum (>=) vs exact bracket [x] vs interval [1.0,2.0)
+            {"name": "Newtonsoft.Json", "technology": "nuget", "declared": "13.0.1", "installed": "13.0.3", "status": "up-to-date", "error": None, "dep_type": "Direct"},
+            {"name": "nuget-exact-drift", "technology": "nuget", "declared": "[13.0.1]", "installed": "13.0.3", "status": "up-to-date", "error": None, "dep_type": "Direct"},
+            {"name": "nuget-range-ok", "technology": "nuget", "declared": "[1.0.0, 2.0.0)", "installed": "1.5.0", "status": "up-to-date", "error": None, "dep_type": "Direct"},
+            {"name": "nuget-range-drift", "technology": "nuget", "declared": "[1.0.0, 2.0.0)", "installed": "2.0.0", "status": "up-to-date", "error": None, "dep_type": "Direct"},
+            # Go MVS minimum version
+            {"name": "github.com/org/mod", "technology": "go", "declared": "v1.18.0", "installed": "v1.19.2", "status": "up-to-date", "error": None, "dep_type": "Direct"},
+            {"name": "go-downgrade-drift", "technology": "go", "declared": "v1.18.0", "installed": "v1.17.0", "status": "up-to-date", "error": None, "dep_type": "Direct"},
+            # npm bare version remains exact pin
+            {"name": "npm-exact-drift", "technology": "npm", "declared": "2.6.0", "installed": "2.9.0", "status": "up-to-date", "error": None, "dep_type": "Direct"},
+        ]
+
+        kevlar.validate_configuration_drift(rows)
+        by_name = {r["name"]: r for r in rows}
+
+        for ok_name in ("lol_html", "napi", "chrono", "Newtonsoft.Json", "nuget-range-ok", "github.com/org/mod"):
+            self.assertEqual(by_name[ok_name]["status"], "up-to-date", f"Unexpected drift on {ok_name}: {by_name[ok_name]}")
+            self.assertIsNone(by_name[ok_name]["error"])
+
+        for drift_name in ("rust-major-drift", "rust-downgrade-drift", "rust-exact-pin-drift", "nuget-exact-drift", "nuget-range-drift", "go-downgrade-drift", "npm-exact-drift"):
+            self.assertEqual(by_name[drift_name]["status"], "error", f"Expected drift on {drift_name}")
+            self.assertIn("Configuration Drift", by_name[drift_name]["error"])
+
+    def test_pip_vcs_and_direct_url_requirements(self):
+        """Test bare git+/URL Python requirements are parsed cleanly and never trigger bogus PyPI 404 errors."""
+        import shutil
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            req_path = os.path.join(tmpdir, "requirements.txt")
+            with open(req_path, "w", encoding="utf-8") as f:
+                f.write(
+                    "git+https://github.com/openai/swarm.git\n"
+                    "git+https://github.com/org/private-lib.git@v1.2.0#egg=private_lib\n"
+                    "custom-pkg @ git+https://github.com/org/custom-pkg.git@main\n"
+                    "https://files.example.com/my_wheel-2.0.0-py3-none-any.whl\n"
+                    "requests==2.31.0\n"
+                )
+
+            deps, _parents = kevlar.parse_requirements_txt(req_path)
+            self.assertNotIn("git", deps)
+            self.assertEqual(deps.get("swarm"), "git+https://github.com/openai/swarm.git")
+            self.assertEqual(
+                deps.get("private_lib"),
+                "git+https://github.com/org/private-lib.git@v1.2.0#egg=private_lib",
+            )
+            self.assertEqual(
+                deps.get("custom-pkg"),
+                "@ git+https://github.com/org/custom-pkg.git@main",
+            )
+            self.assertEqual(
+                deps.get("my_wheel"),
+                "https://files.example.com/my_wheel-2.0.0-py3-none-any.whl",
+            )
+            self.assertEqual(deps.get("requests"), "==2.31.0")
+
+            # parse_pep508 should also handle bare VCS URLs
+            self.assertEqual(
+                kevlar.parse_pep508("git+https://github.com/openai/swarm.git"),
+                ("swarm", "git+https://github.com/openai/swarm.git"),
+            )
+
+            # check_pypi_package must NOT hit network for VCS/direct URL specs
+            with patch("kevlar.safe_urlopen", side_effect=AssertionError("Should not query PyPI for VCS/URL")):
+                res_swarm = kevlar.check_pypi_package({
+                    "name": "swarm",
+                    "declared": "git+https://github.com/openai/swarm.git",
+                    "installed": ["git+https://github.com/openai/swarm.git"],
+                })
+                res_pep508 = kevlar.check_pypi_package({
+                    "name": "custom-pkg",
+                    "declared": "@ git+https://github.com/org/custom-pkg.git@main",
+                    "installed": [],
+                })
+
+            self.assertEqual(res_swarm[0]["status"], "local")
+            self.assertEqual(res_swarm[0]["latest"], "Local")
+            self.assertIsNone(res_swarm[0]["error"])
+            self.assertEqual(res_swarm[0]["repo_url"], "https://github.com/openai/swarm")
+
+            self.assertEqual(res_pep508[0]["status"], "local")
+            self.assertIsNone(res_pep508[0]["error"])
+            self.assertEqual(res_pep508[0]["repo_url"], "https://github.com/org/custom-pkg")
+
+            # Drift validation must not flag VCS/URL specs
+            kevlar.validate_configuration_drift(res_swarm + res_pep508)
+            self.assertIsNone(res_swarm[0]["error"])
+            self.assertIsNone(res_pep508[0]["error"])
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

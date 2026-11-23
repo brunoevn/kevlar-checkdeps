@@ -7,16 +7,23 @@ Supports multiple technologies.
 """
 
 import argparse
+import atexit
 import base64
 import codecs
+import collections
+import contextlib
 import ctypes
 import functools
 import gzip
 import html
+import http.client
+import io
+import itertools
 import json
 import os
 import random
 import re
+import ssl
 import string
 import sys
 import threading
@@ -26,9 +33,11 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
+import urllib.response
 import xml.etree.ElementTree as ET
 import xml.parsers.expat
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple, TypedDict, Union
 
@@ -42,34 +51,132 @@ class SafeWriter:
         self.encoding = (
             original_stream.encoding if hasattr(original_stream, "encoding") else None
         ) or "utf-8"
+        self._lock = threading.RLock()
 
     def write(self, data):
-        try:
-            self.original_stream.write(data)
-        except UnicodeEncodeError:
-            self.original_stream.write(
-                data.encode(self.encoding, errors="replace").decode(self.encoding)
-            )
+        with self._lock:
+            try:
+                self.original_stream.write(data)
+            except UnicodeEncodeError:
+                self.original_stream.write(
+                    data.encode(self.encoding, errors="replace").decode(self.encoding)
+                )
 
     def flush(self):
-        if hasattr(self.original_stream, "flush"):
-            self.original_stream.flush()
+        with self._lock:
+            if hasattr(self.original_stream, "flush"):
+                self.original_stream.flush()
 
 
 sys.stdout = SafeWriter(sys.stdout)
 sys.stderr = SafeWriter(sys.stderr)
 
-# Global lock to protect concurrent console writes (sys.stdout, sys.stderr, print)
-console_lock = threading.Lock()
+# Global reentrant lock to protect concurrent console writes (sys.stdout, sys.stderr, print)
+console_lock = threading.RLock()
 
-# Multi-project cross-run in-memory caches
+# Depth counter > 0 while multiple projects/technologies execute concurrently
+_PARALLEL_SCAN_DEPTH = 0
+_PARALLEL_SCAN_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def _parallel_scan_scope():
+    """Marks execution as inside a parallel macro-orchestration batch to avoid garbled \\r progress."""
+    global _PARALLEL_SCAN_DEPTH
+    with _PARALLEL_SCAN_LOCK:
+        _PARALLEL_SCAN_DEPTH += 1
+    try:
+        yield
+    finally:
+        with _PARALLEL_SCAN_LOCK:
+            _PARALLEL_SCAN_DEPTH = max(0, _PARALLEL_SCAN_DEPTH - 1)
+
+
+class _SingleFlight:
+    """Coalesces concurrent in-flight network fetches for the same cache key (stdlib-only)."""
+
+    __slots__ = ("_lock", "_inflight")
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._inflight = {}
+
+    def do(self, key, fetch_fn):
+        with self._lock:
+            entry = self._inflight.get(key)
+            if entry is None:
+                event = threading.Event()
+                entry = [event, None, None]  # [event, result, exc]
+                self._inflight[key] = entry
+                is_leader = True
+            else:
+                event = entry[0]
+                is_leader = False
+
+        if not is_leader:
+            event.wait()
+            if entry[2] is not None:
+                raise entry[2]
+            return entry[1]
+
+        try:
+            res = fetch_fn()
+            entry[1] = res
+            return res
+        except BaseException as exc:
+            entry[2] = exc
+            raise
+        finally:
+            with self._lock:
+                self._inflight.pop(key, None)
+            event.set()
+
+
+_REGISTRY_SINGLEFLIGHT = _SingleFlight()
+_AUX_SINGLEFLIGHT = _SingleFlight()
+_MAVEN_POM_SINGLEFLIGHT = _SingleFlight()
+
+
+class _BoundedLRUDict(collections.OrderedDict):
+    """Memory-bounded dict with LRU eviction using stdlib OrderedDict."""
+
+    __slots__ = ("_maxsize",)
+
+    def __init__(self, maxsize=4096):
+        super().__init__()
+        self._maxsize = maxsize
+
+    def __getitem__(self, key):
+        val = super().__getitem__(key)
+        self.move_to_end(key)
+        return val
+
+    def get(self, key, default=None):
+        if key in self:
+            val = super().__getitem__(key)
+            self.move_to_end(key)
+            return val
+        return default
+
+    def __setitem__(self, key, value):
+        if key in self:
+            self.move_to_end(key)
+        super().__setitem__(key, value)
+        while len(self) > self._maxsize:
+            self.popitem(last=False)
+
+
+# Multi-project cross-run in-memory caches (bounded to prevent unbounded RAM growth)
 _CACHE_LOCK = threading.Lock()
-_REGISTRY_METADATA_CACHE: Dict[Tuple[str, str], Any] = {}
+_REGISTRY_METADATA_CACHE: Dict[Tuple[str, str], Any] = _BoundedLRUDict(maxsize=4096)
 _TARGET_RESULTS_CACHE: Dict[
     Tuple[str, str, Optional[str], Tuple[str, ...]], List[Dict[str, Any]]
-] = {}
-_OSV_VULNS_CACHE: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = {}
-_OSV_HYDRATED_DETAILS_CACHE: Dict[str, Dict[str, Any]] = {}
+] = _BoundedLRUDict(maxsize=4096)
+_OSV_VULNS_CACHE: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = _BoundedLRUDict(
+    maxsize=8192
+)
+_OSV_HYDRATED_DETAILS_CACHE: Dict[str, Dict[str, Any]] = _BoundedLRUDict(maxsize=8192)
+_AUX_NET_CACHE: Dict[Tuple[Any, ...], Any] = _BoundedLRUDict(maxsize=2048)
 
 
 def clear_kevlar_cache():
@@ -79,6 +186,11 @@ def clear_kevlar_cache():
         _TARGET_RESULTS_CACHE.clear()
         _OSV_VULNS_CACHE.clear()
         _OSV_HYDRATED_DETAILS_CACHE.clear()
+        _AUX_NET_CACHE.clear()
+        if "_MAVEN_REMOTE_POM_CACHE" in globals():
+            _MAVEN_REMOTE_POM_CACHE.clear()
+        if "_FIND_MANIFEST_FILES_CACHE" in globals():
+            _FIND_MANIFEST_FILES_CACHE.clear()
     if "parse_semver" in globals() and hasattr(parse_semver, "cache_clear"):
         parse_semver.cache_clear()
     if "compare_versions" in globals() and hasattr(compare_versions, "cache_clear"):
@@ -133,6 +245,25 @@ def _set_cached_registry_metadata(tech: str, package_name: str, data: Any) -> No
         _REGISTRY_METADATA_CACHE[key] = data
 
 
+def _get_or_fetch_registry_metadata(tech: str, package_name: str, fetch_fn):
+    """Returns cached registry metadata or coalesces concurrent in-flight fetches via singleflight."""
+    cached = _get_cached_registry_metadata(tech, package_name)
+    if cached is not None:
+        return cached
+
+    key = (tech, package_name.lower())
+
+    def _load():
+        rechecked = _get_cached_registry_metadata(tech, package_name)
+        if rechecked is not None:
+            return rechecked
+        data = fetch_fn()
+        _set_cached_registry_metadata(tech, package_name, data)
+        return data
+
+    return _REGISTRY_SINGLEFLIGHT.do(key, _load)
+
+
 class CheckTarget(TypedDict, total=False):
     name: str
     declared: Optional[str]
@@ -175,7 +306,7 @@ class ScanResultRow(TypedDict, total=False):
     remediation: Optional[Dict[str, Any]]
 
 
-VERSION = "1.11.1"
+VERSION = "1.11.2"
 
 # External APIs Configuration
 URL_NPM_REGISTRY = "https://registry.npmjs.org/"
@@ -814,6 +945,15 @@ def get_severity_level(vuln):
 
 
 class SecureXMLBuilder:
+    __slots__ = (
+        "max_depth",
+        "max_expanded_size",
+        "depth",
+        "total_size",
+        "stack",
+        "root",
+    )
+
     def __init__(self, max_depth=15, max_expanded_size=10 * 1024 * 1024):
         self.max_depth = max_depth
         self.max_expanded_size = max_expanded_size
@@ -829,33 +969,35 @@ class SecureXMLBuilder:
                 f"XML parsing rejected: Node depth exceeds limit of {self.max_depth}"
             )
 
-        if "}" in name and not name.startswith("{"):
+        if "}" in name and name[0] != "{":
             name = "{" + name
 
-        processed_attrs = {}
-        for k, v in attrs.items():
-            if "}" in k and not k.startswith("{"):
-                k = "{" + k
-            processed_attrs[k] = v
-
-        self.total_size += len(name)
-        for k, v in processed_attrs.items():
-            self.total_size += len(k) + len(v)
+        if attrs:
+            processed_attrs = {}
+            size_add = len(name)
+            for k, v in attrs.items():
+                if "}" in k and k[0] != "{":
+                    k = "{" + k
+                processed_attrs[k] = v
+                size_add += len(k) + len(v)
+            self.total_size += size_add
+            element = ET.Element(name, processed_attrs)
+        else:
+            self.total_size += len(name)
+            element = ET.Element(name)
 
         if self.total_size > self.max_expanded_size:
             raise ValueError("XML parsing rejected: Expanded data size limit exceeded")
 
-        element = ET.Element(name, processed_attrs)
-        if not self.stack:
+        stack = self.stack
+        if not stack:
             self.root = element
         else:
-            self.stack[-1].append(element)
-        self.stack.append(element)
+            stack[-1].append(element)
+        stack.append(element)
 
     def end_element(self, name):
         self.depth -= 1
-        if "}" in name and not name.startswith("{"):
-            name = "{" + name
         if self.stack:
             self.stack.pop()
 
@@ -863,52 +1005,62 @@ class SecureXMLBuilder:
         self.total_size += len(data)
         if self.total_size > self.max_expanded_size:
             raise ValueError("XML parsing rejected: Expanded data size limit exceeded")
-        if self.stack:
-            elem = self.stack[-1]
+        stack = self.stack
+        if stack:
+            elem = stack[-1]
             if len(elem) == 0:
-                elem.text = (elem.text or "") + data
+                elem.text = data if elem.text is None else (elem.text + data)
             else:
                 last_child = elem[-1]
-                last_child.tail = (last_child.tail or "") + data
+                last_child.tail = (
+                    data if last_child.tail is None else (last_child.tail + data)
+                )
 
 
 def parse_secure_xml(content, max_depth=15, max_expanded_size=10 * 1024 * 1024):
-    builder = SecureXMLBuilder(max_depth, max_expanded_size)
-
     encoding = "utf-8"
+    content_bytes = None
+    raw_utf8_passthrough = False
     if isinstance(content, bytes):
         encoding = _detect_xml_encoding(content)
         try:
             prefix = content[:1024].decode("latin-1", errors="ignore")
-            # Optimization: Use global compiled regex instead of local compilation
             m = RE_XML_ENCODING.search(prefix)
             if m:
                 encoding = m.group(1)
         except (UnicodeError, IndexError, AttributeError):
             pass
-        try:
-            content_str = content.decode(encoding, errors="replace")
-        except Exception:
-            content_str = content.decode("latin-1", errors="replace")
-            encoding = "latin-1"
+
+        enc_lower = encoding.lower()
+        # Fast path: feed UTF-8 / ASCII / ISO-8859-1 bytes directly to Expat without decode+re-encode copy
+        if enc_lower in {"utf-8", "utf8", "utf-8-sig", "us-ascii", "ascii"}:
+            content_bytes = content
+            encoding = "utf-8"
+            raw_utf8_passthrough = True
+        elif enc_lower in {"iso-8859-1", "latin-1", "latin1"}:
+            content_bytes = content
+            encoding = "iso-8859-1"
+        else:
+            try:
+                content_str = content.decode(encoding, errors="replace")
+            except Exception:
+                content_str = content.decode("latin-1", errors="replace")
+                encoding = "latin-1"
+            try:
+                content_bytes = content_str.encode(encoding, errors="replace")
+            except Exception:
+                content_bytes = content_str.encode("utf-8", errors="replace")
+                encoding = "utf-8"
     else:
         content_str = content
-        # Optimization: Use global compiled regex instead of local compilation
         m = RE_XML_ENCODING.search(content_str[:1024])
         if m:
             encoding = m.group(1)
-
-    # FIXED: Re-encode string back to the detected/declared encoding and pass it to ParserCreate
-    try:
-        content_bytes = content_str.encode(encoding, errors="replace")
-    except Exception:
-        content_bytes = content_str.encode("utf-8", errors="replace")
-        encoding = "utf-8"
-
-    parser = xml.parsers.expat.ParserCreate(encoding=encoding, namespace_separator="}")
-    parser.StartElementHandler = builder.start_element
-    parser.EndElementHandler = builder.end_element
-    parser.CharacterDataHandler = builder.char_data
+        try:
+            content_bytes = content_str.encode(encoding, errors="replace")
+        except Exception:
+            content_bytes = content_str.encode("utf-8", errors="replace")
+            encoding = "utf-8"
 
     # 1 y 2. Delegar la validación a los handlers de Expat y lanzar ValueError inmediato
     def forbid_doctype(*args, **kwargs):
@@ -921,18 +1073,36 @@ def parse_secure_xml(content, max_depth=15, max_expanded_size=10 * 1024 * 1024):
             "XML parsing rejected: XML contains forbidden Entity declarations."
         )
 
-    parser.StartDoctypeDeclHandler = forbid_doctype
-    parser.EntityDeclHandler = forbid_entity
+    def _run_expat(raw_payload, enc):
+        local_builder = SecureXMLBuilder(max_depth, max_expanded_size)
+        parser = xml.parsers.expat.ParserCreate(encoding=enc, namespace_separator="}")
+        parser.StartElementHandler = local_builder.start_element
+        parser.EndElementHandler = local_builder.end_element
+        parser.CharacterDataHandler = local_builder.char_data
+        parser.StartDoctypeDeclHandler = forbid_doctype
+        parser.EntityDeclHandler = forbid_entity
+        parser.Parse(raw_payload, True)
+        return local_builder.root
 
     try:
-        parser.Parse(content_bytes, True)
+        return _run_expat(content_bytes, encoding)
     except xml.parsers.expat.ExpatError as e:
+        if raw_utf8_passthrough:
+            try:
+                content.decode("utf-8")
+            except UnicodeDecodeError:
+                sanitized_bytes = content.decode("utf-8", errors="replace").encode(
+                    "utf-8"
+                )
+                try:
+                    return _run_expat(sanitized_bytes, "utf-8")
+                except xml.parsers.expat.ExpatError as e2:
+                    e = e2
         err = ET.ParseError(str(e))
         err.code = e.code
         err.offset = e.offset
         err.position = (e.lineno, e.offset)
         raise err
-    return builder.root
 
 
 def safe_et_parse(source):
@@ -998,6 +1168,254 @@ def _sanitize_error_message(exc, target_name):
     return "Unexpected execution error during analysis"
 
 
+_SHARED_SSL_CONTEXT = None
+_SSL_CONTEXT_LOCK = threading.Lock()
+
+
+def _get_shared_ssl_context():
+    """Lazily creates and caches a single default SSLContext across all HTTPS requests."""
+    global _SHARED_SSL_CONTEXT
+    if _SHARED_SSL_CONTEXT is None:
+        with _SSL_CONTEXT_LOCK:
+            if _SHARED_SSL_CONTEXT is None:
+                _SHARED_SSL_CONTEXT = ssl.create_default_context()
+    return _SHARED_SSL_CONTEXT
+
+
+class _HTTPConnectionPool:
+    """Thread-safe HTTP/1.1 Keep-Alive connection pool using Python stdlib http.client."""
+
+    __slots__ = ("_lock", "_pools", "_max_per_host", "_idle_ttl")
+
+    def __init__(self, max_per_host=16, idle_ttl=30.0):
+        self._lock = threading.Lock()
+        self._pools = {}
+        self._max_per_host = max_per_host
+        self._idle_ttl = idle_ttl
+
+    def acquire(self, scheme, host, port, timeout):
+        key = (scheme, host, port)
+        now = time.monotonic()
+        with self._lock:
+            bucket = self._pools.get(key)
+            while bucket:
+                conn, last_used = bucket.pop()
+                if (now - last_used) <= self._idle_ttl and conn.sock is not None:
+                    conn.timeout = timeout
+                    try:
+                        conn.sock.settimeout(timeout)
+                    except OSError:
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+                        continue
+                    return conn, True
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        if scheme == "https":
+            conn = http.client.HTTPSConnection(
+                host, port=port, timeout=timeout, context=_get_shared_ssl_context()
+            )
+        else:
+            conn = http.client.HTTPConnection(host, port=port, timeout=timeout)
+        return conn, False
+
+    def release(self, scheme, host, port, conn):
+        if conn is None or conn.sock is None:
+            return
+        key = (scheme, host, port)
+        with self._lock:
+            bucket = self._pools.get(key)
+            if bucket is None:
+                bucket = collections.deque()
+                self._pools[key] = bucket
+            if len(bucket) < self._max_per_host:
+                bucket.append((conn, time.monotonic()))
+                return
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    def close_all(self):
+        with self._lock:
+            all_buckets = list(self._pools.values())
+            self._pools.clear()
+        for bucket in all_buckets:
+            while bucket:
+                conn, _ = bucket.pop()
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+
+_HTTP_POOL = _HTTPConnectionPool(max_per_host=16, idle_ttl=30.0)
+atexit.register(_HTTP_POOL.close_all)
+
+# Per-host concurrency cap to prevent HTTP 429 rate-limiting and socket exhaustion under macro parallelism
+_DOMAIN_SEMAPHORE_LOCK = threading.Lock()
+_DOMAIN_SEMAPHORES: Dict[str, threading.BoundedSemaphore] = {}
+_MAX_CONCURRENT_PER_HOST = 16
+
+
+def _get_domain_semaphore(host: str) -> threading.BoundedSemaphore:
+    key = host.lower()
+    sem = _DOMAIN_SEMAPHORES.get(key)
+    if sem is None:
+        with _DOMAIN_SEMAPHORE_LOCK:
+            sem = _DOMAIN_SEMAPHORES.get(key)
+            if sem is None:
+                sem = threading.BoundedSemaphore(_MAX_CONCURRENT_PER_HOST)
+                _DOMAIN_SEMAPHORES[key] = sem
+    return sem
+
+
+def _execute_pooled_request(scheme, req):
+    """Executes an HTTP/HTTPS urllib Request over _HTTP_POOL with Keep-Alive and gzip support."""
+    parsed = urllib.parse.urlsplit(req.full_url)
+    host = parsed.hostname
+    if not host:
+        raise urllib.error.URLError(f"Invalid host in URL: {req.full_url}")
+    port = parsed.port or (443 if scheme == "https" else 80)
+    target = parsed.path or "/"
+    if parsed.query:
+        target = f"{target}?{parsed.query}"
+
+    timeout = getattr(req, "timeout", None)
+    if timeout is None:
+        timeout = 10
+
+    method = req.get_method()
+    body = req.data
+
+    headers = {}
+    has_conn = False
+    has_ae = False
+    has_host = False
+    has_cl = False
+    for k, v in req.header_items():
+        kl = k.lower()
+        if kl == "connection":
+            has_conn = True
+        elif kl == "accept-encoding":
+            has_ae = True
+        elif kl == "host":
+            has_host = True
+        elif kl == "content-length":
+            has_cl = True
+        headers[k] = v
+
+    if not has_host:
+        default_port = 443 if scheme == "https" else 80
+        headers["Host"] = host if port == default_port else f"{host}:{port}"
+    if not has_conn:
+        headers["Connection"] = "keep-alive"
+    if not has_ae:
+        headers["Accept-Encoding"] = "gzip"
+    if body is not None and not has_cl:
+        headers["Content-Length"] = str(len(body))
+
+    with _get_domain_semaphore(host):
+        for retry_stale in range(2):
+            conn, is_reused = _HTTP_POOL.acquire(scheme, host, port, timeout)
+            try:
+                conn.request(method, target, body=body, headers=headers)
+                resp = conn.getresponse()
+                raw_bytes = resp.read()
+                resp_headers = resp.headers
+                status = resp.status
+                reason = resp.reason
+                will_close = resp.will_close
+                conn_hdr = (resp_headers.get("Connection") or "").lower()
+                if will_close or "close" in conn_hdr:
+                    conn.close()
+                else:
+                    _HTTP_POOL.release(scheme, host, port, conn)
+                break
+            except (
+                http.client.RemoteDisconnected,
+                http.client.BadStatusLine,
+                http.client.CannotSendRequest,
+                http.client.ResponseNotReady,
+                ConnectionResetError,
+                BrokenPipeError,
+                OSError,
+            ) as exc:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                if is_reused and retry_stale == 0:
+                    continue
+                raise urllib.error.URLError(exc) from exc
+            except http.client.HTTPException as exc:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                raise urllib.error.URLError(exc) from exc
+
+    content_encoding = (resp_headers.get("Content-Encoding") or "").lower()
+    if "gzip" in content_encoding and raw_bytes:
+        try:
+            raw_bytes = gzip.decompress(raw_bytes)
+        except Exception:
+            pass
+
+    wrapped = urllib.response.addinfourl(
+        io.BytesIO(raw_bytes), resp_headers, req.full_url, status
+    )
+    wrapped.msg = reason
+    wrapped.reason = reason
+    return wrapped
+
+
+class _KeepAliveHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        if req.has_proxy() or getattr(req, "_tunnel_host", None):
+            return super().http_open(req)
+        return _execute_pooled_request("http", req)
+
+
+class _KeepAliveHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, debuglevel=0):
+        super().__init__(debuglevel=debuglevel, context=_get_shared_ssl_context())
+
+    def https_open(self, req):
+        if req.has_proxy() or getattr(req, "_tunnel_host", None):
+            return super().https_open(req)
+        return _execute_pooled_request("https", req)
+
+
+def _install_keepalive_opener():
+    """Installs a pooled Keep-Alive + Gzip urllib opener preserving proxy/redirect/error semantics."""
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler(),
+        urllib.request.HTTPRedirectHandler(),
+        urllib.request.HTTPErrorProcessor(),
+        _KeepAliveHTTPHandler(),
+        _KeepAliveHTTPSHandler(),
+    )
+    urllib.request.install_opener(opener)
+
+
+_install_keepalive_opener()
+
+
+def _close_http_error(err):
+    """Safely closes an HTTPError underlying file/socket to prevent ResourceWarning leaks."""
+    if isinstance(err, urllib.error.HTTPError):
+        try:
+            err.close()
+        except Exception:
+            pass
+
+
 def safe_urlopen(req, timeout=10, max_retries=5, backoff=0.5):
     """Safely opens a URL with retries, exponential backoff, Retry-After handling, and default headers."""
     # 1. Extraer la URL de forma segura
@@ -1038,6 +1456,8 @@ def safe_urlopen(req, timeout=10, max_retries=5, backoff=0.5):
             if e.code == 404:
                 raise
             if e.code == 429:
+                if last_err is not None and last_err is not e:
+                    _close_http_error(last_err)
                 last_err = e
                 if attempt < max_retries - 1:
                     retry_after = (
@@ -1053,18 +1473,25 @@ def safe_urlopen(req, timeout=10, max_retries=5, backoff=0.5):
                             pass
                     if wait_sec is None:
                         wait_sec = backoff * (2**attempt) + random.uniform(0.5, 1.5)
+                    _close_http_error(e)
                     time.sleep(wait_sec)
                     continue
                 raise
             if e.code < 500:
                 raise
+            if last_err is not None and last_err is not e:
+                _close_http_error(last_err)
             last_err = e
+            if attempt < max_retries - 1:
+                _close_http_error(e)
         except (
             urllib.error.URLError,
             ConnectionResetError,
             TimeoutError,
             OSError,
         ) as e:
+            if last_err is not None and last_err is not e:
+                _close_http_error(last_err)
             last_err = e
 
         if attempt < max_retries - 1:
@@ -1075,6 +1502,8 @@ def safe_urlopen(req, timeout=10, max_retries=5, backoff=0.5):
 
 
 class PrereleaseKey:
+    __slots__ = ("prerelease",)
+
     def __init__(self, prerelease):
         self.prerelease = prerelease or ""
 
@@ -1310,27 +1739,49 @@ def fetch_node_schedule():
     Returns:
         dict: A dictionary mapping major versions to dicts with EOL and maintenance dates.
     """
-    url = "https://raw.githubusercontent.com/nodejs/Release/main/schedule.json"
+    cache_key = ("node_schedule",)
+    with _CACHE_LOCK:
+        cached = _AUX_NET_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
-    schedule = {}
-    try:
-        req = urllib.request.Request(
-            url, headers={"User-Agent": "Mozilla/5.0 (Kevlar Dependency Scanner)"}
-        )
-        with safe_urlopen(req, timeout=5) as response:
-            data = json.loads(response.read().decode("utf-8"))
-            for k, v in data.items():
-                major = k.removeprefix("v")
-                schedule[major] = {
-                    "maintenance": v.get("maintenance", "N/A"),
-                    "end": v.get("end", "N/A"),
-                }
-    except Exception as e:
-        print(
-            f"{COLOR_YELLOW}{ICON_WARN} Warning fetching Node.js release schedule: {e}{COLOR_RESET}"
-        )
+    def _fetch():
+        with _CACHE_LOCK:
+            rechecked = _AUX_NET_CACHE.get(cache_key)
+        if rechecked is not None:
+            return rechecked
 
-    return schedule
+        url = "https://raw.githubusercontent.com/nodejs/Release/main/schedule.json"
+        schedule = {}
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "Mozilla/5.0 (Kevlar Dependency Scanner)"}
+            )
+            with safe_urlopen(req, timeout=5) as response:
+                data = json.loads(response.read().decode("utf-8"))
+                for k, v in data.items():
+                    major = k.removeprefix("v")
+                    schedule[major] = {
+                        "maintenance": v.get("maintenance", "N/A"),
+                        "end": v.get("end", "N/A"),
+                    }
+            if schedule:
+                with _CACHE_LOCK:
+                    _AUX_NET_CACHE[cache_key] = schedule
+        except Exception as e:
+            with console_lock:
+                print(
+                    f"{COLOR_YELLOW}{ICON_WARN} Warning fetching Node.js release schedule: {e}{COLOR_RESET}"
+                )
+        return schedule
+
+    return _AUX_SINGLEFLIGHT.do(cache_key, _fetch)
+
+
+RE_SEMVER_OR_SPLIT = re.compile(r"\|\|?")
+RE_HYPHEN_RANGE = re.compile(
+    r"(?P<lo>v?\d+(?:\.\d+)*(?:-[0-9A-Za-z.-]+)?)\s+-\s+(?P<hi>v?\d+(?:\.\d+)*(?:-[0-9A-Za-z.-]+)?)"
+)
 
 
 def satisfy_term(version_str, term):
@@ -1340,14 +1791,14 @@ def satisfy_term(version_str, term):
             return True
 
         op = ""
-        for possible_op in (">=", "<=", ">", "<", "^", "~", "=="):
+        for possible_op in ("===", ">=", "<=", "!=", "~=", "~>", "==", ">", "<", "^", "~"):
             if term.startswith(possible_op):
                 op = possible_op
                 break
         if not op and term.startswith("="):
             op = "="
 
-        ver_part = term[len(op) :] if op else term
+        ver_part = term[len(op) :].strip() if op else term
 
         _, v_maj, v_min, v_pat, _, _ = parse_semver(version_str)
 
@@ -1358,12 +1809,14 @@ def satisfy_term(version_str, term):
             parts = ver_part.split(".")
             try:
                 if len(parts) == 2:
-                    return v_maj == int(parts[0])
+                    matched = v_maj == int(parts[0])
                 elif len(parts) == 3:
-                    return v_maj == int(parts[0]) and v_min == int(parts[1])
+                    matched = v_maj == int(parts[0]) and v_min == int(parts[1])
+                else:
+                    matched = True
             except ValueError:
                 return False
-            return True
+            return (not matched) if op == "!=" else matched
 
         if not op:
             parts = ver_part.split(".")
@@ -1388,8 +1841,28 @@ def satisfy_term(version_str, term):
             return compare_versions(version_str, ver_part) > 0
         elif op == "<":
             return compare_versions(version_str, ver_part) < 0
-        elif op in {"=", "==", ""}:
+        elif op == "!=":
+            return compare_versions(version_str, ver_part) != 0
+        elif op in {"=", "==", "===", ""}:
             return compare_versions(version_str, ver_part) == 0
+        elif op in {"~=", "~>"}:
+            # PEP 440 compatible release (~=) and Ruby Bundler pessimistic operator (~>):
+            # ~=1.4 / ~>1.4 -> >=1.4, <2.0; ~=1.4.2 / ~>1.4.2 -> >=1.4.2, <1.5.0
+            if compare_versions(version_str, ver_part) < 0:
+                return False
+            clean_ver = ver_part.strip().lower().removeprefix("v")
+            if "+" in clean_ver:
+                clean_ver = clean_ver.split("+", 1)[0]
+            if "-" in clean_ver:
+                clean_ver = clean_ver.split("-", 1)[0]
+            parts = [
+                p.strip()
+                for p in clean_ver.split(".")
+                if p.strip() and p.strip() not in {"x", "*"}
+            ]
+            if len(parts) >= 3:
+                return v_maj == t_maj and v_min == t_min
+            return v_maj == t_maj
         elif op == "^":
             if compare_versions(version_str, ver_part) < 0:
                 return False
@@ -1461,7 +1934,9 @@ def check_semver_satisfies(version_str, range_str):
         return True
 
     range_str = RE_RANGE_CLEAN.sub(r"\1", range_str.strip())
-    or_parts = range_str.split("||")
+    if " - " in range_str:
+        range_str = RE_HYPHEN_RANGE.sub(r">=\g<lo> <=\g<hi>", range_str)
+    or_parts = RE_SEMVER_OR_SPLIT.split(range_str)
 
     for or_part in or_parts:
         or_part = or_part.strip()
@@ -1496,9 +1971,10 @@ def _check_all_targets_unified(targets, check_func, label, max_workers):
         futures = {executor.submit(check_func, t): t for t in targets}
         for future in as_completed(futures):
             completed += 1
-            with console_lock:
-                sys.stdout.write(f"\r{label}: {completed}/{total}... ")
-                sys.stdout.flush()
+            if _PARALLEL_SCAN_DEPTH == 0:
+                with console_lock:
+                    sys.stdout.write(f"\r{label}: {completed}/{total}... ")
+                    sys.stdout.flush()
             try:
                 res = future.result()
                 if isinstance(res, list):
@@ -1538,9 +2014,10 @@ def _check_all_targets_unified(targets, check_func, label, max_workers):
                         }
                     )
 
-    with console_lock:
-        sys.stdout.write("\r\033[K")
-        sys.stdout.flush()
+    if _PARALLEL_SCAN_DEPTH == 0:
+        with console_lock:
+            sys.stdout.write("\r\033[K")
+            sys.stdout.flush()
     return results
 
 
@@ -1774,64 +2251,85 @@ def determine_update_type(installed_ver, latest_same_major, latest_absolute):
     return abs_type
 
 
-# ⚡ Bolt Optimization: Memoize semver tier calculations to avoid sorting and parsing version arrays repeatedly.
-# Impact: Speeds up repeated semver tier evaluations by over 100x.
-@functools.lru_cache(maxsize=2048)
+def _semver_ge(cand_parsed, best_parsed):
+    """Returns True if cand_parsed >= best_parsed without allocating PrereleaseKey objects."""
+    c_num = cand_parsed[:5]
+    b_num = best_parsed[:5]
+    if c_num != b_num:
+        return c_num > b_num
+    c_pre = cand_parsed[5]
+    b_pre = best_parsed[5]
+    if c_pre == b_pre:
+        return True
+    if not c_pre:
+        return True
+    if not b_pre:
+        return False
+    return compare_prereleases(c_pre, b_pre) >= 0
+
+
+# ⚡ Single-pass O(V) semver tier calculation (avoids O(V log V) sort & PrereleaseKey allocations)
+@functools.lru_cache(maxsize=512)
 def _find_latest_semver_tiers_cached(installed_ver, all_versions_tuple):
     if not installed_ver or not all_versions_tuple:
         return (None, None, None)
 
-    clean_inst = RE_CLEAN_VER.sub("", installed_ver).split("+")[0]
+    if installed_ver[0].isdigit():
+        clean_inst = (
+            installed_ver.split("+", 1)[0] if "+" in installed_ver else installed_ver
+        )
+    else:
+        clean_inst = RE_CLEAN_VER.sub("", installed_ver).split("+", 1)[0]
     inst_parsed = parse_semver(clean_inst)
     inst_major = inst_parsed[1]
     inst_minor = inst_parsed[2]
     installed_is_prerelease = bool(inst_parsed[5])
 
-    parsed_versions = []
+    best_abs_v = best_abs_p = None
+    best_maj_v = best_maj_p = None
+    best_pat_v = best_pat_p = None
+
+    # Fallback trackers when installed is stable but all available versions are prereleases
+    fb_abs_v = fb_abs_p = None
+    fb_maj_v = fb_maj_p = None
+    fb_pat_v = fb_pat_p = None
+
+    clean_re_sub = RE_CLEAN_VER.sub
+    _parse = parse_semver
+    _ge = _semver_ge
+
     for v in all_versions_tuple:
-        clean_v = RE_CLEAN_VER.sub("", v).split("+")[0]
-        parsed_versions.append((v, parse_semver(clean_v)))
+        if v and v[0].isdigit():
+            clean_v = v.split("+", 1)[0] if "+" in v else v
+        else:
+            clean_v = clean_re_sub("", v).split("+", 1)[0]
+        parsed = _parse(clean_v)
 
-    filtered_versions = []
-    for v, parsed in parsed_versions:
         if not installed_is_prerelease and parsed[5]:
+            # Only track prerelease fallback if we haven't seen any stable release yet
+            if best_abs_v is None:
+                if fb_abs_p is None or _ge(parsed, fb_abs_p):
+                    fb_abs_v, fb_abs_p = v, parsed
+                if parsed[1] == inst_major:
+                    if fb_maj_p is None or _ge(parsed, fb_maj_p):
+                        fb_maj_v, fb_maj_p = v, parsed
+                    if parsed[2] == inst_minor:
+                        if fb_pat_p is None or _ge(parsed, fb_pat_p):
+                            fb_pat_v, fb_pat_p = v, parsed
             continue
-        filtered_versions.append((v, parsed))
 
-    if not filtered_versions:
-        filtered_versions = parsed_versions
-
-    def semver_sort_key(item):
-        epoch, major, minor, patch, revision, prerelease = item[1]
-        is_stable = 1 if not prerelease else 0
-        return (
-            epoch,
-            major,
-            minor,
-            patch,
-            revision,
-            is_stable,
-            PrereleaseKey(prerelease),
-        )
-
-    sorted_all = sorted(filtered_versions, key=semver_sort_key)
-    if not sorted_all:
-        return (None, None, None)
-
-    latest_absolute = sorted_all[-1][0]
-
-    same_major_versions = []
-    same_patch_versions = []
-    for v, parsed in sorted_all:
+        if best_abs_p is None or _ge(parsed, best_abs_p):
+            best_abs_v, best_abs_p = v, parsed
         if parsed[1] == inst_major:
-            same_major_versions.append(v)
+            if best_maj_p is None or _ge(parsed, best_maj_p):
+                best_maj_v, best_maj_p = v, parsed
             if parsed[2] == inst_minor:
-                same_patch_versions.append(v)
+                if best_pat_p is None or _ge(parsed, best_pat_p):
+                    best_pat_v, best_pat_p = v, parsed
 
-    latest_patch = same_patch_versions[-1] if same_patch_versions else None
-    latest_same_major = same_major_versions[-1] if same_major_versions else None
-
-    return (latest_patch, latest_same_major, latest_absolute)
+    if best_abs_v is None:
+        return (fb_pat_v, fb_maj_v, fb_abs_v)
+    return (best_pat_v, best_maj_v, best_abs_v)
 
 
 def find_latest_semver_tiers(installed_ver, all_versions):
@@ -1841,7 +2339,10 @@ def find_latest_semver_tiers(installed_ver, all_versions):
     """
     if not installed_ver or not all_versions:
         return (None, None, None)
-    return _find_latest_semver_tiers_cached(installed_ver, tuple(all_versions))
+    versions_tuple = (
+        all_versions if isinstance(all_versions, tuple) else tuple(all_versions)
+    )
+    return _find_latest_semver_tiers_cached(installed_ver, versions_tuple)
 
 
 def find_latest_same_major(installed_ver, all_versions):
@@ -1956,11 +2457,18 @@ def _fetch_registry_json_or_xml(url, format="json"):
 
 def resolve_npm_repo(name):
     """Fetches the repository URL for an NPM package from registry (lazy-loaded)."""
+    cache_key = ("repo_npm", name.lower())
+    with _CACHE_LOCK:
+        if cache_key in _AUX_NET_CACHE:
+            return _AUX_NET_CACHE[cache_key]
     try:
         url = f"{URL_NPM_REGISTRY}{urllib.parse.quote(name)}/latest"
         data = _fetch_registry_json_or_xml(url, format="json")
         repo = data.get("repository")
-        return clean_repo_url(repo)
+        cleaned = clean_repo_url(repo)
+        with _CACHE_LOCK:
+            _AUX_NET_CACHE[cache_key] = cleaned
+        return cleaned
     except Exception as e:
         if DEBUG_MODE:
             print(
@@ -1972,6 +2480,10 @@ def resolve_npm_repo(name):
 
 def resolve_nuget_repo(name, version):
     """Parses .nuspec XML to find the repository URL of a NuGet package."""
+    cache_key = ("repo_nuget", name.lower(), version)
+    with _CACHE_LOCK:
+        if cache_key in _AUX_NET_CACHE:
+            return _AUX_NET_CACHE[cache_key]
     try:
         name_lower = name.lower()
         url = f"{URL_NUGET_REGISTRY}{name_lower}/{version}/{name_lower}.nuspec"
@@ -1987,10 +2499,14 @@ def resolve_nuget_repo(name, version):
             elif tag_local == "projectUrl":
                 if elem.text:
                     proj_url = elem.text.strip()
-        if repo_url:
-            return clean_repo_url(repo_url)
-        if proj_url:
-            return clean_repo_url(proj_url)
+        cleaned = (
+            clean_repo_url(repo_url)
+            if repo_url
+            else (clean_repo_url(proj_url) if proj_url else None)
+        )
+        with _CACHE_LOCK:
+            _AUX_NET_CACHE[cache_key] = cleaned
+        return cleaned
     except Exception as e:
         if DEBUG_MODE:
             print(
@@ -2002,6 +2518,10 @@ def resolve_nuget_repo(name, version):
 
 def resolve_maven_repo(registry_url, group_path, artifact_id, version):
     """Parses .pom XML to find the repository or project URL of a Maven/Gradle package."""
+    cache_key = ("repo_maven", registry_url, group_path, artifact_id, version)
+    with _CACHE_LOCK:
+        if cache_key in _AUX_NET_CACHE:
+            return _AUX_NET_CACHE[cache_key]
     try:
         url = f"{registry_url}{group_path}/{artifact_id}/{version}/{artifact_id}-{version}.pom"
         root = _fetch_registry_json_or_xml(url, format="xml")
@@ -2016,7 +2536,10 @@ def resolve_maven_repo(registry_url, group_path, artifact_id, version):
                         scm_url = child.text
             elif tag_local == "url" and elem.text:
                 proj_url = elem.text
-        return clean_repo_url(scm_url or proj_url)
+        cleaned = clean_repo_url(scm_url or proj_url)
+        with _CACHE_LOCK:
+            _AUX_NET_CACHE[cache_key] = cleaned
+        return cleaned
     except Exception as e:
         if DEBUG_MODE:
             print(
@@ -2053,84 +2576,21 @@ def hex_to_base64(hex_str):
         return None
 
 
+RE_JSONC_COMMENTS = re.compile(r'("(?:\\.|[^"\\])*")|//[^\n]*|/\*[\s\S]*?\*/')
+RE_JSONC_TRAILING_COMMA = re.compile(r'("(?:\\.|[^"\\])*")|,(\s*[}\]])')
+
+
 def clean_jsonc(text):
-    """Strips comments (// and /* ... */) and trailing commas from JSONC text."""
-    # Pass 1: Remove comments while respecting strings
-    no_comments = []
-    in_string = False
-    escape = False
-    i = 0
-    n = len(text)
-    while i < n:
-        c = text[i]
-        if in_string:
-            no_comments.append(c)
-            if escape:
-                escape = False
-            elif c == "\\":
-                escape = True
-            elif c == '"':
-                in_string = False
-            i += 1
-        else:
-            if c == '"':
-                in_string = True
-                no_comments.append(c)
-                i += 1
-            elif c == "/" and i + 1 < n and text[i + 1] == "/":
-                i += 2
-                while i < n and text[i] != "\n":
-                    i += 1
-                if i < n:
-                    no_comments.append("\n")
-                    i += 1
-            elif c == "/" and i + 1 < n and text[i + 1] == "*":
-                i += 2
-                while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
-                    i += 1
-                i += 2
-            else:
-                no_comments.append(c)
-                i += 1
-
-    intermediate = "".join(no_comments)
-
-    # Pass 2: Remove trailing commas before } or ] while respecting strings
-    out = []
-    in_string = False
-    escape = False
-    i = 0
-    n = len(intermediate)
-    while i < n:
-        c = intermediate[i]
-        if in_string:
-            out.append(c)
-            if escape:
-                escape = False
-            elif c == "\\":
-                escape = True
-            elif c == '"':
-                in_string = False
-            i += 1
-        else:
-            if c == '"':
-                in_string = True
-                out.append(c)
-                i += 1
-            elif c == ",":
-                j = i + 1
-                while j < n and intermediate[j] in " \t\r\n":
-                    j += 1
-                if j < n and intermediate[j] in "}]":
-                    i += 1
-                else:
-                    out.append(c)
-                    i += 1
-            else:
-                out.append(c)
-                i += 1
-
-    return "".join(out)
+    """Strips comments (// and /* ... */) and trailing commas from JSONC text using C-level regex."""
+    if "//" in text or "/*" in text:
+        text = RE_JSONC_COMMENTS.sub(
+            lambda m: m.group(1) if m.group(1) is not None else "", text
+        )
+    if "," in text:
+        text = RE_JSONC_TRAILING_COMMA.sub(
+            lambda m: m.group(1) if m.group(1) is not None else m.group(2), text
+        )
+    return text
 
 
 def find_npm_files(base_path, lockfile_override=None):
@@ -2688,23 +3148,20 @@ def parse_package_lock(filepath):
         integrity_dict = {}
         direct_versions = {}
 
-        # 1. Parse packages key (v2 and v3 lockfiles)
-        if "packages" in data and isinstance(data["packages"], dict):
-            # Map path to package name
-            path_to_name = {}
-            for pkg_path in data["packages"]:
-                if pkg_path == "":
-                    path_to_name[pkg_path] = "root"
+        # 1. Parse packages key (v2 and v3 lockfiles) in a single pass
+        packages = data.get("packages")
+        if isinstance(packages, dict):
+            _dep_sections = (
+                "dependencies",
+                "devDependencies",
+                "peerDependencies",
+                "optionalDependencies",
+            )
+            for pkg_path, pkg_info in packages.items():
+                if not isinstance(pkg_info, dict):
                     continue
-                parts = pkg_path.split("node_modules/")
-                if parts:
-                    path_to_name[pkg_path] = parts[-1]
-
-            for pkg_path, pkg_info in data["packages"].items():
-                if not pkg_path:
-                    continue
-                parts = pkg_path.split("node_modules/")
-                if len(parts) > 1:
+                if "node_modules/" in pkg_path:
+                    parts = pkg_path.split("node_modules/")
                     pkg_name = parts[-1]
                     version = pkg_info.get("version")
                     if pkg_name and version:
@@ -2715,29 +3172,22 @@ def parse_package_lock(filepath):
                         if len(parts) == 2 and parts[0] == "":
                             direct_versions[pkg_name] = version
 
-                    # Build parents map
-                    deps = pkg_info.get("dependencies", {})
-                    dev_deps = pkg_info.get("devDependencies", {})
-                    peer_deps = pkg_info.get("peerDependencies", {})
-                    opt_deps = pkg_info.get("optionalDependencies", {})
-                    all_deps = {**deps, **dev_deps, **peer_deps, **opt_deps}
-                    for child_name in all_deps:
-                        parents.setdefault(child_name, set()).add(pkg_name)
-
-            # Root & workspace package dependencies
-            for pkg_path, pkg_info in data["packages"].items():
-                if isinstance(pkg_info, dict) and "node_modules/" not in pkg_path:
-                    ws_deps = {
-                        **pkg_info.get("dependencies", {}),
-                        **pkg_info.get("devDependencies", {}),
-                        **pkg_info.get("peerDependencies", {}),
-                        **pkg_info.get("optionalDependencies", {}),
-                    }
-                    for child_name in ws_deps:
-                        parents.setdefault(child_name, set()).add("root")
+                    for sec in _dep_sections:
+                        sec_deps = pkg_info.get(sec)
+                        if sec_deps:
+                            for child_name in sec_deps:
+                                parents.setdefault(child_name, set()).add(pkg_name)
+                else:
+                    # Root & workspace package dependencies
+                    for sec in _dep_sections:
+                        ws_sec = pkg_info.get(sec)
+                        if ws_sec:
+                            for child_name in ws_sec:
+                                parents.setdefault(child_name, set()).add("root")
 
         # 2. Parse dependencies key (v1 and v2 fallback)
-        if "dependencies" in data and isinstance(data["dependencies"], dict):
+        v1_deps = data.get("dependencies")
+        if isinstance(v1_deps, dict):
 
             def recurse_v1_deps(deps_dict, parent_name="root"):
                 for pkg_name, pkg_info in deps_dict.items():
@@ -2753,13 +3203,13 @@ def parse_package_lock(filepath):
                             direct_versions[pkg_name] = version
                     parents.setdefault(pkg_name, set()).add(parent_name)
 
-                    if "dependencies" in pkg_info and isinstance(
-                        pkg_info["dependencies"], dict
-                    ):
-                        recurse_v1_deps(pkg_info["dependencies"], pkg_name)
+                    nested = pkg_info.get("dependencies")
+                    if isinstance(nested, dict):
+                        recurse_v1_deps(nested, pkg_name)
 
-            recurse_v1_deps(data["dependencies"])
+            recurse_v1_deps(v1_deps)
 
+        del data
         parents_clean = {k: list(v) for k, v in parents.items()}
         resolved_clean = {k: list(v) for k, v in resolved.items()}
         return resolved_clean, parents_clean, integrity_dict, direct_versions
@@ -2866,32 +3316,140 @@ def parse_bun_lock(filepath):
         return {}, {}, {}, {}
 
 
-def build_check_targets(pkg_data, lock_data, check_all):
-    """Builds list of targets to scan."""
+def _parse_npm_alias_spec(spec):
+    """Parses an npm: protocol specifier into (real_package_name_or_None, version_constraint).
+
+    Examples:
+        'npm:@typescript/typescript6@6.0.2' -> ('@typescript/typescript6', '6.0.2')
+        'npm:typescript@7.0.2'              -> ('typescript', '7.0.2')
+        'npm:@scope/pkg'                    -> ('@scope/pkg', '*')
+        'npm:pkg'                           -> ('pkg', '*')
+        'npm:^5.0.1'                        -> (None, '^5.0.1')
+        '^1.2.3'                            -> (None, '^1.2.3')
+    """
+    if not spec or not isinstance(spec, str):
+        return None, spec
+    s = spec.strip()
+    if not s.startswith("npm:"):
+        return None, spec
+    rest = s[4:].strip()
+    if not rest:
+        return None, ""
+    # Version-only Yarn Berry npm: specifier (e.g. 'npm:^1.2.3', 'npm:1.2.3', 'npm:*')
+    if rest[0] in "^~><=*0123456789":
+        return None, rest
+    if rest.startswith("@"):
+        at_idx = rest.find("@", 1)
+        if at_idx != -1:
+            return rest[:at_idx], rest[at_idx + 1 :] or "*"
+        return rest, "*"
+    at_idx = rest.find("@")
+    if at_idx != -1:
+        return rest[:at_idx], rest[at_idx + 1 :] or "*"
+    return rest, "*"
+
+
+def build_check_targets(pkg_data, lock_data, check_all, direct_versions_lock=None):
+    """Builds list of targets to scan, resolving npm: package aliases cleanly."""
     targets = []
 
-    if check_all:
-        all_packages = set(lock_data.keys())
-        if pkg_data:
-            all_packages.update(pkg_data["all_direct"].keys())
+    if not pkg_data:
+        if check_all:
+            for name in sorted(lock_data.keys()):
+                targets.append(
+                    {
+                        "name": name,
+                        "declared": None,
+                        "installed": lock_data.get(name, []),
+                    }
+                )
+            return targets
+        print(
+            f"{COLOR_RED}{ICON_ERROR} Cannot check direct dependencies: package.json is missing.{COLOR_RESET}"
+        )
+        return []
 
-        for name in sorted(all_packages):
-            declared = None
-            if pkg_data and name in pkg_data["all_direct"]:
-                declared = pkg_data["all_direct"][name]
-            installed = lock_data.get(name, [])
-            targets.append({"name": name, "declared": declared, "installed": installed})
-    else:
-        if not pkg_data:
-            print(
-                f"{COLOR_RED}{ICON_ERROR} Cannot check direct dependencies: package.json is missing.{COLOR_RESET}"
+    all_direct = pkg_data.get("all_direct", {})
+    claimed_lock_versions = set()
+    aliased_direct_names = set()
+    handled_direct_names = set()
+
+    # Pass 1: Process npm: aliased direct dependencies first so they claim their exact resolved versions
+    for name, declared in sorted(all_direct.items()):
+        real_pkg, alias_constraint = _parse_npm_alias_spec(declared)
+        if not real_pkg:
+            continue
+
+        handled_direct_names.add(name)
+        if real_pkg != name:
+            aliased_direct_names.add(name)
+
+        alias_installed = []
+        if direct_versions_lock and name in direct_versions_lock:
+            best_v = direct_versions_lock[name]
+            alias_installed = [best_v]
+            claimed_lock_versions.add((name, best_v))
+        elif real_pkg in lock_data and lock_data[real_pkg]:
+            best_v = find_direct_installed_version(
+                name, alias_constraint, lock_data[real_pkg]
             )
-            return []
+            if best_v:
+                alias_installed = [best_v]
+                claimed_lock_versions.add((real_pkg, best_v))
+        elif name in lock_data and lock_data[name]:
+            best_v = find_direct_installed_version(
+                name, alias_constraint, lock_data[name]
+            )
+            if best_v:
+                alias_installed = [best_v]
+                claimed_lock_versions.add((name, best_v))
 
-        for name, declared in sorted(pkg_data["all_direct"].items()):
-            installed = lock_data.get(name, [])
-            targets.append({"name": name, "declared": declared, "installed": installed})
+        targets.append(
+            {
+                "name": name,
+                "registry_name": real_pkg,
+                "declared": declared,
+                "installed": alias_installed,
+            }
+        )
 
+    # Pass 2: Process standard (non-aliased) direct dependencies
+    for name, declared in sorted(all_direct.items()):
+        if name in handled_direct_names:
+            continue
+        raw_installed = lock_data.get(name, [])
+        if raw_installed and claimed_lock_versions:
+            unclaimed = [
+                v for v in raw_installed if (name, v) not in claimed_lock_versions
+            ]
+            installed = unclaimed if unclaimed else raw_installed
+        else:
+            installed = raw_installed
+        targets.append({"name": name, "declared": declared, "installed": installed})
+
+    # Pass 3: Add remaining transitive lockfile packages when --all is enabled
+    if check_all:
+        normal_direct_names = set(all_direct.keys()) - handled_direct_names
+        for name in sorted(lock_data.keys()):
+            if name in normal_direct_names:
+                continue
+            remaining = [
+                v
+                for v in lock_data.get(name, [])
+                if (name, v) not in claimed_lock_versions
+            ]
+            if not remaining:
+                continue
+            target_entry = {
+                "name": name,
+                "declared": None,
+                "installed": remaining,
+            }
+            if name in aliased_direct_names:
+                target_entry["force_transitive"] = True
+            targets.append(target_entry)
+
+    targets.sort(key=lambda t: (t["name"], 0 if t.get("declared") is not None else 1))
     return targets
 
 
@@ -2915,11 +3473,12 @@ def find_direct_installed_version(
 
     # Fallback 1: The version that satisfies the declared constraint
     if declared_constraint:
+        _, effective_constraint = _parse_npm_alias_spec(declared_constraint)
         try:
             satisfying = [
                 v
                 for v in installed_versions
-                if check_semver_satisfies(v, declared_constraint)
+                if check_semver_satisfies(v, effective_constraint)
             ]
             if len(satisfying) == 1:
                 return satisfying[0]
@@ -2944,6 +3503,9 @@ def check_npm_package(target):
     name = target["name"]
     declared = target["declared"]
     installed_versions = target["installed"]
+    alias_pkg, alias_constraint = _parse_npm_alias_spec(declared)
+    registry_name = target.get("registry_name") or alias_pkg or name
+    force_transitive = bool(target.get("force_transitive", False))
 
     # Helper to check if a version string is explicitly local
     def is_local_version(ver_str):
@@ -2954,25 +3516,53 @@ def check_npm_package(target):
             ("file:", "link:", "portal:", "workspace:", "./", "../", "/")
         )
 
-    versions_to_check = installed_versions if installed_versions else [declared]
+    if installed_versions:
+        versions_to_check = installed_versions
+    elif alias_pkg is not None:
+        versions_to_check = [alias_constraint]
+    else:
+        versions_to_check = [declared]
     results = []
 
+    if versions_to_check and all(is_local_version(v) for v in versions_to_check):
+        for ver_str in versions_to_check:
+            row = {
+                "name": name,
+                "declared": declared,
+                "installed": ver_str,
+                "latest": "Local",
+                "latest_same_major": None,
+                "latest_absolute": None,
+                "status": "local",
+                "deprecated": None,
+                "error": None,
+                "repo_url": None,
+                "compare_url": None,
+                "releases_url": None,
+                "mismatch_checksum": False,
+                "lockfile_checksum": None,
+                "registry_checksums": [],
+            }
+            if registry_name != name:
+                row["_registry_name"] = registry_name
+            if force_transitive:
+                row["_force_transitive"] = True
+            results.append(row)
+        _set_cached_target_result("npm", target, results)
+        return results
+
     try:
-        # Check package-level metadata cache
-        cached_meta = _get_cached_registry_metadata("npm", name)
-        if cached_meta is not None:
-            latest_version, all_versions_meta = cached_meta
-            all_versions = list(all_versions_meta.keys())
-        else:
+        # Check package-level metadata cache with in-flight singleflight deduplication
+        def _fetch_npm_meta():
             # Properly URL-encode scoped packages (e.g. @babel/core -> @babel%2Fcore)
-            if name.startswith("@"):
-                parts = name.split("/")
+            if registry_name.startswith("@"):
+                parts = registry_name.split("/")
                 if len(parts) == 2:
                     encoded_name = f"{parts[0]}%2F{parts[1]}"
                 else:
-                    encoded_name = urllib.parse.quote(name)
+                    encoded_name = urllib.parse.quote(registry_name)
             else:
-                encoded_name = urllib.parse.quote(name)
+                encoded_name = urllib.parse.quote(registry_name)
 
             url = f"{URL_NPM_REGISTRY}{encoded_name}"
             req = urllib.request.Request(url)
@@ -2982,46 +3572,75 @@ def check_npm_package(target):
             with safe_urlopen(req, timeout=10) as response:
                 data = json.loads(response.read().decode("utf-8"))
 
-            latest_version = data.get("dist-tags", {}).get("latest")
-            all_versions_meta = data.get("versions", {})
-            all_versions = list(all_versions_meta.keys())
-            _set_cached_registry_metadata(
-                "npm", name, (latest_version, all_versions_meta)
-            )
+            lv = data.get("dist-tags", {}).get("latest")
+            raw_versions_meta = data.get("versions") or {}
+            av = tuple(raw_versions_meta.keys())
+            d_map = {}
+            h_map = {}
+            for v_key, v_meta in raw_versions_meta.items():
+                if not isinstance(v_meta, dict):
+                    continue
+                dep_val = v_meta.get("deprecated")
+                if dep_val:
+                    d_map[v_key] = dep_val
+                dist_val = v_meta.get("dist")
+                if isinstance(dist_val, dict):
+                    r_int = dist_val.get("integrity") or ""
+                    r_sha = dist_val.get("shasum") or ""
+                    if r_int or r_sha:
+                        h_map[v_key] = (r_int, r_sha)
+            repo_u = clean_repo_url(data.get("repository"))
+            del raw_versions_meta, data
+            return (lv, av, d_map, h_map, repo_u)
+
+        (
+            latest_version,
+            all_versions,
+            deprecated_map,
+            dist_hashes_map,
+            inline_repo_url,
+        ) = _get_or_fetch_registry_metadata("npm", registry_name, _fetch_npm_meta)
 
         for ver_str in versions_to_check:
             # If the version itself is explicitly local, we treat it as Local/local
             if is_local_version(ver_str):
-                results.append(
-                    {
-                        "name": name,
-                        "declared": declared,
-                        "installed": ver_str,
-                        "latest": "Local",
-                        "latest_same_major": None,
-                        "latest_absolute": None,
-                        "status": "local",
-                        "deprecated": None,
-                        "error": None,
-                        "repo_url": None,
-                        "compare_url": None,
-                        "releases_url": None,
-                        "mismatch_checksum": False,
-                        "lockfile_checksum": None,
-                        "registry_checksums": [],
-                    }
-                )
+                row = {
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": "Local",
+                    "latest_same_major": None,
+                    "latest_absolute": None,
+                    "status": "local",
+                    "deprecated": None,
+                    "error": None,
+                    "repo_url": None,
+                    "compare_url": None,
+                    "releases_url": None,
+                    "mismatch_checksum": False,
+                    "lockfile_checksum": None,
+                    "registry_checksums": [],
+                }
+                if registry_name != name:
+                    row["_registry_name"] = registry_name
+                if force_transitive:
+                    row["_force_transitive"] = True
+                results.append(row)
                 continue
 
-            # Strip ranges prefixes to get base version for check
-            clean_ver = RE_CLEAN_VER.sub("", ver_str) if ver_str else "0.0.0"
+            # Strip npm: alias prefix if present, then strip range prefixes to get base version
+            effective_ver = (
+                _parse_npm_alias_spec(ver_str)[1]
+                if isinstance(ver_str, str) and ver_str.startswith("npm:")
+                else ver_str
+            )
+            clean_ver = RE_CLEAN_VER.sub("", effective_ver) if effective_ver else "0.0.0"
             if not clean_ver:
                 clean_ver = "0.0.0"
 
-            ver_meta = (
-                all_versions_meta.get(clean_ver) or all_versions_meta.get(ver_str) or {}
+            deprecation_msg = deprecated_map.get(clean_ver) or deprecated_map.get(
+                ver_str
             )
-            deprecation_msg = ver_meta.get("deprecated")
 
             # Check lockfile integrity against registry integrity/shasum
             lockfile_integrity = target.get("integrity", {}).get(ver_str)
@@ -3029,9 +3648,13 @@ def check_npm_package(target):
             reg_hashes = []
             if lockfile_integrity:
                 lock_clean = lockfile_integrity.strip().lower()
-                dist = ver_meta.get("dist") or {}
-                reg_integrity = dist.get("integrity", "").strip().lower()
-                reg_shasum = dist.get("shasum", "").strip().lower()
+                dist_pair = (
+                    dist_hashes_map.get(clean_ver)
+                    or dist_hashes_map.get(ver_str)
+                    or ("", "")
+                )
+                reg_integrity = dist_pair[0].strip().lower()
+                reg_shasum = dist_pair[1].strip().lower()
 
                 reg_hashes = [
                     h.strip().lower() for h in reg_integrity.split() if h.strip()
@@ -3061,7 +3684,7 @@ def check_npm_package(target):
             compare_url = None
             releases_url = None
             if update_type in {"major", "minor-major", "patch-major"}:
-                repo_url = resolve_npm_repo(name)
+                repo_url = inline_repo_url or resolve_npm_repo(registry_name)
                 if repo_url:
                     compare_url = get_compare_url(repo_url, clean_ver, latest_absolute)
                     releases_url = (
@@ -3069,27 +3692,31 @@ def check_npm_package(target):
                     )
 
             display_latest = format_latest_versions(latest_same_major, latest_absolute)
-            results.append(
-                {
-                    "name": name,
-                    "declared": declared,
-                    "installed": ver_str,
-                    "latest": display_latest,
-                    "latest_same_major": latest_same_major,
-                    "latest_absolute": latest_absolute,
-                    "status": update_type,
-                    "deprecated": deprecation_msg,
-                    "error": None,
-                    "repo_url": repo_url,
-                    "compare_url": compare_url,
-                    "releases_url": releases_url,
-                    "mismatch_checksum": mismatch,
-                    "lockfile_checksum": lockfile_integrity,
-                    "registry_checksums": reg_hashes,
-                }
-            )
+            row = {
+                "name": name,
+                "declared": declared,
+                "installed": ver_str,
+                "latest": display_latest,
+                "latest_same_major": latest_same_major,
+                "latest_absolute": latest_absolute,
+                "status": update_type,
+                "deprecated": deprecation_msg,
+                "error": None,
+                "repo_url": repo_url,
+                "compare_url": compare_url,
+                "releases_url": releases_url,
+                "mismatch_checksum": mismatch,
+                "lockfile_checksum": lockfile_integrity,
+                "registry_checksums": reg_hashes,
+            }
+            if registry_name != name:
+                row["_registry_name"] = registry_name
+            if force_transitive:
+                row["_force_transitive"] = True
+            results.append(row)
 
     except urllib.error.HTTPError as e:
+        _close_http_error(e)
         if e.code == 404:
             for ver_str in versions_to_check:
                 results.append(
@@ -3163,6 +3790,78 @@ def check_all_targets(targets, max_workers):
 # ==============================================================================
 
 
+_OSV_SEVERITY_ORDER = {
+    "malicious": 5,
+    "critical": 4,
+    "high": 3,
+    "medium": 2,
+    "low": 1,
+    "unknown": 0,
+}
+
+
+def _extract_osv_severity(data_dict):
+    """Extracts normalized CVSS or database_specific severity string from an OSV record."""
+    if "_sev_str" in data_dict:
+        return data_dict["_sev_str"]
+    sev = "UNKNOWN"
+    sev_list = data_dict.get("severity")
+    if isinstance(sev_list, list):
+        for s in sev_list:
+            s_type = s.get("type")
+            if s_type in {"CVSS_V4", "CVSS_V3", "CVSS_V2"}:
+                score = s.get("score")
+                if score:
+                    score_str = str(score)
+                    if score_str.startswith("CVSS"):
+                        sev = score_str
+                    else:
+                        prefix = (
+                            "CVSS:4.0/"
+                            if s_type == "CVSS_V4"
+                            else ("CVSS:3.0/" if s_type == "CVSS_V3" else "CVSS:2.0/")
+                        )
+                        sev = f"{prefix}{score_str}"
+                break
+    if sev == "UNKNOWN":
+        db_specs = []
+        db_root = data_dict.get("database_specific")
+        if isinstance(db_root, dict):
+            db_specs.append(db_root)
+        aff_list = data_dict.get("affected")
+        if isinstance(aff_list, list):
+            for aff in aff_list:
+                if isinstance(aff, dict):
+                    aff_db = aff.get("database_specific")
+                    if isinstance(aff_db, dict):
+                        db_specs.append(aff_db)
+        for db_spec in db_specs:
+            sev_val = db_spec.get("severity") or db_spec.get("cvss")
+            if sev_val:
+                sev = str(sev_val)
+                break
+            info_val = db_spec.get("informational")
+            if info_val:
+                sev = str(info_val).upper()
+                break
+    return sev
+
+
+def _compact_osv_vuln(vuln_dict):
+    """Projects a raw OSV vulnerability dict into minimal fields to save ~90% RAM."""
+    compact = {
+        "id": vuln_dict.get("id", ""),
+        "_sev_str": _extract_osv_severity(vuln_dict),
+    }
+    if "summary" in vuln_dict:
+        compact["summary"] = vuln_dict["summary"]
+    if "details" in vuln_dict:
+        compact["details"] = vuln_dict["details"]
+    if "aliases" in vuln_dict:
+        compact["aliases"] = vuln_dict["aliases"]
+    return compact
+
+
 def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
     """Checks vulnerabilities for all targets using OSV querybatch API.
     Returns a dict mapping (package_name, version) -> list of hydrated vulnerability dicts.
@@ -3170,91 +3869,156 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
     final_package_to_vulns = {}
     queries = []
     query_mapping = []
+    seen_query_keys = set()
+    dup_mappings = []
+    alias_backmaps = []
 
     for t in targets:
         name = t["name"]
         declared = t["declared"]
         installed_versions = t["installed"]
+        alias_pkg, alias_constraint = _parse_npm_alias_spec(declared)
+        query_name = t.get("registry_name") or alias_pkg or name
 
-        versions_to_check = installed_versions if installed_versions else [declared]
+        if installed_versions:
+            versions_to_check = installed_versions
+        elif alias_pkg is not None:
+            versions_to_check = [alias_constraint]
+        else:
+            versions_to_check = [declared]
+
         for ver_str in versions_to_check:
-            # Clean range prefix symbols
-            clean_ver = RE_CLEAN_VER.sub("", ver_str) if ver_str else "0.0.0"
+            # Clean npm: alias prefix if present and range prefix symbols
+            eff_ver = (
+                _parse_npm_alias_spec(ver_str)[1]
+                if isinstance(ver_str, str) and ver_str.startswith("npm:")
+                else ver_str
+            )
+            clean_ver = RE_CLEAN_VER.sub("", eff_ver) if eff_ver else "0.0.0"
             if not clean_ver:
                 clean_ver = "0.0.0"
 
-            cache_key = (ecosystem, name.lower(), clean_ver)
+            cache_key = (ecosystem, query_name.lower(), clean_ver)
             with _CACHE_LOCK:
-                if cache_key in _OSV_VULNS_CACHE:
-                    cached_vulns = _OSV_VULNS_CACHE[cache_key]
-                    if cached_vulns:
-                        cached_copies = [dict(v) for v in cached_vulns]
+                cached_vulns = _OSV_VULNS_CACHE.get(cache_key)
+                is_cached = cache_key in _OSV_VULNS_CACHE
+            if is_cached:
+                if cached_vulns:
+                    cached_copies = [dict(v) for v in cached_vulns]
+                    final_package_to_vulns[(query_name, ver_str)] = cached_copies
+                    final_package_to_vulns[(query_name, clean_ver)] = cached_copies
+                    if query_name != name:
                         final_package_to_vulns[(name, ver_str)] = cached_copies
                         final_package_to_vulns[(name, clean_ver)] = cached_copies
-                    continue
+                continue
+
+            if query_name != name:
+                alias_backmaps.append((name, ver_str, query_name, clean_ver))
+
+            dedup_key = (query_name, clean_ver)
+            if dedup_key in seen_query_keys:
+                dup_mappings.append((query_name, ver_str, clean_ver))
+                continue
+            seen_query_keys.add(dedup_key)
 
             queries.append(
                 {
-                    "package": {"name": name, "ecosystem": ecosystem},
+                    "package": {"name": query_name, "ecosystem": ecosystem},
                     "version": clean_ver,
                 }
             )
-            query_mapping.append((name, ver_str, clean_ver))
+            query_mapping.append((query_name, ver_str, clean_ver))
 
     if not queries:
         return final_package_to_vulns
 
-    print(
-        f"{COLOR_BOLD}{COLOR_CYAN}Querying OSV vulnerability database...{COLOR_RESET}\n"
-    )
+    if _PARALLEL_SCAN_DEPTH == 0:
+        with console_lock:
+            print(
+                f"{COLOR_BOLD}{COLOR_CYAN}Querying OSV vulnerability database...{COLOR_RESET}\n"
+            )
 
     results_list = []
     chunk_size = 1000
     total_queries = len(queries)
-    for i in range(0, total_queries, chunk_size):
-        chunk_queries = queries[i : i + chunk_size]
-        current_count = min(i + chunk_size, total_queries)
-        sys.stdout.write(
-            f"\r{COLOR_GRAY}[OSV] Sending batch query: {current_count}/{total_queries} packages...{COLOR_RESET}\033[K"
-        )
-        sys.stdout.flush()
+    chunks = [
+        queries[i : i + chunk_size] for i in range(0, total_queries, chunk_size)
+    ]
+
+    def _query_osv_chunk(chunk_idx, chunk_queries):
         try:
-            url = URL_OSV_QUERYBATCH
             req = urllib.request.Request(
-                url,
+                URL_OSV_QUERYBATCH,
                 data=json.dumps({"queries": chunk_queries}).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
             )
-
             with safe_urlopen(req, timeout=15) as response:
                 res_data = json.loads(response.read().decode("utf-8"))
-
-            results_list.extend(res_data.get("results", []))
+            return chunk_idx, res_data.get("results", [])
         except Exception as e:
-            sys.stdout.write("\n")
-            print(
-                f"{COLOR_RED}{ICON_ERROR} Failed to query OSV database batch: {e}{COLOR_RESET}"
-            )
-            # Extend results_list with empty results to maintain index alignment with query_mapping
-            results_list.extend([{"vulns": []}] * len(chunk_queries))
+            with console_lock:
+                if _PARALLEL_SCAN_DEPTH == 0:
+                    sys.stdout.write("\n")
+                print(
+                    f"{COLOR_RED}{ICON_ERROR} Failed to query OSV database batch: {e}{COLOR_RESET}"
+                )
+            return chunk_idx, [{"vulns": []}] * len(chunk_queries)
 
-    # Process batch results and collect vulnerability details
+    if len(chunks) == 1:
+        if _PARALLEL_SCAN_DEPTH == 0:
+            with console_lock:
+                sys.stdout.write(
+                    f"\r{COLOR_GRAY}[OSV] Sending batch query: {total_queries}/{total_queries} packages...{COLOR_RESET}\033[K"
+                )
+                sys.stdout.flush()
+        _, chunk_res = _query_osv_chunk(0, chunks[0])
+        results_list.extend(chunk_res)
+    else:
+        ordered_chunk_results = [None] * len(chunks)
+        sent_count = 0
+        chunk_workers = min(max(1, max_workers), len(chunks), 4)
+        with ThreadPoolExecutor(max_workers=chunk_workers) as chunk_exec:
+            futs = {
+                chunk_exec.submit(_query_osv_chunk, idx, cq): len(cq)
+                for idx, cq in enumerate(chunks)
+            }
+            for fut in as_completed(futs):
+                c_idx, c_res = fut.result()
+                ordered_chunk_results[c_idx] = c_res
+                sent_count += futs[fut]
+                if _PARALLEL_SCAN_DEPTH == 0:
+                    with console_lock:
+                        sys.stdout.write(
+                            f"\r{COLOR_GRAY}[OSV] Sending batch query: {sent_count}/{total_queries} packages...{COLOR_RESET}\033[K"
+                        )
+                        sys.stdout.flush()
+        for c_res in ordered_chunk_results:
+            if c_res:
+                results_list.extend(c_res)
+
+    # Process batch results and collect compact vulnerability details
     hydrated_details = {}
-    with _CACHE_LOCK:
-        hydrated_details.update(_OSV_HYDRATED_DETAILS_CACHE)
-
+    new_hydrated_cache = {}
     package_to_vuln_ids = {}
 
     total_results = len(results_list)
+    last_progress_ts = 0.0
     for i, res in enumerate(results_list):
         if i >= len(query_mapping):
             break
         name, ver_str, clean_ver = query_mapping[i]
 
-        sys.stdout.write(
-            f"\r{COLOR_GRAY}[OSV] Hydrating in-memory structures: {i + 1}/{total_results} packages...{COLOR_RESET}\033[K"
-        )
-        sys.stdout.flush()
+        if _PARALLEL_SCAN_DEPTH == 0 and (
+            i == 0 or i + 1 == total_results or (i & 63) == 0
+        ):
+            now = time.monotonic()
+            if i + 1 == total_results or (now - last_progress_ts) >= 0.1:
+                last_progress_ts = now
+                with console_lock:
+                    sys.stdout.write(
+                        f"\r{COLOR_GRAY}[OSV] Hydrating in-memory structures: {i + 1}/{total_results} packages...{COLOR_RESET}\033[K"
+                    )
+                    sys.stdout.flush()
 
         vulns = res.get("vulns", [])
 
@@ -3284,32 +4048,48 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
         if vulns:
             ids = []
             for vuln in vulns:
-                if "id" in vuln:
-                    vuln_id = vuln["id"]
+                vuln_id = vuln.get("id")
+                if vuln_id:
                     ids.append(vuln_id)
-                    hydrated_details[vuln_id] = vuln
-                    with _CACHE_LOCK:
-                        _OSV_HYDRATED_DETAILS_CACHE[vuln_id] = vuln
+                    compact = _compact_osv_vuln(vuln)
+                    hydrated_details[vuln_id] = compact
+                    new_hydrated_cache[vuln_id] = compact
             package_to_vuln_ids[(name, clean_ver)] = ids
         else:
             # Explicitly store empty vuln list for clean packages
             package_to_vuln_ids[(name, clean_ver)] = []
 
     # Clean current line after in-memory hydration
-    sys.stdout.write("\r\033[K")
-    sys.stdout.flush()
+    if _PARALLEL_SCAN_DEPTH == 0:
+        with console_lock:
+            sys.stdout.write("\r\033[K")
+            sys.stdout.flush()
 
-    # Identify any orphaned IDs that might need fallback fetching
+    # Collect all referenced IDs (and aliases) and check existing global cache selectively
     all_vuln_ids = set()
     for ids in package_to_vuln_ids.values():
         all_vuln_ids.update(ids)
 
+    with _CACHE_LOCK:
+        for vid in all_vuln_ids:
+            existing = _OSV_HYDRATED_DETAILS_CACHE.get(vid)
+            if existing is not None:
+                # Prefer cached entry if it already has summary while new batch entry lacks it
+                if "summary" in existing and (
+                    vid not in hydrated_details or "summary" not in hydrated_details[vid]
+                ):
+                    hydrated_details[vid] = existing
+                elif vid not in hydrated_details:
+                    hydrated_details[vid] = existing
+        for vid, compact in new_hydrated_cache.items():
+            prev = _OSV_HYDRATED_DETAILS_CACHE.get(vid)
+            if prev is None or "summary" in compact or "summary" not in prev:
+                _OSV_HYDRATED_DETAILS_CACHE[vid] = compact
+
     orphaned_ids = sorted(
-        [
-            vid
-            for vid in all_vuln_ids
-            if vid not in hydrated_details or "summary" not in hydrated_details[vid]
-        ]
+        vid
+        for vid in all_vuln_ids
+        if vid not in hydrated_details or "summary" not in hydrated_details[vid]
     )
 
     if orphaned_ids:
@@ -3321,14 +4101,16 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
                 url = f"{URL_OSV_VULNS}{vuln_id}"
                 req = urllib.request.Request(url)
                 with safe_urlopen(req, timeout=10) as response:
-                    return vuln_id, json.loads(response.read().decode("utf-8"))
+                    raw_detail = json.loads(response.read().decode("utf-8"))
+                    return vuln_id, _compact_osv_vuln(raw_detail)
             except Exception as e:
                 return vuln_id, {
                     "id": vuln_id,
                     "summary": f"Failed to fetch details: {e}",
-                    "severity": "UNKNOWN",
+                    "_sev_str": "UNKNOWN",
                 }
 
+        fetched_orphans = {}
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
                 executor.submit(fetch_vuln_detail, vid): vid for vid in orphaned_ids
@@ -3336,75 +4118,51 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
             for future in as_completed(futures):
                 completed += 1
                 vid = futures[future]
-                sys.stdout.write(
-                    f"\r{COLOR_GRAY}[Progress: {completed}/{total_orphaned}] Fetching missing advisory details for {vid}...{COLOR_RESET}\033[K"
-                )
-                sys.stdout.flush()
+                if _PARALLEL_SCAN_DEPTH == 0:
+                    with console_lock:
+                        sys.stdout.write(
+                            f"\r{COLOR_GRAY}[Progress: {completed}/{total_orphaned}] Fetching missing advisory details for {vid}...{COLOR_RESET}\033[K"
+                        )
+                        sys.stdout.flush()
 
                 vid_res, detail = future.result()
                 hydrated_details[vid_res] = detail
-                with _CACHE_LOCK:
-                    _OSV_HYDRATED_DETAILS_CACHE[vid_res] = detail
+                fetched_orphans[vid_res] = detail
 
-        sys.stdout.write("\r\033[K")
-        sys.stdout.flush()
+        with _CACHE_LOCK:
+            for vid_res, detail in fetched_orphans.items():
+                _OSV_HYDRATED_DETAILS_CACHE[vid_res] = detail
+
+        if _PARALLEL_SCAN_DEPTH == 0:
+            with console_lock:
+                sys.stdout.write("\r\033[K")
+                sys.stdout.flush()
+
+    # Pull any alias records present in global cache (without copying entire cache)
+    missing_aliases = set()
+    for v_data in hydrated_details.values():
+        for alias in v_data.get("aliases") or ():
+            if alias not in hydrated_details:
+                missing_aliases.add(alias)
+    if missing_aliases:
+        with _CACHE_LOCK:
+            for alias in missing_aliases:
+                cached_alias = _OSV_HYDRATED_DETAILS_CACHE.get(alias)
+                if cached_alias is not None:
+                    hydrated_details[alias] = cached_alias
 
     # Map back to packages
+    new_osv_vulns_entries = {}
     for (name, clean_ver), vids in package_to_vuln_ids.items():
         vuln_list = []
         for vid in vids:
             vuln_data = hydrated_details.get(vid, {})
 
-            def _extract_osv_severity(data_dict):
-                sev = "UNKNOWN"
-                if "severity" in data_dict and isinstance(data_dict["severity"], list):
-                    for s in data_dict["severity"]:
-                        if s.get("type") in {"CVSS_V4", "CVSS_V3", "CVSS_V2"}:
-                            score = s.get("score")
-                            if score:
-                                score_str = str(score)
-                                if score_str.startswith("CVSS"):
-                                    sev = score_str
-                                else:
-                                    prefix = (
-                                        "CVSS:4.0/"
-                                        if s.get("type") == "CVSS_V4"
-                                        else (
-                                            "CVSS:3.0/"
-                                            if s.get("type") == "CVSS_V3"
-                                            else "CVSS:2.0/"
-                                        )
-                                    )
-                                    sev = f"{prefix}{score_str}"
-                            break
-                if sev == "UNKNOWN":
-                    db_specs = []
-                    if isinstance(data_dict.get("database_specific"), dict):
-                        db_specs.append(data_dict["database_specific"])
-                    if isinstance(data_dict.get("affected"), list):
-                        for aff in data_dict["affected"]:
-                            if isinstance(aff, dict) and isinstance(
-                                aff.get("database_specific"), dict
-                            ):
-                                db_specs.append(aff["database_specific"])
-                    for db_spec in db_specs:
-                        sev_val = db_spec.get("severity") or db_spec.get("cvss")
-                        if sev_val:
-                            sev = str(sev_val)
-                            break
-                        info_val = db_spec.get("informational")
-                        if info_val:
-                            sev = str(info_val).upper()
-                            break
-                return sev
-
-            # Determine severity
             severity = _extract_osv_severity(vuln_data)
-
             summary = vuln_data.get("summary")
             details = vuln_data.get("details", "")
 
-            # If severity is UNKNOWN or summary is missing/generic, try to resolve via aliases already in hydrated_details
+            # If severity is UNKNOWN or summary is missing/generic, try to resolve via aliases
             if (
                 severity == "UNKNOWN" or not summary or summary == "No summary provided"
             ) and "aliases" in vuln_data:
@@ -3413,7 +4171,6 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
                     if alias_data:
                         if severity == "UNKNOWN":
                             severity = _extract_osv_severity(alias_data)
-
                         if not summary or summary == "No summary provided":
                             summary = alias_data.get("summary")
                         if not details:
@@ -3428,32 +4185,79 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
                 }
             )
 
-        severity_order = {
-            "malicious": 5,
-            "critical": 4,
-            "high": 3,
-            "medium": 2,
-            "low": 1,
-            "unknown": 0,
-        }
-        vuln_list.sort(
-            key=lambda v: severity_order.get(get_severity_level(v), 0), reverse=True
-        )
+        if len(vuln_list) > 1:
+            vuln_list.sort(
+                key=lambda v: _OSV_SEVERITY_ORDER.get(get_severity_level(v), 0),
+                reverse=True,
+            )
 
-        cache_key = (ecosystem, name.lower(), clean_ver)
-        with _CACHE_LOCK:
-            _OSV_VULNS_CACHE[cache_key] = vuln_list
+        new_osv_vulns_entries[(ecosystem, name.lower(), clean_ver)] = vuln_list
 
         if vuln_list:
             final_package_to_vulns[(name, clean_ver)] = [dict(v) for v in vuln_list]
 
-    for name, ver_str, clean_ver in query_mapping:
+    if new_osv_vulns_entries:
+        with _CACHE_LOCK:
+            for ck, vl in new_osv_vulns_entries.items():
+                _OSV_VULNS_CACHE[ck] = vl
+
+    for name, ver_str, clean_ver in itertools.chain(query_mapping, dup_mappings):
         if (name, clean_ver) in final_package_to_vulns:
             final_package_to_vulns[(name, ver_str)] = final_package_to_vulns[
                 (name, clean_ver)
             ]
 
+    for orig_name, ver_str, q_name, clean_ver in alias_backmaps:
+        if (q_name, clean_ver) in final_package_to_vulns:
+            final_package_to_vulns[(orig_name, ver_str)] = final_package_to_vulns[
+                (q_name, clean_ver)
+            ]
+            final_package_to_vulns[(orig_name, clean_ver)] = final_package_to_vulns[
+                (q_name, clean_ver)
+            ]
+
     return final_package_to_vulns
+
+
+def _run_registry_and_osv_parallel(
+    registry_fn,
+    targets,
+    osv_ecosystem,
+    max_workers,
+    vuls_enabled,
+    extra_tasks=None,
+):
+    """Runs registry metadata queries, OSV vulnerability batching, and optional independent network tasks concurrently."""
+    run_osv = bool(vuls_enabled and targets and osv_ecosystem)
+    extras = extra_tasks or {}
+    task_count = (
+        (1 if registry_fn is not None else 0) + (1 if run_osv else 0) + len(extras)
+    )
+    if task_count <= 1:
+        res = registry_fn() if registry_fn is not None else []
+        osv = (
+            check_osv_vulnerabilities(targets, osv_ecosystem, max_workers)
+            if run_osv
+            else {}
+        )
+        ex = {k: fn() for k, fn in extras.items()}
+        return res, osv, ex
+
+    with ThreadPoolExecutor(max_workers=task_count) as executor:
+        reg_future = executor.submit(registry_fn) if registry_fn is not None else None
+        osv_future = (
+            executor.submit(
+                check_osv_vulnerabilities, targets, osv_ecosystem, max_workers
+            )
+            if run_osv
+            else None
+        )
+        extra_futures = {k: executor.submit(fn) for k, fn in extras.items()}
+
+        results = reg_future.result() if reg_future is not None else []
+        osv_vulns = osv_future.result() if osv_future is not None else {}
+        extra_results = {k: fut.result() for k, fut in extra_futures.items()}
+    return results, osv_vulns, extra_results
 
 
 def validate_suppressions_schema(data):
@@ -3624,30 +4428,37 @@ def apply_vulnerability_suppressions(results, suppress_path, project_path=None):
 
         active_rules.append(rule)
 
+    # Pre-index active rules by package_lower for O(1) lookup per vulnerability
+    rules_by_pkg: Dict[str, List[Tuple[str, str, Dict[str, Any]]]] = {}
+    for rule in active_rules:
+        r_pkg = rule["package"].strip().lower()
+        r_eco = rule["ecosystem"].strip().lower() if rule.get("ecosystem") else ""
+        r_id = rule["id"].strip().upper()
+        rules_by_pkg.setdefault(r_pkg, []).append((r_eco, r_id, rule))
+
     suppressed_count = 0
     for r in results:
+        vulns = r.get("vulnerabilities")
+        if not vulns:
+            continue
         pkg_name = r["name"].lower()
+        pkg_rules = rules_by_pkg.get(pkg_name)
+        if not pkg_rules:
+            continue
+
         pkg_tech = r.get("technology", "").lower()
         active_vulns = []
         suppressed_vulns = []
 
-        for vuln in r.get("vulnerabilities", []):
+        for vuln in vulns:
             vuln_id = vuln["id"].upper()
 
             matched_rule = None
-            for rule in active_rules:
-                # 1. Package must match exactly
-                if rule["package"].strip().lower() != pkg_name:
+            for r_eco, r_id, rule in pkg_rules:
+                if r_eco and r_eco != pkg_tech:
                     continue
-                # 2. Ecosystem must match if specified
-                if rule.get("ecosystem"):
-                    if rule["ecosystem"].strip().lower() != pkg_tech:
-                        continue
-                # 3. ID must match exactly or be wildcard '*'
-                rule_id = rule["id"].strip().upper()
-                if rule_id != "*" and rule_id != vuln_id:
+                if r_id != "*" and r_id != vuln_id:
                     continue
-
                 matched_rule = rule
                 break
 
@@ -3740,7 +4551,11 @@ def _isolate_direct_npm_results(results, pkg_data, direct_versions_lock):
         return
     by_name = {}
     for idx, r in enumerate(results):
-        if not r.get("is_engine", False):
+        if (
+            not r.get("is_engine", False)
+            and not r.get("_force_transitive", False)
+            and r.get("declared") is not None
+        ):
             by_name.setdefault(r["name"], []).append(idx)
 
     for name, indices in by_name.items():
@@ -3762,13 +4577,17 @@ def _check_npm_integrity(results, lock_file, integrity_data):
     for r in results:
         r["missing_checksum"] = False
         r["weak_checksum"] = False
-        if r.get("is_engine", False):
+        if r.get("is_engine", False) or r.get("status") == "local":
             continue
 
         if lock_file:
             key = (r["name"], r["installed"])
-            if integrity_data.get(key):
-                integrity_str = integrity_data[key].lower()
+            reg_name = r.get("_registry_name")
+            integrity_raw = integrity_data.get(key)
+            if not integrity_raw and reg_name:
+                integrity_raw = integrity_data.get((reg_name, r["installed"]))
+            if integrity_raw:
+                integrity_str = integrity_raw.lower()
                 if "sha512-" in integrity_str or "sha256-" in integrity_str:
                     pass
                 elif "sha1-" in integrity_str:
@@ -3793,11 +4612,11 @@ def _check_npm_vulnerabilities(results, targets, args):
             r["vulnerabilities"] = []
 
 
-def _add_node_constraint_result(results, node_constraint):
+def _add_node_constraint_result(results, node_constraint, analysis=None):
     if not node_constraint:
         return
-    status, deprecated_msg, error_msg, recommendation = analyze_node_constraint(
-        node_constraint
+    status, deprecated_msg, error_msg, recommendation = (
+        analysis if analysis is not None else analyze_node_constraint(node_constraint)
     )
     results.append(
         {
@@ -3833,7 +4652,13 @@ def _resolve_npm_dependency_types(results, pkg_data, parents_data):
 
     for r in results:
         if not r.get("is_engine", False):
-            if r["name"] in direct_packages:
+            if r.get("_force_transitive", False):
+                r["dep_type"] = "Transitive"
+                direct_parents = find_direct_parents(
+                    r["name"], parents_data, direct_packages
+                )
+                r["required_by"] = sorted(direct_parents - {r["name"]})
+            elif r["name"] in direct_packages:
                 dev_deps = pkg_data.get("devDependencies", {}) if pkg_data else {}
                 r["dep_type"] = "Dev" if r["name"] in dev_deps else "Direct"
                 r["required_by"] = []
@@ -3851,10 +4676,13 @@ def _resolve_npm_dependency_types(results, pkg_data, parents_data):
 def _assign_npm_integrity_to_targets(targets, integrity_data):
     for t in targets:
         t_integrity = {}
+        reg_name = t.get("registry_name")
         for ver in t["installed"]:
             key = (t["name"], ver)
             if key in integrity_data:
                 t_integrity[ver] = integrity_data[key]
+            elif reg_name and (reg_name, ver) in integrity_data:
+                t_integrity[ver] = integrity_data[(reg_name, ver)]
         t["integrity"] = t_integrity
 
 
@@ -3878,7 +4706,9 @@ def run_npm_checker(args):
         _prepare_npm_lock_data(lock_file)
     )
 
-    targets = build_check_targets(pkg_data, lock_data, args.all)
+    targets = build_check_targets(
+        pkg_data, lock_data, args.all, direct_versions_lock=direct_versions_lock
+    )
     _assign_npm_integrity_to_targets(targets, integrity_data)
 
     node_constraint, _source = find_node_constraint(args.path, pkg_data)
@@ -3890,13 +4720,45 @@ def run_npm_checker(args):
         return None, None, 0
 
     start_time = time.time()
-    results = check_all_targets(targets, args.concurrent) if targets else []
+    vuls_enabled = getattr(args, "vuls", False)
+    extra_tasks = (
+        {"node": lambda: analyze_node_constraint(node_constraint)}
+        if node_constraint
+        else None
+    )
+    results, osv_vulns, extra_results = _run_registry_and_osv_parallel(
+        (lambda: check_all_targets(targets, args.concurrent)) if targets else None,
+        targets,
+        TECHNOLOGIES["npm"]["osv_ecosystem"],
+        args.concurrent,
+        vuls_enabled,
+        extra_tasks=extra_tasks,
+    )
 
     _isolate_direct_npm_results(results, pkg_data, direct_versions_lock)
     _check_npm_integrity(results, lock_file, integrity_data)
-    _check_npm_vulnerabilities(results, targets, args)
-    _add_node_constraint_result(results, node_constraint)
+    if vuls_enabled:
+        for r in results:
+            reg_name = r.get("_registry_name")
+            if reg_name:
+                r["vulnerabilities"] = osv_vulns.get(
+                    (reg_name, r["installed"]),
+                    osv_vulns.get((r["name"], r["installed"]), []),
+                )
+            else:
+                r["vulnerabilities"] = osv_vulns.get((r["name"], r["installed"]), [])
+    else:
+        for r in results:
+            r["vulnerabilities"] = []
+    _add_node_constraint_result(
+        results, node_constraint, analysis=extra_results.get("node")
+    )
     _resolve_npm_dependency_types(results, pkg_data, parents_data)
+
+    # Strip internal alias helper keys so output JSON/HTML/SARIF schema remains 100% clean
+    for r in results:
+        r.pop("_registry_name", None)
+        r.pop("_force_transitive", None)
 
     elapsed = time.time() - start_time
 
@@ -4107,8 +4969,9 @@ def evaluate_comparison_op(left_val, left_name, op, right_val, right_name):
     return False
 
 
+@functools.lru_cache(maxsize=1)
 def get_env_markers():
-    """Builds environment markers dictionary for the current interpreter."""
+    """Builds environment markers dictionary for the current interpreter (cached per process)."""
     import platform
 
     py_version_tuple = platform.python_version_tuple()
@@ -4142,6 +5005,94 @@ def get_env_markers():
     }
 
 
+_PIP_VCS_URL_PREFIXES = (
+    "git+",
+    "hg+",
+    "svn+",
+    "bzr+",
+    "http://",
+    "https://",
+    "file:",
+    "ssh://",
+)
+
+
+def _is_pip_vcs_or_local_spec(spec):
+    """Returns True if a Python version specifier/installed value is a VCS, direct URL, or local path."""
+    if not spec or not isinstance(spec, str):
+        return False
+    s = spec.strip()
+    if s.startswith("@"):
+        s = s[1:].strip()
+    sl = s.lower()
+    return sl.startswith(_PIP_VCS_URL_PREFIXES) or s.startswith(("./", "../", "/"))
+
+
+def _extract_pip_vcs_repo_url(spec):
+    """Extracts a clean repository URL from a Python VCS/direct URL specifier if available."""
+    if not spec or not isinstance(spec, str):
+        return None
+    s = spec.strip()
+    if s.startswith("@"):
+        s = s[1:].strip()
+    # Strip #egg=... fragment and @ref suffix before cleaning
+    if "#" in s:
+        s = s.split("#", 1)[0]
+    parsed = urllib.parse.urlsplit(s)
+    if parsed.path and "@" in parsed.path:
+        clean_path = parsed.path.rsplit("@", 1)[0]
+        s = urllib.parse.urlunsplit(
+            (parsed.scheme, parsed.netloc, clean_path, "", "")
+        )
+    return clean_repo_url(s)
+
+
+def _parse_pip_vcs_or_url(req_part):
+    """Parses bare VCS or direct URL Python requirements (e.g. 'git+https://github.com/openai/swarm.git').
+    Returns (package_name, declared_spec) if req_part is a bare VCS/URL requirement, else (None, None).
+    """
+    if not req_part or not isinstance(req_part, str):
+        return None, None
+    s = req_part.strip()
+    if not s.lower().startswith(_PIP_VCS_URL_PREFIXES):
+        return None, None
+
+    pkg_name = None
+    # 1. Prefer explicit #egg=<name> fragment when present
+    if "#" in s:
+        fragment = s.split("#", 1)[1]
+        for frag_part in fragment.split("&"):
+            if frag_part.lower().startswith("egg="):
+                raw_egg = frag_part[4:].strip()
+                if "[" in raw_egg:
+                    raw_egg = raw_egg.split("[", 1)[0].strip()
+                if raw_egg:
+                    pkg_name = raw_egg
+                    break
+
+    # 2. Fallback: derive package name from the last path segment of the URL
+    if not pkg_name:
+        base_url = s.split("#", 1)[0].split("?", 1)[0]
+        parsed = urllib.parse.urlsplit(base_url)
+        path_part = parsed.path.rstrip("/")
+        if "@" in path_part:
+            path_part = path_part.rsplit("@", 1)[0].rstrip("/")
+        seg = path_part.rsplit("/", 1)[-1] if "/" in path_part else path_part
+        for suffix in (".git", ".tar.gz", ".tgz", ".tar.bz2", ".zip", ".whl"):
+            if seg.lower().endswith(suffix):
+                seg = seg[: -len(suffix)]
+                break
+        # For wheel/archive filenames like 'pkg_name-1.2.3-py3-none-any', take leading dist name
+        if seg and "-" in seg and any(
+            s.lower().split("#", 1)[0].split("?", 1)[0].endswith(ext)
+            for ext in (".whl", ".tar.gz", ".tgz", ".zip")
+        ):
+            seg = seg.split("-", 1)[0]
+        pkg_name = seg.strip() or base_url
+
+    return pkg_name, s
+
+
 def parse_requirements_txt(filepath, seen_files=None, base_dir=None):
     """Parses requirements.txt to extract dependencies and parent traces, supporting PEP 508 and file inclusions."""
     if seen_files is None:
@@ -4163,24 +5114,22 @@ def parse_requirements_txt(filepath, seen_files=None, base_dir=None):
     seen_files.add(abs_filepath)
 
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-
         dependencies = {}
         parents = {}
 
         last_pkg = None
 
-        # Preprocess lines to merge continuation lines (ending with \)
+        # Stream file lines directly, merging continuation lines ending with '\'
         merged_lines = []
         continuation = ""
-        for line in lines:
-            stripped = line.strip()
-            if stripped.endswith("\\"):
-                continuation += stripped[:-1].rstrip() + " "
-            else:
-                merged_lines.append(continuation + line)
-                continuation = ""
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped.endswith("\\"):
+                    continuation += stripped[:-1].rstrip() + " "
+                else:
+                    merged_lines.append(continuation + line if continuation else line)
+                    continuation = ""
         if continuation:
             merged_lines.append(continuation)
 
@@ -4261,6 +5210,28 @@ def parse_requirements_txt(filepath, seen_files=None, base_dir=None):
                 req_part = stripped_line
                 marker_part = None
 
+            # Handle bare VCS/URL requirements (e.g. 'git+https://github.com/openai/swarm.git')
+            vcs_name, vcs_spec = _parse_pip_vcs_or_url(req_part)
+            if vcs_name:
+                if marker_part:
+                    try:
+                        env = get_env_markers()
+                        if not parse_and_evaluate_marker(marker_part, env):
+                            continue
+                    except Exception as e:
+                        print(
+                            f"{COLOR_YELLOW}{ICON_WARN} Warning evaluating marker '{marker_part}': {e}{COLOR_RESET}"
+                        )
+                dependencies[vcs_name] = vcs_spec
+                last_pkg = vcs_name
+                if comment.startswith("via"):
+                    parent_part = comment[3:].strip()
+                    for p in parent_part.split(","):
+                        p_clean = p.strip()
+                        if p_clean:
+                            parents.setdefault(vcs_name, set()).add(p_clean)
+                continue
+
             # Parse package name, optional extras, and specifier/URL (PEP 508 names must start with alphanumeric)
             match = RE_PEP508_REQ.match(req_part)
             if not match:
@@ -4321,12 +5292,29 @@ def check_pypi_package(target):
     versions_to_check = installed_versions if installed_versions else [declared]
     results = []
 
+    if versions_to_check and all(_is_pip_vcs_or_local_spec(v) for v in versions_to_check):
+        for ver_str in versions_to_check:
+            results.append(
+                {
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": "Local",
+                    "latest_same_major": None,
+                    "latest_absolute": None,
+                    "status": "local",
+                    "deprecated": None,
+                    "error": None,
+                    "repo_url": _extract_pip_vcs_repo_url(ver_str or declared),
+                    "compare_url": None,
+                    "releases_url": None,
+                }
+            )
+        _set_cached_target_result("pip", target, results)
+        return results
+
     try:
-        cached_meta = _get_cached_registry_metadata("pip", name)
-        if cached_meta is not None:
-            latest_version, releases, repo_url_raw = cached_meta
-            all_versions = list(releases.keys())
-        else:
+        def _fetch_pypi_meta():
             encoded_name = urllib.parse.quote(name)
             url = f"{URL_PYPI_REGISTRY}{encoded_name}/json"
 
@@ -4335,12 +5323,23 @@ def check_pypi_package(target):
                 data = json.loads(response.read().decode("utf-8"))
 
             info = data.get("info", {})
-            latest_version = info.get("version")
-            releases = data.get("releases", {})
-            all_versions = list(releases.keys())
+            lv = info.get("version")
+            releases = data.get("releases") or {}
+            av = tuple(releases.keys())
+            y_map = {}
+            for r_ver, files_list in releases.items():
+                if not files_list:
+                    continue
+                for file_info in files_list:
+                    if isinstance(file_info, dict) and file_info.get("yanked"):
+                        y_map[r_ver] = (
+                            file_info.get("yanked_reason")
+                            or "This release was yanked from PyPI."
+                        )
+                        break
 
             urls = info.get("project_urls") or {}
-            repo_url_raw = None
+            r_url = None
             for key in ["Source", "Repository", "Code", "Homepage"]:
                 for k, v in urls.items():
                     if (
@@ -4348,25 +5347,28 @@ def check_pypi_package(target):
                         and v
                         and is_github_url(clean_repo_url(v))
                     ):
-                        repo_url_raw = v
+                        r_url = v
                         break
-                if repo_url_raw:
+                if r_url:
                     break
-            if not repo_url_raw:
+            if not r_url:
                 hp = info.get("home_page")
                 if hp and is_github_url(clean_repo_url(hp)):
-                    repo_url_raw = hp
-            if not repo_url_raw:
+                    r_url = hp
+            if not r_url:
                 for v in urls.values():
                     if v and is_github_url(clean_repo_url(v)):
-                        repo_url_raw = v
+                        r_url = v
                         break
-            if not repo_url_raw:
-                repo_url_raw = info.get("home_page") or urls.get("Homepage")
+            if not r_url:
+                r_url = info.get("home_page") or urls.get("Homepage")
 
-            _set_cached_registry_metadata(
-                "pip", name, (latest_version, releases, repo_url_raw)
-            )
+            del releases, data
+            return (lv, av, y_map, r_url)
+
+        latest_version, all_versions, yanked_map, repo_url_raw = (
+            _get_or_fetch_registry_metadata("pip", name, _fetch_pypi_meta)
+        )
 
         for ver_str in versions_to_check:
             # Clean version constraints prefixes
@@ -4375,15 +5377,7 @@ def check_pypi_package(target):
                 clean_ver = "0.0.0"
 
             # Check yanking (deprecation)
-            files_list = releases.get(clean_ver) or releases.get(ver_str) or []
-            yanked_reason = None
-            for file_info in files_list:
-                if isinstance(file_info, dict) and file_info.get("yanked"):
-                    yanked_reason = (
-                        file_info.get("yanked_reason")
-                        or "This release was yanked from PyPI."
-                    )
-                    break
+            yanked_reason = yanked_map.get(clean_ver) or yanked_map.get(ver_str)
 
             # Find latest same major and absolute latest
             latest_same_major, latest_absolute = find_latest_same_major(
@@ -4428,6 +5422,7 @@ def check_pypi_package(target):
             )
 
     except urllib.error.HTTPError as e:
+        _close_http_error(e)
         error_msg = "Not Found" if e.code == 404 else f"HTTP {e.code}"
         for ver_str in versions_to_check:
             results.append(
@@ -4494,18 +5489,18 @@ def find_pip_files(base_path):
 
 
 def _iter_lock_blocks(filepath):
-    """Helper generator to read a lockfile line by line and yield blocks
-    separated by [[package]].
+    """Helper generator to read a lockfile line by line and yield line lists
+    for each block separated by [[package]] without redundant join+split copies.
     """
     current_block = []
     with open(filepath, "r", encoding="utf-8") as f:
         for line in f:
             if line.strip() == "[[package]]":
-                yield "".join(current_block)
+                yield current_block
                 current_block = []
             else:
                 current_block.append(line)
-        yield "".join(current_block)
+        yield current_block
 
 
 def parse_poetry_lock(filepath):
@@ -4518,8 +5513,7 @@ def parse_poetry_lock(filepath):
     try:
         blocks_gen = _iter_lock_blocks(filepath)
         next(blocks_gen, None)  # Skip the first block (before the first [[package]])
-        for block in blocks_gen:
-            lines = block.splitlines()
+        for lines in blocks_gen:
             name = None
             version = None
             in_deps = False
@@ -4575,8 +5569,7 @@ def parse_pdm_lock(filepath):
     try:
         blocks_gen = _iter_lock_blocks(filepath)
         next(blocks_gen, None)  # Skip the first block (before the first [[package]])
-        for block in blocks_gen:
-            lines = block.splitlines()
+        for lines in blocks_gen:
             name = None
             version = None
             in_deps = False
@@ -4661,6 +5654,9 @@ def parse_pep508(dep_string):
     req_part = dep_string.split(";", 1)[0].strip()
     if not req_part:
         return None, None
+    vcs_name, vcs_spec = _parse_pip_vcs_or_url(req_part)
+    if vcs_name:
+        return vcs_name, vcs_spec
     match = RE_PEP508_NAME.match(req_part)
     if not match:
         return None, None
@@ -4862,14 +5858,16 @@ def run_pip_checker(args):
         return None, None, 0
 
     start_time = time.time()
-    results = check_all_pip_targets(targets, args.concurrent)
+    vuls_enabled = getattr(args, "vuls", False)
+    results, osv_vulns, _ = _run_registry_and_osv_parallel(
+        lambda: check_all_pip_targets(targets, args.concurrent),
+        targets,
+        TECHNOLOGIES["pip"]["osv_ecosystem"],
+        args.concurrent,
+        vuls_enabled,
+    )
 
-    if getattr(args, "vuls", False):
-        tech_info = TECHNOLOGIES["pip"]
-        osv_vulns = check_osv_vulnerabilities(
-            targets, tech_info["osv_ecosystem"], args.concurrent
-        )
-
+    if vuls_enabled:
         for r in results:
             key = (r["name"], r["installed"])
             r["vulnerabilities"] = osv_vulns.get(key, [])
@@ -5172,11 +6170,29 @@ def check_nuget_package(target):
     versions_to_check = installed_versions if installed_versions else [declared]
     results = []
 
+    if versions_to_check and all(_is_pip_vcs_or_local_spec(v) for v in versions_to_check):
+        for ver_str in versions_to_check:
+            results.append(
+                {
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": "Local",
+                    "latest_same_major": None,
+                    "latest_absolute": None,
+                    "status": "local",
+                    "deprecated": None,
+                    "error": None,
+                    "repo_url": _extract_pip_vcs_repo_url(ver_str or declared),
+                    "compare_url": None,
+                    "releases_url": None,
+                }
+            )
+        _set_cached_target_result("pip", target, results)
+        return results
+
     try:
-        cached_meta = _get_cached_registry_metadata("nuget", name)
-        if cached_meta is not None:
-            valid_versions = cached_meta
-        else:
+        def _fetch_nuget_meta():
             encoded_name = urllib.parse.quote(name.lower())
             url = f"{URL_NUGET_REGISTRY}{encoded_name}/index.json"
 
@@ -5185,14 +6201,12 @@ def check_nuget_package(target):
                 data = json.loads(response.read().decode("utf-8"))
 
             versions_list = data.get("versions", [])
+            stable_versions = [v for v in versions_list if "-" not in v]
+            return tuple(stable_versions if stable_versions else versions_list)
 
-            stable_versions = []
-            for v in versions_list:
-                if "-" not in v:
-                    stable_versions.append(v)
-
-            valid_versions = stable_versions if stable_versions else versions_list
-            _set_cached_registry_metadata("nuget", name, valid_versions)
+        valid_versions = _get_or_fetch_registry_metadata(
+            "nuget", name, _fetch_nuget_meta
+        )
 
         for ver_str in versions_to_check:
             clean_ver = RE_CLEAN_VER.sub("", ver_str) if ver_str else "0.0.0"
@@ -5239,6 +6253,7 @@ def check_nuget_package(target):
             )
 
     except urllib.error.HTTPError as e:
+        _close_http_error(e)
         error_msg = "Not Found" if e.code == 404 else f"HTTP {e.code}"
         for ver_str in versions_to_check:
             results.append(
@@ -5296,9 +6311,12 @@ def run_nuget_checker(args):
     print(
         f"{COLOR_GRAY}{ICON_INFO} Reading C# / VB.NET project references...{COLOR_RESET}"
     )
+    cpm_cache = {}
     for manifest in manifests:
         proj_dir = os.path.dirname(manifest)
-        cpm_versions = find_and_parse_cpm_versions(proj_dir)
+        if proj_dir not in cpm_cache:
+            cpm_cache[proj_dir] = find_and_parse_cpm_versions(proj_dir)
+        cpm_versions = cpm_cache[proj_dir]
         proj_deps = parse_csproj_or_config(proj_dir, cpm_versions)
         pkg_data.update(proj_deps)
 
@@ -5329,16 +6347,17 @@ def run_nuget_checker(args):
         return None, None, 0
 
     start_time = time.time()
-    results = check_all_nuget_targets(targets, args.concurrent)
+    vuls_enabled = getattr(args, "vuls", False)
+    results, osv_vulns, _ = _run_registry_and_osv_parallel(
+        lambda: check_all_nuget_targets(targets, args.concurrent),
+        targets,
+        TECHNOLOGIES["nuget"]["osv_ecosystem"],
+        args.concurrent,
+        vuls_enabled,
+    )
 
-    # Check vulnerabilities via OSV if requested
-    if getattr(args, "vuls", False):
-        tech_info = TECHNOLOGIES["nuget"]
-        osv_vulns = check_osv_vulnerabilities(
-            targets, tech_info["osv_ecosystem"], args.concurrent
-        )
-
-        # Attach vulns back to results
+    # Attach vulnerabilities from OSV if requested
+    if vuls_enabled:
         for r in results:
             key = (r["name"], r["installed"])
             r["vulnerabilities"] = osv_vulns.get(key, [])
@@ -5471,11 +6490,29 @@ def check_composer_package(target):
     versions_to_check = installed_versions if installed_versions else [declared]
     results = []
 
+    if versions_to_check and all(_is_pip_vcs_or_local_spec(v) for v in versions_to_check):
+        for ver_str in versions_to_check:
+            results.append(
+                {
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": "Local",
+                    "latest_same_major": None,
+                    "latest_absolute": None,
+                    "status": "local",
+                    "deprecated": None,
+                    "error": None,
+                    "repo_url": _extract_pip_vcs_repo_url(ver_str or declared),
+                    "compare_url": None,
+                    "releases_url": None,
+                }
+            )
+        _set_cached_target_result("pip", target, results)
+        return results
+
     try:
-        cached_meta = _get_cached_registry_metadata("php", name)
-        if cached_meta is not None:
-            valid_versions, pkg_data = cached_meta
-        else:
+        def _fetch_php_meta():
             name_lower = name.lower()
             url = f"{URL_PACKAGIST_REGISTRY}{name_lower}.json"
 
@@ -5487,10 +6524,28 @@ def check_composer_package(target):
             pkg_data = packages.get(name_lower, [])
 
             versions_list = []
+            def_repo = None
+            v_overrides = {}
+            if pkg_data:
+                first_item = pkg_data[0]
+                def_repo = (first_item.get("source") or {}).get("url") or first_item.get(
+                    "homepage"
+                )
+
             for item in pkg_data:
                 v_str = item.get("version")
                 if v_str:
-                    versions_list.append(v_str.lstrip("v"))
+                    v_clean = v_str.lstrip("v")
+                    versions_list.append(v_clean)
+                    item_repo = (item.get("source") or {}).get("url") or item.get(
+                        "homepage"
+                    )
+                    if (
+                        item_repo
+                        and item_repo != def_repo
+                        and v_clean not in v_overrides
+                    ):
+                        v_overrides[v_clean] = item_repo
 
             stable_versions = []
             for v in versions_list:
@@ -5500,8 +6555,13 @@ def check_composer_package(target):
                 ) and RE_DECIMAL_VER_STRICT.match(v):
                     stable_versions.append(v)
 
-            valid_versions = stable_versions if stable_versions else versions_list
-            _set_cached_registry_metadata("php", name, (valid_versions, pkg_data))
+            vv = tuple(stable_versions if stable_versions else versions_list)
+            del pkg_data, packages, data
+            return (vv, def_repo, v_overrides)
+
+        valid_versions, default_repo_raw, ver_repo_overrides = (
+            _get_or_fetch_registry_metadata("php", name, _fetch_php_meta)
+        )
 
         for ver_str in versions_to_check:
             clean_ver = ver_str.lstrip("v") if ver_str else "0.0.0"
@@ -5522,18 +6582,11 @@ def check_composer_package(target):
             compare_url = None
             releases_url = None
             if update_type in {"major", "minor-major", "patch-major"}:
-                raw_url = None
-                for item in pkg_data:
-                    v_str = item.get("version", "").lstrip("v")
-                    if v_str == latest_absolute:
-                        raw_url = item.get("source", {}).get("url") or item.get(
-                            "homepage"
-                        )
-                        break
-                if not raw_url and pkg_data:
-                    raw_url = pkg_data[0].get("source", {}).get("url") or pkg_data[
-                        0
-                    ].get("homepage")
+                raw_url = (
+                    ver_repo_overrides.get(latest_absolute)
+                    if latest_absolute
+                    else None
+                ) or default_repo_raw
                 repo_url = clean_repo_url(raw_url)
                 if repo_url:
                     compare_url = get_compare_url(repo_url, clean_ver, latest_absolute)
@@ -5560,6 +6613,7 @@ def check_composer_package(target):
             )
 
     except urllib.error.HTTPError as e:
+        _close_http_error(e)
         error_msg = "Not Found" if e.code == 404 else f"HTTP {e.code}"
         for ver_str in versions_to_check:
             results.append(
@@ -5645,16 +6699,17 @@ def run_composer_checker(args):
         return None, None, 0
 
     start_time = time.time()
-    results = check_all_composer_targets(targets, args.concurrent)
+    vuls_enabled = getattr(args, "vuls", False)
+    results, osv_vulns, _ = _run_registry_and_osv_parallel(
+        lambda: check_all_composer_targets(targets, args.concurrent),
+        targets,
+        TECHNOLOGIES["php"]["osv_ecosystem"],
+        args.concurrent,
+        vuls_enabled,
+    )
 
-    # Check vulnerabilities via OSV if requested
-    if getattr(args, "vuls", False):
-        tech_info = TECHNOLOGIES["php"]
-        osv_vulns = check_osv_vulnerabilities(
-            targets, tech_info["osv_ecosystem"], args.concurrent
-        )
-
-        # Attach vulns back to results
+    # Attach vulnerabilities from OSV if requested
+    if vuls_enabled:
         for r in results:
             key = (r["name"], r["installed"])
             r["vulnerabilities"] = osv_vulns.get(key, [])
@@ -5714,7 +6769,7 @@ def parse_maven_dependency_management(root, prefix, properties):
     return dep_mgmt
 
 
-def find_root_maven_pom(manifest_path):
+def find_root_maven_pom(manifest_path, pom_tree_cache=None):
     """Climbs parent pom.xml files via <relativePath> or parent directories to find top-level monorepo pom.xml."""
     curr = os.path.abspath(manifest_path)
     visited = set()
@@ -5724,7 +6779,15 @@ def find_root_maven_pom(manifest_path):
         visited.add(curr)
         root_pom = curr
         try:
-            tree = safe_et_parse(curr)
+            tree = (
+                pom_tree_cache.get(curr)
+                if pom_tree_cache is not None
+                else None
+            )
+            if tree is None:
+                tree = safe_et_parse(curr)
+                if pom_tree_cache is not None:
+                    pom_tree_cache[curr] = tree
             root = tree.getroot()
             ns = root.tag.split("}")[0].lstrip("{") if "}" in root.tag else ""
             prefix = f"{{{ns}}}" if ns else ""
@@ -5750,7 +6813,9 @@ def find_root_maven_pom(manifest_path):
     return root_pom
 
 
-def find_all_maven_poms(root_pom_path, base_dir=None, visited=None):
+def find_all_maven_poms(
+    root_pom_path, base_dir=None, visited=None, pom_tree_cache=None
+):
     """Recursively finds all module pom.xml files declared in a parent pom.xml."""
     if visited is None:
         visited = set()
@@ -5771,7 +6836,15 @@ def find_all_maven_poms(root_pom_path, base_dir=None, visited=None):
 
     try:
         if os.path.exists(abs_root_pom):
-            tree = safe_et_parse(abs_root_pom)
+            tree = (
+                pom_tree_cache.get(abs_root_pom)
+                if pom_tree_cache is not None
+                else None
+            )
+            if tree is None:
+                tree = safe_et_parse(abs_root_pom)
+                if pom_tree_cache is not None:
+                    pom_tree_cache[abs_root_pom] = tree
             root = tree.getroot()
 
             ns = ""
@@ -5793,7 +6866,10 @@ def find_all_maven_poms(root_pom_path, base_dir=None, visited=None):
                         ):
                             poms.extend(
                                 find_all_maven_poms(
-                                    module_pom, base_dir=base_dir, visited=visited
+                                    module_pom,
+                                    base_dir=base_dir,
+                                    visited=visited,
+                                    pom_tree_cache=pom_tree_cache,
                                 )
                             )
     except (OSError, ET.ParseError, ValueError):
@@ -5810,7 +6886,11 @@ def find_all_maven_poms(root_pom_path, base_dir=None, visited=None):
 
 
 def parse_maven_pom_recursive(
-    filepath, parent_dep_mgmt=None, seen_files=None, base_dir=None
+    filepath,
+    parent_dep_mgmt=None,
+    seen_files=None,
+    base_dir=None,
+    pom_tree_cache=None,
 ):
     """Parses Maven pom.xml recursively, resolving parent project properties and dependencyManagement."""
     if seen_files is None:
@@ -5837,7 +6917,15 @@ def parse_maven_pom_recursive(
 
     try:
         if _is_safe_path(base_dir, abs_path) and os.path.exists(abs_path):
-            tree = safe_et_parse(abs_path)
+            tree = (
+                pom_tree_cache.get(abs_path)
+                if pom_tree_cache is not None
+                else None
+            )
+            if tree is None:
+                tree = safe_et_parse(abs_path)
+                if pom_tree_cache is not None:
+                    pom_tree_cache[abs_path] = tree
             root = tree.getroot()
 
             ns = ""
@@ -5864,6 +6952,7 @@ def parse_maven_pom_recursive(
                         parent_dep_mgmt,
                         seen_files,
                         base_dir=parent_dir,
+                        pom_tree_cache=pom_tree_cache,
                     )
                     properties.update(p_props)
                     dep_mgmt.update(p_dep_mgmt)
@@ -5920,18 +7009,23 @@ def parse_maven_pom_recursive(
                         group = g_elem.text.strip() if g_elem.text else ""
                         artifact = a_elem.text.strip() if a_elem.text else ""
 
-                        for _ in range(5):
-                            changed = False
-                            for prop_name, prop_val in properties.items():
-                                if prop_val:
-                                    if prop_name in group:
-                                        group = group.replace(prop_name, prop_val)
-                                        changed = True
-                                    if prop_name in artifact:
-                                        artifact = artifact.replace(prop_name, prop_val)
-                                        changed = True
-                            if not changed:
-                                break
+                        if "${" in group or "${" in artifact:
+                            for _ in range(5):
+                                changed = False
+                                for prop_name, prop_val in properties.items():
+                                    if prop_val:
+                                        if prop_name in group:
+                                            group = group.replace(prop_name, prop_val)
+                                            changed = True
+                                        if prop_name in artifact:
+                                            artifact = artifact.replace(
+                                                prop_name, prop_val
+                                            )
+                                            changed = True
+                                if not changed or (
+                                    "${" not in group and "${" not in artifact
+                                ):
+                                    break
 
                         if group and artifact:
                             coord = f"{group}:{artifact}"
@@ -5941,14 +7035,17 @@ def parse_maven_pom_recursive(
                             elif coord in dep_mgmt:
                                 version = dep_mgmt[coord]
 
-                            for _ in range(5):
-                                changed = False
-                                for prop_name, prop_val in properties.items():
-                                    if prop_val and prop_name in version:
-                                        version = version.replace(prop_name, prop_val)
-                                        changed = True
-                                if not changed:
-                                    break
+                            if "${" in version:
+                                for _ in range(5):
+                                    changed = False
+                                    for prop_name, prop_val in properties.items():
+                                        if prop_val and prop_name in version:
+                                            version = version.replace(
+                                                prop_name, prop_val
+                                            )
+                                            changed = True
+                                    if not changed or "${" not in version:
+                                        break
 
                             if "${" in version:
                                 print(
@@ -5963,13 +7060,20 @@ def parse_maven_pom_recursive(
     return dependencies, properties, dep_mgmt
 
 
-def parse_maven_pom(filepath, parent_dep_mgmt=None, base_dir=None):
+def parse_maven_pom(
+    filepath, parent_dep_mgmt=None, base_dir=None, pom_tree_cache=None
+):
     """Parses Maven pom.xml for direct dependencies, resolving parent properties and dependencyManagement."""
-    deps, _, _ = parse_maven_pom_recursive(filepath, parent_dep_mgmt, base_dir=base_dir)
+    deps, _, _ = parse_maven_pom_recursive(
+        filepath,
+        parent_dep_mgmt,
+        base_dir=base_dir,
+        pom_tree_cache=pom_tree_cache,
+    )
     return deps
 
 
-_MAVEN_REMOTE_POM_CACHE = {}
+_MAVEN_REMOTE_POM_CACHE = _BoundedLRUDict(maxsize=512)
 
 
 def fetch_remote_maven_pom(group_id, artifact_id, version, custom_registries=None):
@@ -5977,42 +7081,51 @@ def fetch_remote_maven_pom(group_id, artifact_id, version, custom_registries=Non
     if not group_id or not artifact_id or not version or version == "*":
         return None
     cache_key = (group_id, artifact_id, version)
-    if cache_key in _MAVEN_REMOTE_POM_CACHE:
-        return _MAVEN_REMOTE_POM_CACHE[cache_key]
+    with _CACHE_LOCK:
+        if cache_key in _MAVEN_REMOTE_POM_CACHE:
+            return _MAVEN_REMOTE_POM_CACHE[cache_key]
 
-    group_path = group_id.replace(".", "/")
-    use_google_maven = (
-        group_id.startswith(
-            ("androidx.", "com.google.android.", "com.android.", "android.arch.")
+    def _fetch_pom():
+        with _CACHE_LOCK:
+            if cache_key in _MAVEN_REMOTE_POM_CACHE:
+                return _MAVEN_REMOTE_POM_CACHE[cache_key]
+
+        group_path = group_id.replace(".", "/")
+        use_google_maven = (
+            group_id.startswith(
+                ("androidx.", "com.google.android.", "com.android.", "android.arch.")
+            )
+            or "android" in group_id
         )
-        or "android" in group_id
-    )
-    base_registries = (
-        [URL_GOOGLE_MAVEN, URL_MAVEN_REGISTRY]
-        if use_google_maven
-        else [URL_MAVEN_REGISTRY, URL_GOOGLE_MAVEN]
-    )
-    registries = []
-    if custom_registries:
-        for r in custom_registries:
+        base_registries = (
+            [URL_GOOGLE_MAVEN, URL_MAVEN_REGISTRY]
+            if use_google_maven
+            else [URL_MAVEN_REGISTRY, URL_GOOGLE_MAVEN]
+        )
+        registries = []
+        if custom_registries:
+            for r in custom_registries:
+                if r not in registries:
+                    registries.append(r)
+        for r in base_registries:
             if r not in registries:
                 registries.append(r)
-    for r in base_registries:
-        if r not in registries:
-            registries.append(r)
 
-    root = None
-    for registry_url in registries:
-        url = f"{registry_url}{group_path}/{artifact_id}/{version}/{artifact_id}-{version}.pom"
-        try:
-            root = _fetch_registry_json_or_xml(url, format="xml")
-            if root is not None:
-                break
-        except (urllib.error.URLError, OSError, ET.ParseError, TimeoutError):
-            continue
+        root = None
+        for registry_url in registries:
+            url = f"{registry_url}{group_path}/{artifact_id}/{version}/{artifact_id}-{version}.pom"
+            try:
+                root = _fetch_registry_json_or_xml(url, format="xml")
+                if root is not None:
+                    break
+            except (urllib.error.URLError, OSError, ET.ParseError, TimeoutError):
+                continue
 
-    _MAVEN_REMOTE_POM_CACHE[cache_key] = root
-    return root
+        with _CACHE_LOCK:
+            _MAVEN_REMOTE_POM_CACHE[cache_key] = root
+        return root
+
+    return _MAVEN_POM_SINGLEFLIGHT.do(cache_key, _fetch_pom)
 
 
 def resolve_maven_transitive_dependencies(
@@ -6026,6 +7139,7 @@ def resolve_maven_transitive_dependencies(
     required_by_map = {coord: set() for coord in direct_deps}
     dep_types = {coord: "Direct" for coord in direct_deps}
     visited = set()
+    visited_lock = threading.Lock()
 
     current_level = []
     for coord, ver in direct_deps.items():
@@ -6038,9 +7152,10 @@ def resolve_maven_transitive_dependencies(
 
         def _process_item(item):
             parent_coord, version = item
-            if (parent_coord, version) in visited:
-                return []
-            visited.add((parent_coord, version))
+            with visited_lock:
+                if (parent_coord, version) in visited:
+                    return []
+                visited.add((parent_coord, version))
 
             if ":" not in parent_coord:
                 return []
@@ -6197,6 +7312,27 @@ def check_maven_package(target):
     versions_to_check = installed_versions if installed_versions else [declared]
     results = []
 
+    if versions_to_check and all(_is_pip_vcs_or_local_spec(v) for v in versions_to_check):
+        for ver_str in versions_to_check:
+            results.append(
+                {
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": "Local",
+                    "latest_same_major": None,
+                    "latest_absolute": None,
+                    "status": "local",
+                    "deprecated": None,
+                    "error": None,
+                    "repo_url": _extract_pip_vcs_repo_url(ver_str or declared),
+                    "compare_url": None,
+                    "releases_url": None,
+                }
+            )
+        _set_cached_target_result("pip", target, results)
+        return results
+
     try:
         if ":" not in name:
             raise ValueError(f"Invalid Maven coordinate structure: {name}")
@@ -6204,10 +7340,7 @@ def check_maven_package(target):
         group_id, artifact_id = name.split(":", 1)
         group_path = group_id.replace(".", "/")
 
-        cached_meta = _get_cached_registry_metadata("maven", name)
-        if cached_meta is not None:
-            valid_versions, successful_registry, group_path, artifact_id = cached_meta
-        else:
+        def _fetch_maven_meta():
             use_google_maven = (
                 group_id.startswith(
                     (
@@ -6236,7 +7369,7 @@ def check_maven_package(target):
                     registries.append(r)
 
             last_error = None
-            successful_registry = URL_MAVEN_REGISTRY
+            succ_reg = URL_MAVEN_REGISTRY
             for registry_url in registries:
                 url = f"{registry_url}{group_path}/{artifact_id}/maven-metadata.xml"
                 try:
@@ -6244,9 +7377,10 @@ def check_maven_package(target):
                     req.add_header("User-Agent", f"Kevlar-CheckDeps/{VERSION}")
                     with safe_urlopen(req, timeout=10) as response:
                         xml_data = response.read()
-                    successful_registry = registry_url
+                    succ_reg = registry_url
                     break
                 except Exception as e:
+                    _close_http_error(e)
                     last_error = e
                     continue
 
@@ -6274,6 +7408,7 @@ def check_maven_package(target):
                         if v_val:
                             versions_list.append(str(v_val))
                 except Exception as solr_err:
+                    _close_http_error(solr_err)
                     last_error = solr_err
 
             if not versions_list:
@@ -6294,12 +7429,12 @@ def check_maven_package(target):
                 if not is_prerelease:
                     stable_versions.append(v)
 
-            valid_versions = stable_versions if stable_versions else versions_list
-            _set_cached_registry_metadata(
-                "maven",
-                name,
-                (valid_versions, successful_registry, group_path, artifact_id),
-            )
+            vv = tuple(stable_versions if stable_versions else versions_list)
+            return (vv, succ_reg, group_path, artifact_id)
+
+        valid_versions, successful_registry, group_path, artifact_id = (
+            _get_or_fetch_registry_metadata("maven", name, _fetch_maven_meta)
+        )
 
         for ver_str in versions_to_check:
             clean_ver = RE_CLEAN_VER.sub("", ver_str) if ver_str else "0.0.0"
@@ -6348,6 +7483,7 @@ def check_maven_package(target):
             )
 
     except urllib.error.HTTPError as e:
+        _close_http_error(e)
         error_msg = "Not Found" if e.code == 404 else f"HTTP {e.code}"
         for ver_str in versions_to_check:
             results.append(
@@ -6407,10 +7543,13 @@ def run_maven_checker(args):
         return None, None, 0
 
     manifest_dir = os.path.dirname(os.path.abspath(manifest))
+    pom_tree_cache = {}
     print(f"{COLOR_GRAY}{ICON_INFO} Resolving Maven module tree...{COLOR_RESET}")
-    root_manifest = find_root_maven_pom(manifest)
+    root_manifest = find_root_maven_pom(manifest, pom_tree_cache=pom_tree_cache)
     root_manifest_dir = os.path.dirname(os.path.abspath(root_manifest))
-    all_poms = find_all_maven_poms(root_manifest, base_dir=root_manifest_dir)
+    all_poms = find_all_maven_poms(
+        root_manifest, base_dir=root_manifest_dir, pom_tree_cache=pom_tree_cache
+    )
     if os.path.abspath(manifest) not in [os.path.abspath(p) for p in all_poms]:
         all_poms.append(os.path.abspath(manifest))
 
@@ -6419,11 +7558,15 @@ def run_maven_checker(args):
             f"{COLOR_GRAY}{ICON_INFO} Multi-module project detected. Found {len(all_poms)} modules.{COLOR_RESET}"
         )
 
-    # 1. Parse root pom.xml for centralized dependencyManagement versions
+    # 1. Parse root pom.xml for centralized dependencyManagement versions (reusing cached XML tree)
     root_dep_mgmt = {}
     try:
+        abs_manifest = os.path.abspath(manifest)
         if _is_safe_path(manifest_dir, manifest) and os.path.exists(manifest):
-            tree = safe_et_parse(manifest)
+            tree = pom_tree_cache.get(abs_manifest)
+            if tree is None:
+                tree = safe_et_parse(manifest)
+                pom_tree_cache[abs_manifest] = tree
             root = tree.getroot()
             ns = root.tag.split("}")[0].lstrip("{") if "}" in root.tag else ""
             prefix = f"{{{ns}}}" if ns else ""
@@ -6456,7 +7599,11 @@ def run_maven_checker(args):
 
     for pom_path in all_poms:
         try:
-            tree = safe_et_parse(pom_path)
+            abs_pom = os.path.abspath(pom_path)
+            tree = pom_tree_cache.get(abs_pom)
+            if tree is None:
+                tree = safe_et_parse(pom_path)
+                pom_tree_cache[abs_pom] = tree
             root_elem = tree.getroot()
             m_ns = (
                 root_elem.tag.split("}")[0].lstrip("{") if "}" in root_elem.tag else ""
@@ -6499,8 +7646,11 @@ def run_maven_checker(args):
     pkg_data = {}
     print(f"{COLOR_GRAY}{ICON_INFO} Reading Maven pom.xml modules...{COLOR_RESET}")
     for pom in all_poms:
-        pom_deps = parse_maven_pom(pom, root_dep_mgmt, base_dir=manifest_dir)
+        pom_deps = parse_maven_pom(
+            pom, root_dep_mgmt, base_dir=manifest_dir, pom_tree_cache=pom_tree_cache
+        )
         pkg_data.update(pom_deps)
+    pom_tree_cache.clear()
 
     direct_deps = dict(pkg_data)
 
@@ -6564,20 +7714,20 @@ def run_maven_checker(args):
         return None, None, 0
 
     start_time = time.time()
-    results = (
-        check_all_maven_targets(remote_targets, args.concurrent)
+    vuls_enabled = bool(getattr(args, "vuls", False) and remote_targets)
+    results, osv_vulns, _ = _run_registry_and_osv_parallel(
+        (lambda: check_all_maven_targets(remote_targets, args.concurrent))
         if remote_targets
-        else []
+        else None,
+        remote_targets,
+        TECHNOLOGIES["maven"]["osv_ecosystem"],
+        args.concurrent,
+        vuls_enabled,
     )
     results.extend(local_results)
 
-    # Check vulnerabilities via OSV if requested
-    if getattr(args, "vuls", False) and remote_targets:
-        tech_info = TECHNOLOGIES["maven"]
-        osv_vulns = check_osv_vulnerabilities(
-            remote_targets, tech_info["osv_ecosystem"], args.concurrent
-        )
-
+    # Attach vulnerabilities from OSV if requested
+    if vuls_enabled:
         for r in results:
             if r["status"] != "local":
                 key = (r["name"], r["installed"])
@@ -6610,13 +7760,9 @@ def run_maven_checker(args):
 
 def escape_go_module(name):
     """Encodes uppercase characters in Go module paths using the ! scheme."""
-    escaped = ""
-    for char in name:
-        if char.isupper():
-            escaped += "!" + char.lower()
-        else:
-            escaped += char
-    return escaped
+    if name.islower():
+        return name
+    return "".join(f"!{c.lower()}" if c.isupper() else c for c in name)
 
 
 def parse_go_work(filepath):
@@ -6682,129 +7828,127 @@ def parse_go_mod(filepath):
     replacements_ver = {}
 
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-
         in_require_block = False
         in_exclude_block = False
         in_retract_block = False
         in_tool_block = False
 
-        for line in lines:
-            line_clean = line.strip()
-            if not line_clean or line_clean.startswith("//"):
-                continue
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                line_clean = line.strip()
+                if not line_clean or line_clean.startswith("//"):
+                    continue
 
-            is_indirect = False
-            if "//" in line_clean:
-                parts = line_clean.split("//", 1)
-                line_content = parts[0].strip()
-                comment = parts[1].strip()
-                if "indirect" in comment.split():
-                    is_indirect = True
-            else:
-                line_content = line_clean
+                is_indirect = False
+                if "//" in line_clean:
+                    parts = line_clean.split("//", 1)
+                    line_content = parts[0].strip()
+                    comment = parts[1].strip()
+                    if "indirect" in comment.split():
+                        is_indirect = True
+                else:
+                    line_content = line_clean
 
-            if not line_content:
-                continue
+                if not line_content:
+                    continue
 
-            if line_content.startswith("require") and line_content.endswith("("):
-                in_require_block = True
-                continue
-            elif in_require_block and line_content == ")":
-                in_require_block = False
-                continue
+                if line_content.startswith("require") and line_content.endswith("("):
+                    in_require_block = True
+                    continue
+                elif in_require_block and line_content == ")":
+                    in_require_block = False
+                    continue
 
-            if line_content.startswith("exclude") and line_content.endswith("("):
-                in_exclude_block = True
-                continue
-            elif in_exclude_block and line_content == ")":
-                in_exclude_block = False
-                continue
+                if line_content.startswith("exclude") and line_content.endswith("("):
+                    in_exclude_block = True
+                    continue
+                elif in_exclude_block and line_content == ")":
+                    in_exclude_block = False
+                    continue
 
-            if line_content.startswith("retract") and line_content.endswith("("):
-                in_retract_block = True
-                continue
-            elif in_retract_block and line_content == ")":
-                in_retract_block = False
-                continue
+                if line_content.startswith("retract") and line_content.endswith("("):
+                    in_retract_block = True
+                    continue
+                elif in_retract_block and line_content == ")":
+                    in_retract_block = False
+                    continue
 
-            if line_content.startswith("tool") and line_content.endswith("("):
-                in_tool_block = True
-                continue
-            elif in_tool_block and line_content == ")":
-                in_tool_block = False
-                continue
+                if line_content.startswith("tool") and line_content.endswith("("):
+                    in_tool_block = True
+                    continue
+                elif in_tool_block and line_content == ")":
+                    in_tool_block = False
+                    continue
 
-            if "=>" in line_content:
-                left, right = line_content.split("=>", 1)
-                left_parts = left.strip().split()
-                if left_parts and left_parts[0] == "replace":
-                    left_parts = left_parts[1:]
+                if "=>" in line_content:
+                    left, right = line_content.split("=>", 1)
+                    left_parts = left.strip().split()
+                    if left_parts and left_parts[0] == "replace":
+                        left_parts = left_parts[1:]
 
-                right_parts = right.strip().split()
-                left_pkg = left_parts[0] if left_parts else None
-                left_ver = left_parts[1] if len(left_parts) >= 2 else None
+                    right_parts = right.strip().split()
+                    left_pkg = left_parts[0] if left_parts else None
+                    left_ver = left_parts[1] if len(left_parts) >= 2 else None
 
-                if left_pkg and right_parts:
-                    target_path = right_parts[0]
-                    is_local_path = (
-                        target_path.startswith((".", "/", "\\"))
-                        or len(right_parts) == 1
-                    )
-                    if is_local_path:
-                        local_replacements[left_pkg] = target_path
-                    elif len(right_parts) >= 2:
-                        new_path, new_version = right_parts[0], right_parts[1]
-                        if left_ver:
-                            replacements_ver[(left_pkg, left_ver)] = (
-                                new_path,
-                                new_version,
-                            )
-                        else:
-                            replacements[left_pkg] = (new_path, new_version)
-                continue
+                    if left_pkg and right_parts:
+                        target_path = right_parts[0]
+                        is_local_path = (
+                            target_path.startswith((".", "/", "\\"))
+                            or len(right_parts) == 1
+                        )
+                        if is_local_path:
+                            local_replacements[left_pkg] = target_path
+                        elif len(right_parts) >= 2:
+                            new_path, new_version = right_parts[0], right_parts[1]
+                            if left_ver:
+                                replacements_ver[(left_pkg, left_ver)] = (
+                                    new_path,
+                                    new_version,
+                                )
+                            else:
+                                replacements[left_pkg] = (new_path, new_version)
+                    continue
 
-            if in_exclude_block or line_content.startswith("exclude"):
-                parts = line_content.split()
-                if line_content.startswith("exclude"):
-                    parts = parts[1:]
-                if len(parts) >= 2:
-                    ex_pkg, ex_ver = parts[0], parts[1]
-                    excluded_versions.setdefault(ex_pkg, set()).add(ex_ver)
-                continue
+                if in_exclude_block or line_content.startswith("exclude"):
+                    parts = line_content.split()
+                    if line_content.startswith("exclude"):
+                        parts = parts[1:]
+                    if len(parts) >= 2:
+                        ex_pkg, ex_ver = parts[0], parts[1]
+                        excluded_versions.setdefault(ex_pkg, set()).add(ex_ver)
+                    continue
 
-            if in_retract_block or line_content.startswith("retract"):
-                parts = line_content.split()
-                if line_content.startswith("retract"):
-                    parts = parts[1:]
-                if len(parts) >= 1:
-                    ret_ver = parts[0].strip("[]()")
-                    retracted_versions.setdefault("_global", set()).add(ret_ver)
-                continue
+                if in_retract_block or line_content.startswith("retract"):
+                    parts = line_content.split()
+                    if line_content.startswith("retract"):
+                        parts = parts[1:]
+                    if len(parts) >= 1:
+                        ret_ver = parts[0].strip("[]()")
+                        retracted_versions.setdefault("_global", set()).add(ret_ver)
+                    continue
 
-            if in_tool_block or line_content.startswith("tool"):
-                parts = line_content.split()
-                if line_content.startswith("tool"):
-                    parts = parts[1:]
-                if parts:
-                    tool_pkg = parts[0]
-                    devDependencies[tool_pkg] = "tool"
-                continue
+                if in_tool_block or line_content.startswith("tool"):
+                    parts = line_content.split()
+                    if line_content.startswith("tool"):
+                        parts = parts[1:]
+                    if parts:
+                        tool_pkg = parts[0]
+                        devDependencies[tool_pkg] = "tool"
+                    continue
 
-            if in_require_block:
-                req_parts = line_content.split()
-                if len(req_parts) >= 2:
-                    pkg = req_parts[0]
-                    ver = req_parts[1]
-                    raw_reqs.append((pkg, ver, is_indirect))
-            else:
-                if line_content.startswith("require"):
+                if in_require_block:
                     req_parts = line_content.split()
-                    if len(req_parts) >= 3:
-                        pkg = req_parts[1]
-                        ver = req_parts[2]
+                    if len(req_parts) >= 2:
+                        pkg = req_parts[0]
+                        ver = req_parts[1]
                         raw_reqs.append((pkg, ver, is_indirect))
+                else:
+                    if line_content.startswith("require"):
+                        req_parts = line_content.split()
+                        if len(req_parts) >= 3:
+                            pkg = req_parts[1]
+                            ver = req_parts[2]
+                            raw_reqs.append((pkg, ver, is_indirect))
 
         for pkg, ver, is_indir in raw_reqs:
             final_pkg = pkg
@@ -6847,11 +7991,29 @@ def check_go_package(target):
     versions_to_check = installed_versions if installed_versions else [declared]
     results = []
 
+    if versions_to_check and all(_is_pip_vcs_or_local_spec(v) for v in versions_to_check):
+        for ver_str in versions_to_check:
+            results.append(
+                {
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": "Local",
+                    "latest_same_major": None,
+                    "latest_absolute": None,
+                    "status": "local",
+                    "deprecated": None,
+                    "error": None,
+                    "repo_url": _extract_pip_vcs_repo_url(ver_str or declared),
+                    "compare_url": None,
+                    "releases_url": None,
+                }
+            )
+        _set_cached_target_result("pip", target, results)
+        return results
+
     try:
-        cached_meta = _get_cached_registry_metadata("go", name)
-        if cached_meta is not None:
-            versions_list = cached_meta
-        else:
+        def _fetch_go_meta():
             candidate_name = name
             resp_data = None
 
@@ -6865,12 +8027,14 @@ def check_go_package(target):
                     break
                 except urllib.error.HTTPError as err:
                     if err.code == 404 and "/" in candidate_name:
+                        _close_http_error(err)
                         candidate_name = candidate_name.rsplit("/", 1)[0]
                     else:
                         raise
 
-            versions_list = [v.strip() for v in resp_data.split("\n") if v.strip()]
-            _set_cached_registry_metadata("go", name, versions_list)
+            return tuple(v.strip() for v in resp_data.split("\n") if v.strip())
+
+        versions_list = _get_or_fetch_registry_metadata("go", name, _fetch_go_meta)
 
         stable_versions = []
         for v in versions_list:
@@ -7001,6 +8165,7 @@ def resolve_go_parent_graph(direct_deps, max_workers=10):
     def _fetch_single_mod(item):
         nonlocal completed
         name, ver = item
+        local_children = set()
         if name and ver:
             try:
                 esc = escape_go_module(name)
@@ -7031,36 +8196,42 @@ def resolve_go_parent_graph(direct_deps, max_workers=10):
 
                     parts = line_content.split()
                     if in_require_block and len(parts) >= 2:
-                        child_pkg = parts[0]
-                        parents.setdefault(child_pkg, set()).add(name)
+                        local_children.add(parts[0])
                     elif (
                         not in_require_block
                         and line_content.startswith("require")
                         and len(parts) >= 3
                     ):
-                        child_pkg = parts[1]
-                        parents.setdefault(child_pkg, set()).add(name)
+                        local_children.add(parts[1])
             except (OSError, UnicodeDecodeError, IndexError):
                 pass
 
         with lock:
+            for child_pkg in local_children:
+                parents.setdefault(child_pkg, set()).add(name)
             completed += 1
             pct = int((completed / total) * 100)
+            if _PARALLEL_SCAN_DEPTH == 0:
+                with console_lock:
+                    sys.stdout.write(
+                        f"\r{COLOR_GRAY}{ICON_INFO} Resolving parent dependency graph for Go modules: {completed}/{total} ({pct}%)...{COLOR_RESET}"
+                    )
+                    sys.stdout.flush()
+
+    if _PARALLEL_SCAN_DEPTH == 0:
+        with console_lock:
             sys.stdout.write(
-                f"\r{COLOR_GRAY}{ICON_INFO} Resolving parent dependency graph for Go modules: {completed}/{total} ({pct}%)...{COLOR_RESET}"
+                f"{COLOR_GRAY}{ICON_INFO} Resolving parent dependency graph for Go modules: 0/{total} (0%)...{COLOR_RESET}"
             )
             sys.stdout.flush()
 
-    sys.stdout.write(
-        f"{COLOR_GRAY}{ICON_INFO} Resolving parent dependency graph for Go modules: 0/{total} (0%)...{COLOR_RESET}"
-    )
-    sys.stdout.flush()
-
     with ThreadPoolExecutor(max_workers=min(max_workers, 15)) as executor:
-        executor.map(_fetch_single_mod, direct_deps.items())
+        list(executor.map(_fetch_single_mod, direct_deps.items()))
 
-    sys.stdout.write("\n")
-    sys.stdout.flush()
+    if _PARALLEL_SCAN_DEPTH == 0:
+        with console_lock:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
     return parents
 
 
@@ -7087,49 +8258,22 @@ def parse_go_sum(filepath):
     return checksums
 
 
-def verify_go_checksums(results, go_sum_path, max_workers=10):
-    """Verifies local go.sum entries against sum.golang.org Checksum Database."""
-    has_sum_file = (
-        os.path.exists(go_sum_path)
-        if (go_sum_path and os.path.exists(go_sum_path))
-        else False
-    )
-    local_checksums = parse_go_sum(go_sum_path) if has_sum_file else {}
-
-    if not has_sum_file:
-        for r in results:
-            if r.get("status") != "local":
-                r["missing_checksum"] = True
-        return
-
-    items_to_verify = []
-    for r in results:
-        if r.get("status") == "local":
-            continue
-        name = r["name"]
-        installed = r.get("installed") or r.get("declared")
-        if isinstance(installed, list):
-            installed = installed[0] if installed else None
-
-        if not installed:
-            continue
-
-        key = (name, installed)
-        if key not in local_checksums:
-            r["missing_checksum"] = True
-        else:
-            items_to_verify.append((r, name, installed, local_checksums[key]))
-
+def _fetch_go_checksum_statuses(items_to_verify, max_workers=10):
+    """Concurrently verifies (name, ver, local_hash) entries against sum.golang.org.
+    Returns dict mapping (name, ver) -> 'verified' | 'mismatch'.
+    """
     total = len(items_to_verify)
     if total == 0:
-        return
+        return {}
 
+    statuses = {}
     completed = 0
     lock = threading.Lock()
 
     def _verify_single(item):
         nonlocal completed
-        r, name, ver, local_hash = item
+        name, ver, local_hash = item
+        outcome = None
         try:
             esc = escape_go_module(name)
             url = f"https://sum.golang.org/lookup/{esc}@{ver}"
@@ -7147,30 +8291,86 @@ def verify_go_checksums(results, go_sum_path, max_workers=10):
             if official_hash and (
                 f"h1:{official_hash}" != local_hash and official_hash != local_hash
             ):
-                r["mismatch_checksum"] = True
+                outcome = "mismatch"
             elif official_hash:
-                r["checksum_verified"] = True
+                outcome = "verified"
         except (urllib.error.URLError, OSError, ValueError, TimeoutError):
             pass
 
         with lock:
+            if outcome:
+                statuses[(name, ver)] = outcome
             completed += 1
             pct = int((completed / total) * 100)
+            if _PARALLEL_SCAN_DEPTH == 0:
+                with console_lock:
+                    sys.stdout.write(
+                        f"\r{COLOR_GRAY}{ICON_INFO} Verifying go.sum checksums against sum.golang.org: {completed}/{total} ({pct}%)...{COLOR_RESET}"
+                    )
+                    sys.stdout.flush()
+
+    if _PARALLEL_SCAN_DEPTH == 0:
+        with console_lock:
             sys.stdout.write(
-                f"\r{COLOR_GRAY}{ICON_INFO} Verifying go.sum checksums against sum.golang.org: {completed}/{total} ({pct}%)...{COLOR_RESET}"
+                f"{COLOR_GRAY}{ICON_INFO} Verifying go.sum checksums against sum.golang.org: 0/{total} (0%)...{COLOR_RESET}"
             )
             sys.stdout.flush()
 
-    sys.stdout.write(
-        f"{COLOR_GRAY}{ICON_INFO} Verifying go.sum checksums against sum.golang.org: 0/{total} (0%)...{COLOR_RESET}"
-    )
-    sys.stdout.flush()
-
     with ThreadPoolExecutor(max_workers=min(max_workers, 15)) as executor:
-        executor.map(_verify_single, items_to_verify)
+        list(executor.map(_verify_single, items_to_verify))
 
-    sys.stdout.write("\n")
-    sys.stdout.flush()
+    if _PARALLEL_SCAN_DEPTH == 0:
+        with console_lock:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+    return statuses
+
+
+def verify_go_checksums(results, go_sum_path, max_workers=10):
+    """Verifies local go.sum entries against sum.golang.org Checksum Database."""
+    has_sum_file = (
+        os.path.exists(go_sum_path)
+        if (go_sum_path and os.path.exists(go_sum_path))
+        else False
+    )
+    local_checksums = parse_go_sum(go_sum_path) if has_sum_file else {}
+
+    if not has_sum_file:
+        for r in results:
+            if r.get("status") != "local":
+                r["missing_checksum"] = True
+        return
+
+    items_to_verify = []
+    seen_verify = set()
+    rows_by_key = {}
+    for r in results:
+        if r.get("status") == "local":
+            continue
+        name = r["name"]
+        installed = r.get("installed") or r.get("declared")
+        if isinstance(installed, list):
+            installed = installed[0] if installed else None
+
+        if not installed:
+            continue
+
+        key = (name, installed)
+        if key not in local_checksums:
+            r["missing_checksum"] = True
+        else:
+            rows_by_key.setdefault(key, []).append(r)
+            if key not in seen_verify:
+                seen_verify.add(key)
+                items_to_verify.append((name, installed, local_checksums[key]))
+
+    statuses = _fetch_go_checksum_statuses(items_to_verify, max_workers=max_workers)
+    for key, outcome in statuses.items():
+        for r in rows_by_key.get(key, ()):
+            if outcome == "mismatch":
+                r["mismatch_checksum"] = True
+            elif outcome == "verified":
+                r["checksum_verified"] = True
 
 
 def run_go_checker(args):
@@ -7282,19 +8482,54 @@ def run_go_checker(args):
                 }
             )
 
-    start_time = time.time()
-    results = check_all_go_targets(targets, args.concurrent) if targets else []
-    results.extend(local_results)
+    # Locate and parse go.sum locally so checksum lookups can overlap with registry, OSV, and parent graph
+    sum_file = None
+    if os.path.isdir(args.path):
+        cand_sum = os.path.join(args.path, "go.sum")
+        if os.path.exists(cand_sum):
+            sum_file = cand_sum
+    elif os.path.isfile(args.path):
+        cand_sum = os.path.join(os.path.dirname(args.path), "go.sum")
+        if os.path.exists(cand_sum):
+            sum_file = cand_sum
 
-    # Check vulnerabilities via OSV if requested
-    if getattr(args, "vuls", False):
-        tech_info = TECHNOLOGIES["go"]
-        osv_vulns = check_osv_vulnerabilities(
-            [t for t in targets if t.get("installed")],
-            tech_info["osv_ecosystem"],
-            args.concurrent,
+    has_sum_file = bool(sum_file and os.path.exists(sum_file))
+    local_checksums = parse_go_sum(sum_file) if has_sum_file else {}
+    checksum_items = []
+    if has_sum_file:
+        seen_ck = set()
+        for t in targets:
+            t_name = t["name"]
+            t_inst = t["installed"][0] if t.get("installed") else t.get("declared")
+            if t_inst and (t_name, t_inst) in local_checksums and (t_name, t_inst) not in seen_ck:
+                seen_ck.add((t_name, t_inst))
+                checksum_items.append((t_name, t_inst, local_checksums[(t_name, t_inst)]))
+
+    start_time = time.time()
+    concurrent = getattr(args, "concurrent", 10)
+    vuls_enabled = getattr(args, "vuls", False)
+    osv_targets = [t for t in targets if t.get("installed")] if vuls_enabled else []
+
+    extra_tasks = {}
+    if all_deps:
+        extra_tasks["parents"] = lambda: resolve_go_parent_graph(all_deps, concurrent)
+    if checksum_items:
+        extra_tasks["checksums"] = lambda: _fetch_go_checksum_statuses(
+            checksum_items, max_workers=concurrent
         )
 
+    results, osv_vulns, extra_results = _run_registry_and_osv_parallel(
+        (lambda: check_all_go_targets(targets, concurrent)) if targets else None,
+        osv_targets,
+        TECHNOLOGIES["go"]["osv_ecosystem"],
+        concurrent,
+        vuls_enabled,
+        extra_tasks=extra_tasks,
+    )
+    results.extend(local_results)
+
+    # Attach vulnerabilities from OSV if requested
+    if vuls_enabled:
         for r in results:
             key = (r["name"], r["installed"])
             r["vulnerabilities"] = osv_vulns.get(key, [])
@@ -7309,8 +8544,7 @@ def run_go_checker(args):
         for r in results:
             r["vulnerabilities"] = []
 
-    # Resolve exact parent dependency tree via GOPROXY
-    parent_map = resolve_go_parent_graph(all_deps, getattr(args, "concurrent", 10))
+    parent_map = extra_results.get("parents", {})
 
     direct_keys = set(all_deps.keys())
     for r in results:
@@ -7325,18 +8559,30 @@ def run_go_checker(args):
             r["dep_type"] = "Direct"
             r["required_by"] = []
 
-    # Verify go.sum checksums against sum.golang.org
-    sum_file = None
-    if os.path.isdir(args.path):
-        cand_sum = os.path.join(args.path, "go.sum")
-        if os.path.exists(cand_sum):
-            sum_file = cand_sum
-    elif os.path.isfile(args.path):
-        cand_sum = os.path.join(os.path.dirname(args.path), "go.sum")
-        if os.path.exists(cand_sum):
-            sum_file = cand_sum
-
-    verify_go_checksums(results, sum_file, getattr(args, "concurrent", 10))
+    # Apply go.sum checksum verification outcomes
+    checksum_statuses = extra_results.get("checksums", {})
+    if not has_sum_file:
+        for r in results:
+            if r.get("status") != "local":
+                r["missing_checksum"] = True
+    else:
+        for r in results:
+            if r.get("status") == "local":
+                continue
+            r_inst = r.get("installed") or r.get("declared")
+            if isinstance(r_inst, list):
+                r_inst = r_inst[0] if r_inst else None
+            if not r_inst:
+                continue
+            ck_key = (r["name"], r_inst)
+            if ck_key not in local_checksums:
+                r["missing_checksum"] = True
+            else:
+                outcome = checksum_statuses.get(ck_key)
+                if outcome == "mismatch":
+                    r["mismatch_checksum"] = True
+                elif outcome == "verified":
+                    r["checksum_verified"] = True
 
     elapsed = time.time() - start_time
 
@@ -7635,14 +8881,14 @@ def check_rust_package(target):
         return results
 
     try:
-        cached_meta = _get_cached_registry_metadata("rust", name)
-        if cached_meta is not None:
-            all_versions, yanked_versions, latest_version, repo_url_raw = cached_meta
-        else:
-            all_versions = []
-            yanked_versions = set()
-            repo_url_raw = None
-            latest_version = None
+        class _RustCrateNotFound(Exception):
+            pass
+
+        def _fetch_rust_meta():
+            av = []
+            yv = set()
+            r_url = None
+            lv = None
 
             # 1. Primary: Fast official CDN Cargo sparse index (no rate limits)
             url_index = get_crates_index_url(name)
@@ -7658,35 +8904,17 @@ def check_rust_package(target):
                             v_data = json.loads(line)
                             v_num = v_data.get("vers")
                             if v_num:
-                                all_versions.append(v_num)
+                                av.append(v_num)
                                 if v_data.get("yanked"):
-                                    yanked_versions.add(v_num)
+                                    yv.add(v_num)
                         except (json.JSONDecodeError, KeyError, ValueError):
                             pass
-                    if all_versions:
+                    if av:
                         fetched_index = True
             except urllib.error.HTTPError as e:
+                _close_http_error(e)
                 if e.code == 404:
-                    # Private/internal crate not in public crates.io index
-                    for ver_str in versions_to_check:
-                        results.append(
-                            {
-                                "name": name,
-                                "declared": declared,
-                                "installed": ver_str,
-                                "latest": "Local",
-                                "latest_same_major": None,
-                                "latest_absolute": None,
-                                "status": "local",
-                                "deprecated": None,
-                                "error": None,
-                                "repo_url": None,
-                                "compare_url": None,
-                                "releases_url": None,
-                            }
-                        )
-                    _set_cached_target_result("rust", target, results)
-                    return results
+                    raise _RustCrateNotFound()
             except (urllib.error.URLError, OSError, TimeoutError):
                 pass
 
@@ -7700,25 +8928,45 @@ def check_rust_package(target):
                     data = json.loads(response.read().decode("utf-8"))
 
                 crate_info = data.get("crate", {})
-                latest_version = crate_info.get("max_stable_version") or crate_info.get(
+                lv = crate_info.get("max_stable_version") or crate_info.get(
                     "max_version"
                 )
-                repo_url_raw = crate_info.get("repository") or crate_info.get(
-                    "homepage"
-                )
+                r_url = crate_info.get("repository") or crate_info.get("homepage")
 
                 versions_meta = data.get("versions", [])
                 for v_meta in versions_meta:
                     if v_meta.get("yanked"):
-                        yanked_versions.add(v_meta.get("num"))
+                        yv.add(v_meta.get("num"))
 
-                all_versions = [v.get("num") for v in versions_meta if v.get("num")]
+                av = [v.get("num") for v in versions_meta if v.get("num")]
 
-            _set_cached_registry_metadata(
-                "rust",
-                name,
-                (all_versions, yanked_versions, latest_version, repo_url_raw),
+            return (tuple(av), frozenset(yv), lv, r_url)
+
+        try:
+            all_versions, yanked_versions, latest_version, repo_url_raw = (
+                _get_or_fetch_registry_metadata("rust", name, _fetch_rust_meta)
             )
+        except _RustCrateNotFound:
+            # Private/internal crate not in public crates.io index
+            for ver_str in versions_to_check:
+                results.append(
+                    {
+                        "name": name,
+                        "declared": declared,
+                        "installed": ver_str,
+                        "latest": "Local",
+                        "latest_same_major": None,
+                        "latest_absolute": None,
+                        "status": "local",
+                        "deprecated": None,
+                        "error": None,
+                        "repo_url": None,
+                        "compare_url": None,
+                        "releases_url": None,
+                    }
+                )
+            _set_cached_target_result("rust", target, results)
+            return results
 
         for ver_str in versions_to_check:
             clean_ver = RE_CLEAN_VER.sub("", ver_str) if ver_str else "0.0.0"
@@ -7774,6 +9022,7 @@ def check_rust_package(target):
                 }
             )
     except urllib.error.HTTPError as e:
+        _close_http_error(e)
         if e.code == 404:
             for ver_str in versions_to_check:
                 results.append(
@@ -7904,15 +9153,17 @@ def run_rust_checker(args):
         return None, None, 0
 
     start_time = time.time()
-    results = check_all_rust_targets(targets, args.concurrent)
+    vuls_enabled = getattr(args, "vuls", False)
+    results, osv_vulns, _ = _run_registry_and_osv_parallel(
+        lambda: check_all_rust_targets(targets, args.concurrent),
+        targets,
+        TECHNOLOGIES["rust"]["osv_ecosystem"],
+        args.concurrent,
+        vuls_enabled,
+    )
 
-    # Check vulnerabilities via OSV if requested
-    if getattr(args, "vuls", False):
-        tech_info = TECHNOLOGIES["rust"]
-        osv_vulns = check_osv_vulnerabilities(
-            targets, tech_info["osv_ecosystem"], args.concurrent
-        )
-
+    # Attach vulnerabilities from OSV if requested
+    if vuls_enabled:
         for r in results:
             key = (r["name"], r["installed"])
             r["vulnerabilities"] = osv_vulns.get(key, [])
@@ -8003,61 +9254,57 @@ def parse_gemfile_lock(filepath):
         return resolved, parents
 
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-
         in_specs = False
         current_parent = None
         spec_indent = None
 
-        for line in lines:
-            if not line.strip():
-                continue
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
 
-            # Check for root sections (no indentation)
-            if line and not line.startswith(" ") and not line.startswith("\t"):
-                in_specs = False
-                continue
+                # Check for root sections (no indentation)
+                if line and not line.startswith(" ") and not line.startswith("\t"):
+                    in_specs = False
+                    continue
 
-            line_stripped = line.strip()
-            if line_stripped == "specs:":
-                in_specs = True
-                spec_indent = None
-                current_parent = None
-                continue
+                line_stripped = line.strip()
+                if line_stripped == "specs:":
+                    in_specs = True
+                    spec_indent = None
+                    current_parent = None
+                    continue
 
-            if in_specs:
-                # Count leading spaces
-                leading_spaces = len(line) - len(line.lstrip(" "))
+                if in_specs:
+                    # Count leading spaces
+                    leading_spaces = len(line) - len(line.lstrip(" "))
 
-                # Try to match gem version pattern: "    name (version)"
-                # Optimization: Use globally compiled regex to avoid cache lookup overhead in hot line loop
-                m_spec = RE_GEMFILE_LOCK_SPEC.match(line)
-                if m_spec:
-                    name = m_spec.group(1)
-                    version = m_spec.group(2)
+                    # Try to match gem version pattern: "    name (version)"
+                    m_spec = RE_GEMFILE_LOCK_SPEC.match(line)
+                    if m_spec:
+                        name = m_spec.group(1)
+                        version = m_spec.group(2)
 
-                    if spec_indent is None:
-                        spec_indent = leading_spaces
+                        if spec_indent is None:
+                            spec_indent = leading_spaces
 
-                    if leading_spaces == spec_indent:
-                        current_parent = name
-                        resolved[current_parent] = version
-                        continue
+                        if leading_spaces == spec_indent:
+                            current_parent = name
+                            resolved[current_parent] = version
+                            continue
 
-                # If it has more indentation than spec_indent and matches child dep, it's a child dependency
-                if (
-                    spec_indent is not None
-                    and leading_spaces > spec_indent
-                    and current_parent
-                ):
-                    # Optimization: Use globally compiled regex to avoid cache lookup overhead in hot line loop
-                    m_dep = RE_GEMFILE_LOCK_DEP.match(line)
-                    if m_dep:
-                        child = m_dep.group(1)
-                        if child not in parents:
-                            parents[child] = set()
-                        parents[child].add(current_parent)
+                    # If it has more indentation than spec_indent and matches child dep, it's a child dependency
+                    if (
+                        spec_indent is not None
+                        and leading_spaces > spec_indent
+                        and current_parent
+                    ):
+                        m_dep = RE_GEMFILE_LOCK_DEP.match(line)
+                        if m_dep:
+                            child = m_dep.group(1)
+                            if child not in parents:
+                                parents[child] = set()
+                            parents[child].add(current_parent)
 
     except Exception as e:
         print(
@@ -8081,12 +9328,30 @@ def check_ruby_package(target):
     versions_to_check = installed_versions if installed_versions else [declared]
     results = []
 
+    if versions_to_check and all(_is_pip_vcs_or_local_spec(v) for v in versions_to_check):
+        for ver_str in versions_to_check:
+            results.append(
+                {
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": "Local",
+                    "latest_same_major": None,
+                    "latest_absolute": None,
+                    "status": "local",
+                    "deprecated": None,
+                    "error": None,
+                    "repo_url": _extract_pip_vcs_repo_url(ver_str or declared),
+                    "compare_url": None,
+                    "releases_url": None,
+                }
+            )
+        _set_cached_target_result("pip", target, results)
+        return results
+
     try:
-        cached_meta = _get_cached_registry_metadata("ruby", name)
-        if cached_meta is not None:
-            valid_versions, repo_url_raw = cached_meta
-        else:
-            repo_url_raw = None
+        def _fetch_ruby_meta():
+            r_url = None
             try:
                 url_versions = f"https://rubygems.org/api/v1/versions/{urllib.parse.quote(name)}.json"
                 req_v = urllib.request.Request(url_versions)
@@ -8101,22 +9366,23 @@ def check_ruby_package(target):
                         all_versions.append(v_num)
                         if not item.get("prerelease"):
                             stable_versions.append(v_num)
-                valid_versions = stable_versions if stable_versions else all_versions
+                vv = stable_versions if stable_versions else all_versions
             except urllib.error.HTTPError as e:
                 if e.code == 404:
                     raise
+                _close_http_error(e)
                 try:
                     url_fallback = f"{URL_RUBY_REGISTRY}{urllib.parse.quote(name)}.json"
                     req_fb = urllib.request.Request(url_fallback)
                     with safe_urlopen(req_fb, timeout=10) as response:
                         data_fb = json.loads(response.read().decode("utf-8"))
                     latest_version = data_fb.get("version")
-                    valid_versions = [latest_version] if latest_version else []
-                    repo_url_raw = data_fb.get("source_code_uri") or data_fb.get(
+                    vv = [latest_version] if latest_version else []
+                    r_url = data_fb.get("source_code_uri") or data_fb.get(
                         "homepage_uri"
                     )
                 except Exception:
-                    valid_versions = []
+                    vv = []
             except Exception:
                 # Fallback to single latest version endpoint
                 try:
@@ -8125,14 +9391,18 @@ def check_ruby_package(target):
                     with safe_urlopen(req_fb, timeout=10) as response:
                         data_fb = json.loads(response.read().decode("utf-8"))
                     latest_version = data_fb.get("version")
-                    valid_versions = [latest_version] if latest_version else []
-                    repo_url_raw = data_fb.get("source_code_uri") or data_fb.get(
+                    vv = [latest_version] if latest_version else []
+                    r_url = data_fb.get("source_code_uri") or data_fb.get(
                         "homepage_uri"
                     )
                 except Exception:
-                    valid_versions = []
+                    vv = []
 
-            _set_cached_registry_metadata("ruby", name, (valid_versions, repo_url_raw))
+            return (tuple(vv), r_url)
+
+        valid_versions, repo_url_raw = _get_or_fetch_registry_metadata(
+            "ruby", name, _fetch_ruby_meta
+        )
 
         for ver_str in versions_to_check:
             clean_ver = RE_CLEAN_VER.sub("", ver_str) if ver_str else "0.0.0"
@@ -8154,16 +9424,24 @@ def check_ruby_package(target):
             releases_url = None
             if status in {"major", "minor-major", "patch-major"}:
                 if not repo_url_raw:
-                    try:
-                        url_gem = f"https://rubygems.org/api/v1/gems/{urllib.parse.quote(name)}.json"
-                        req_g = urllib.request.Request(url_gem)
-                        with safe_urlopen(req_g, timeout=5) as response:
-                            data_g = json.loads(response.read().decode("utf-8"))
-                        repo_url_raw = data_g.get("source_code_uri") or data_g.get(
-                            "homepage_uri"
-                        )
-                    except (KeyError, ValueError, TypeError):
-                        pass
+                    ruby_repo_key = ("repo_ruby", name.lower())
+                    with _CACHE_LOCK:
+                        cached_ruby_repo = _AUX_NET_CACHE.get(ruby_repo_key)
+                    if cached_ruby_repo is not None:
+                        repo_url_raw = cached_ruby_repo
+                    else:
+                        try:
+                            url_gem = f"https://rubygems.org/api/v1/gems/{urllib.parse.quote(name)}.json"
+                            req_g = urllib.request.Request(url_gem)
+                            with safe_urlopen(req_g, timeout=5) as response:
+                                data_g = json.loads(response.read().decode("utf-8"))
+                            repo_url_raw = data_g.get("source_code_uri") or data_g.get(
+                                "homepage_uri"
+                            )
+                            with _CACHE_LOCK:
+                                _AUX_NET_CACHE[ruby_repo_key] = repo_url_raw or ""
+                        except (KeyError, ValueError, TypeError, urllib.error.URLError, OSError):
+                            pass
                 repo_url = clean_repo_url(repo_url_raw)
                 if repo_url:
                     compare_url = get_compare_url(repo_url, clean_ver, latest_absolute)
@@ -8189,6 +9467,7 @@ def check_ruby_package(target):
                 }
             )
     except urllib.error.HTTPError as e:
+        _close_http_error(e)
         if e.code == 404:
             for ver_str in versions_to_check:
                 clean_ver = RE_CLEAN_VER.sub("", ver_str) if ver_str else "0.0.0"
@@ -8286,15 +9565,17 @@ def run_ruby_checker(args):
         return None, None, 0
 
     start_time = time.time()
-    results = check_all_ruby_targets(targets, args.concurrent)
+    vuls_enabled = getattr(args, "vuls", False)
+    results, osv_vulns, _ = _run_registry_and_osv_parallel(
+        lambda: check_all_ruby_targets(targets, args.concurrent),
+        targets,
+        TECHNOLOGIES["ruby"]["osv_ecosystem"],
+        args.concurrent,
+        vuls_enabled,
+    )
 
-    # Check vulnerabilities via OSV if requested
-    if getattr(args, "vuls", False):
-        tech_info = TECHNOLOGIES["ruby"]
-        osv_vulns = check_osv_vulnerabilities(
-            targets, tech_info["osv_ecosystem"], args.concurrent
-        )
-
+    # Attach vulnerabilities from OSV if requested
+    if vuls_enabled:
         for r in results:
             key = (r["name"], r["installed"])
             r["vulnerabilities"] = osv_vulns.get(key, [])
@@ -8560,16 +9841,18 @@ def run_gradle_checker(args):
         return None, None, 0
 
     start_time = time.time()
-    # Reuses Maven Central checking logic
-    results = check_all_maven_targets(targets, args.concurrent)
+    # Reuses Maven Central checking logic in parallel with OSV if enabled
+    vuls_enabled = getattr(args, "vuls", False)
+    results, osv_vulns, _ = _run_registry_and_osv_parallel(
+        lambda: check_all_maven_targets(targets, args.concurrent),
+        targets,
+        TECHNOLOGIES["gradle"]["osv_ecosystem"],
+        args.concurrent,
+        vuls_enabled,
+    )
 
-    # Check vulnerabilities via OSV if requested
-    if getattr(args, "vuls", False):
-        tech_info = TECHNOLOGIES["gradle"]
-        osv_vulns = check_osv_vulnerabilities(
-            targets, tech_info["osv_ecosystem"], args.concurrent
-        )
-
+    # Attach vulnerabilities from OSV if requested
+    if vuls_enabled:
         for r in results:
             key = (r["name"], r["installed"])
             r["vulnerabilities"] = osv_vulns.get(key, [])
@@ -8587,6 +9870,44 @@ def run_gradle_checker(args):
     elapsed = time.time() - start_time
 
     return results, pkg_data, elapsed
+
+
+def _normalize_ecosystem_constraint(decl_str, technology):
+    """Translates ecosystem-native version constraint conventions into standard SemVer ranges."""
+    tech = (technology or "").lower()
+    s = decl_str.strip()
+    if not s:
+        return s
+
+    # NuGet / Maven / Gradle interval bracket notation: [1.0], [1.0,2.0), (1.0,2.0], [1.0,), (,2.0]
+    if tech in {"nuget", "maven", "gradle", "android"} and len(s) >= 3 and s[0] in "[(" and s[-1] in "])":
+        inner = s[1:-1].strip()
+        if "," not in inner:
+            if s[0] == "[" and s[-1] == "]":
+                return f"={inner}"
+            return inner
+        lo, hi = (p.strip() for p in inner.split(",", 1))
+        terms = []
+        if lo:
+            terms.append(f"{'>=' if s[0] == '[' else '>'}{lo}")
+        if hi:
+            terms.append(f"{'<=' if s[-1] == ']' else '<'}{hi}")
+        return " ".join(terms) if terms else "*"
+
+    # Detect bare version string (no operators, wildcards, commas, spaces, or OR pipes)
+    has_operator_or_compound = any(ch in s for ch in ("^", "~", ">", "<", "=", "!", "*", "|", ",", " ", "[", "]"))
+    if not has_operator_or_compound and not s.lower().endswith(".x"):
+        if tech == "rust" and s[0].isdigit():
+            # Cargo specification: bare version '2.6.0' / '0.4' / '2' is implicitly a caret requirement '^2.6.0'
+            return f"^{s}"
+        if tech == "nuget" and s[0].isdigit():
+            # NuGet specification: bare version '13.0.1' is minimum inclusive '>=13.0.1' (exact pin is '[13.0.1]')
+            return f">={s}"
+        if tech == "go" and (s[0].isdigit() or (s[0] in "vV" and len(s) > 1 and s[1].isdigit())):
+            # Go Minimal Version Selection (MVS): declared version is a minimum version bound
+            return f">={s}"
+
+    return s
 
 
 def validate_configuration_drift(results):
@@ -8622,6 +9943,9 @@ def validate_configuration_drift(results):
                     "@",
                     "git+",
                     "git:",
+                    "hg+",
+                    "svn+",
+                    "bzr+",
                     "http:",
                     "https:",
                     "ssh:",
@@ -8639,25 +9963,25 @@ def validate_configuration_drift(results):
         ):
             continue
 
-        # Strip Yarn Berry npm: prefix from the declared constraint
-        # e.g., npm:esbuild-wasm@^0.23.0 -> ^0.23.0
+        # Strip npm: alias / Yarn Berry protocol prefix from declared and installed strings
+        # e.g., 'npm:@typescript/typescript6@6.0.2' -> '6.0.2', 'npm:esbuild-wasm@^0.23.0' -> '^0.23.0'
         if decl_str.startswith("npm:"):
-            rest = decl_str[4:]
-            if rest.startswith("@"):
-                parts = rest[1:].split("@", 1)
-                if len(parts) == 2:
-                    decl_str = parts[1]
-            else:
-                parts = rest.split("@", 1)
-                if len(parts) == 2:
-                    decl_str = parts[1]
+            _, decl_str = _parse_npm_alias_spec(decl_str)
+        if inst_str.startswith("npm:"):
+            _, inst_str = _parse_npm_alias_spec(inst_str)
+
+        # Skip wildcard or dist-tag constraints (e.g., '*', 'latest', 'next') that contain no digits
+        if not decl_str or decl_str == "*" or not any(ch.isdigit() for ch in decl_str):
+            continue
 
         # Ensure we can extract a valid semantic version from installed version
         if parse_semver(inst_str) == (0, 0, 0, 0, 0, ""):
             continue
 
+        effective_decl = _normalize_ecosystem_constraint(decl_str, r.get("technology"))
+
         try:
-            satisfied = check_semver_satisfies(inst_str, decl_str)
+            satisfied = check_semver_satisfies(inst_str, effective_decl)
         except Exception:
             satisfied = True
 
@@ -9109,8 +10433,9 @@ def print_summary(results, elapsed_time, vuls_enabled=False, projects_count=None
 def export_json_report(results, filepath):
     """Exports results as raw JSON data."""
     try:
+        payload = json.dumps(results, indent=2)
         with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(results, f, indent=2)
+            f.write(payload)
         print(
             f"{COLOR_GREEN}{ICON_OK} JSON report successfully exported to {filepath}{COLOR_RESET}"
         )
@@ -9125,6 +10450,8 @@ class SarifRuleRegistry:
     decouples rules from package specifics, and injects GitHub Code Scanning
     metadata (e.g. security-severity score, tags, and help markdown).
     """
+
+    __slots__ = ("_rules", "_rule_indices", "_cvss_cache")
 
     def __init__(self) -> None:
         self._rules: List[Dict[str, Any]] = []
@@ -9380,6 +10707,15 @@ class SarifLocationResolver:
     Adheres to OASIS SARIF v2.1.0-rtm.5 §3.28 & §3.29, ensuring clean relative URIs
     anchored to %SRCROOT% without escape sequences (../).
     """
+
+    __slots__ = (
+        "manifest_lines_cache",
+        "repo_root",
+        "_path_cache",
+        "_manifest_files_cache",
+        "_manifest_index",
+        "_content_lower_cache",
+    )
 
     def __init__(
         self,
@@ -9955,8 +11291,9 @@ def export_sarif_report(results, filepath, repo_root: Optional[str] = None):
             "version": "2.1.0",
             "runs": [run],
         }
+        payload = json.dumps(sarif_log, indent=2)
         with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(sarif_log, f, indent=2)
+            f.write(payload)
         print(
             f"{COLOR_GREEN}{ICON_OK} SARIF report successfully exported to {filepath}{COLOR_RESET}"
         )
@@ -10390,11 +11727,53 @@ def match_line_for_dependency(line, package_name, tech):
 _FIND_MANIFEST_FILES_CACHE: Dict[Tuple[str, str], List[str]] = {}
 
 
+_MANIFEST_TECH_RULES = {
+    tech: (
+        frozenset(p for p in pats if not p.startswith(".")),
+        tuple(p.lower() for p in pats if p.startswith(".")),
+    )
+    for tech, pats in {
+        "npm": ("package.json", "bun.lock"),
+        "pip": ("requirements.txt", "pyproject.toml", "Pipfile", "setup.py"),
+        "nuget": (".csproj", ".vbproj", ".fsproj", "Directory.Packages.props"),
+        "php": ("composer.json",),
+        "maven": ("pom.xml",),
+        "go": ("go.mod",),
+        "rust": ("Cargo.toml",),
+        "ruby": ("Gemfile",),
+        "gradle": ("build.gradle", "build.gradle.kts", "libs.versions.toml"),
+    }.items()
+}
+
+_MANIFEST_IGNORED_DIRS = frozenset(
+    {
+        ".git",
+        "node_modules",
+        "bin",
+        "obj",
+        ".gradle",
+        "venv",
+        ".venv",
+        "target",
+        "vendor",
+        "__pycache__",
+        ".idea",
+        ".vscode",
+        "dist",
+        "build",
+        ".next",
+        ".nuxt",
+    }
+)
+
+
 def find_manifest_files(project_path, technology):
-    """Finds manifest files for the given technology in the project path."""
+    """Finds manifest files for the given technology using single-pass os.scandir with early pruning."""
     cache_key = (project_path, technology)
-    if cache_key in _FIND_MANIFEST_FILES_CACHE:
-        return list(_FIND_MANIFEST_FILES_CACHE[cache_key])
+    with _CACHE_LOCK:
+        cached = _FIND_MANIFEST_FILES_CACHE.get(cache_key)
+    if cached is not None:
+        return list(cached)
 
     manifest_files = []
     if os.path.isfile(project_path):
@@ -10403,49 +11782,59 @@ def find_manifest_files(project_path, technology):
     if not os.path.exists(project_path):
         return []
 
-    tech_patterns = {
-        "npm": ["package.json", "bun.lock"],
-        "pip": ["requirements.txt", "pyproject.toml", "Pipfile", "setup.py"],
-        "nuget": [".csproj", ".vbproj", ".fsproj", "Directory.Packages.props"],
-        "php": ["composer.json"],
-        "maven": ["pom.xml"],
-        "go": ["go.mod"],
-        "rust": ["Cargo.toml"],
-        "ruby": ["Gemfile"],
-        "gradle": ["build.gradle", "build.gradle.kts", "libs.versions.toml"],
-    }
-
-    patterns = tech_patterns.get(technology, [])
-    if not patterns:
+    rule = _MANIFEST_TECH_RULES.get(technology)
+    if not rule:
         return []
 
-    ignored_dirs = {".git", "node_modules", "bin", "obj", ".gradle", "venv", ".venv"}
+    exact_names, suffixes = rule
+    ignored_dirs = _MANIFEST_IGNORED_DIRS
 
-    for root, dirs, files in os.walk(project_path):
-        dirs[:] = [d for d in dirs if d not in ignored_dirs]
-        for file in files:
-            for pattern in patterns:
-                if pattern.startswith("."):
-                    if file.lower().endswith(pattern):
-                        manifest_files.append(os.path.join(root, file))
-                else:
-                    if file == pattern:
-                        manifest_files.append(os.path.join(root, file))
+    stack = [project_path]
+    while stack:
+        curr_dir = stack.pop()
+        subdirs = []
+        local_manifests = []
+        try:
+            with os.scandir(curr_dir) as it:
+                for entry in it:
+                    name = entry.name
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            if name not in ignored_dirs and name.lower() not in ignored_dirs:
+                                subdirs.append(entry.path)
+                        else:
+                            if name in exact_names or (
+                                suffixes and name.lower().endswith(suffixes)
+                            ):
+                                local_manifests.append(entry.path)
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+        if local_manifests:
+            local_manifests.sort()
+            manifest_files.extend(local_manifests)
+        if subdirs:
+            subdirs.sort()
+            stack.extend(reversed(subdirs))
 
     if technology == "nuget":
         curr = os.path.abspath(project_path)
         if os.path.isfile(curr):
             curr = os.path.dirname(curr)
+        seen_manifests = set(manifest_files)
         for _ in range(10):
             props_file = os.path.join(curr, "Directory.Packages.props")
-            if os.path.exists(props_file) and props_file not in manifest_files:
+            if os.path.exists(props_file) and props_file not in seen_manifests:
                 manifest_files.append(props_file)
+                seen_manifests.add(props_file)
             parent = os.path.dirname(curr)
             if parent == curr:
                 break
             curr = parent
 
-    _FIND_MANIFEST_FILES_CACHE[cache_key] = list(manifest_files)
+    with _CACHE_LOCK:
+        _FIND_MANIFEST_FILES_CACHE[cache_key] = list(manifest_files)
     return manifest_files
 
 
@@ -10519,8 +11908,28 @@ def _find_target_version_line(
     return fallback_idx, target_text
 
 
+def _read_manifest_lines_cached(manifest_path, manifest_lines_cache=None):
+    """Reads manifest lines once per path when a cache dict is supplied."""
+    if manifest_lines_cache is not None and manifest_path in manifest_lines_cache:
+        return manifest_lines_cache[manifest_path]
+    try:
+        with open(manifest_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+    except Exception:
+        lines = None
+    if manifest_lines_cache is not None and lines is not None:
+        manifest_lines_cache[manifest_path] = lines
+    return lines
+
+
 def _resolve_property_placeholder(
-    manifest_path, target_text, tech, lines, line_idx_to_change, declared_ver
+    manifest_path,
+    target_text,
+    tech,
+    lines,
+    line_idx_to_change,
+    declared_ver,
+    manifest_lines_cache=None,
 ):
     """Resolves Maven/Gradle/NuGet property placeholders to concrete files and line numbers."""
 
@@ -10540,17 +11949,20 @@ def _resolve_property_placeholder(
         return None, None
 
     def find_property_definition(current_path, prop_name_val, tech_type):
-        try:
-            with open(current_path, "r", encoding="utf-8", errors="ignore") as f_p:
-                lines_list = f_p.readlines()
-        except Exception:
-            return None, None, None
+        if current_path == manifest_path and lines is not None:
+            lines_list = lines
+        else:
+            lines_list = _read_manifest_lines_cached(
+                current_path, manifest_lines_cache
+            )
+            if lines_list is None:
+                return None, None, None, None
 
         line_idx_p, val_p = _search_lines_for_property(
             lines_list, prop_name_val, tech_type
         )
         if line_idx_p is not None:
-            return current_path, line_idx_p, val_p
+            return current_path, line_idx_p, val_p, lines_list
 
         if tech_type == "maven":
             curr_dir_p = current_path
@@ -10561,33 +11973,28 @@ def _resolve_property_placeholder(
                     break
                 parent_pom = os.path.join(parent_dir_p, "pom.xml")
                 if os.path.exists(parent_pom):
-                    try:
-                        with open(
-                            parent_pom, "r", encoding="utf-8", errors="ignore"
-                        ) as f_p:
-                            parent_lines = f_p.readlines()
+                    parent_lines = _read_manifest_lines_cached(
+                        parent_pom, manifest_lines_cache
+                    )
+                    if parent_lines is not None:
                         line_idx_p, val_p = _search_lines_for_property(
                             parent_lines, prop_name_val, tech_type
                         )
                         if line_idx_p is not None:
-                            return parent_pom, line_idx_p, val_p
-                    except (OSError, UnicodeDecodeError):
-                        pass
+                            return parent_pom, line_idx_p, val_p, parent_lines
                     curr_dir_p = parent_pom
                 else:
                     break
-        return None, None, None
+        return None, None, None, None
 
     is_placeholder = False
     prop_name = None
     if tech == "maven":
-        # Optimization: Use pre-compiled regex RE_MAVEN_PLACEHOLDER to avoid re.match lookup overhead
         m = RE_MAVEN_PLACEHOLDER.match(target_text)
         if m:
             is_placeholder = True
             prop_name = m.group(1)
     elif tech == "nuget":
-        # Optimization: Use pre-compiled regex RE_NUGET_PLACEHOLDER to avoid re.match lookup overhead
         m = RE_NUGET_PLACEHOLDER.match(target_text)
         if m:
             is_placeholder = True
@@ -10607,18 +12014,18 @@ def _resolve_property_placeholder(
     new_lines = lines
 
     if is_placeholder and prop_name:
-        resolved_path, resolved_line_idx, current_val = find_property_definition(
-            manifest_path, prop_name, tech
+        resolved_path, resolved_line_idx, current_val, resolved_lines = (
+            find_property_definition(manifest_path, prop_name, tech)
         )
         if resolved_path and resolved_line_idx:
             new_path = resolved_path
-            try:
-                with open(new_path, "r", encoding="utf-8", errors="ignore") as f:
-                    new_lines = f.readlines()
-                new_idx = resolved_line_idx - 1
-                resolved_ver = current_val
-            except (OSError, UnicodeDecodeError):
-                pass
+            new_lines = (
+                resolved_lines
+                if resolved_lines is not None
+                else (_read_manifest_lines_cached(new_path, manifest_lines_cache) or lines)
+            )
+            new_idx = resolved_line_idx - 1
+            resolved_ver = current_val
 
     if declared_ver and resolved_ver:
         is_val_placeholder = (
@@ -10652,14 +12059,20 @@ def _resolve_property_placeholder(
 
 
 def generate_remediation_diff(
-    manifest_path, line_index, declared_ver, latest_ver, tech, package_name=None
+    manifest_path,
+    line_index,
+    declared_ver,
+    latest_ver,
+    tech,
+    package_name=None,
+    lines=None,
+    manifest_lines_cache=None,
 ):
     """Generates remediation diff showing current vs suggested change."""
-    try:
-        with open(manifest_path, "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()
-    except Exception:
-        return None
+    if lines is None:
+        lines = _read_manifest_lines_cached(manifest_path, manifest_lines_cache)
+        if lines is None:
+            return None
 
     idx = line_index - 1
     if idx < 0 or idx >= len(lines):
@@ -10681,7 +12094,13 @@ def generate_remediation_diff(
         return None
 
     res_path, res_idx, res_text, res_lines = _resolve_property_placeholder(
-        manifest_path, target_text, tech, lines, line_idx_to_change, declared_ver
+        manifest_path,
+        target_text,
+        tech,
+        lines,
+        line_idx_to_change,
+        declared_ver,
+        manifest_lines_cache=manifest_lines_cache,
     )
     if res_path is None:
         return None
@@ -10705,13 +12124,11 @@ def generate_remediation_diff(
 
     upgraded_str = effective_prefix + latest_ver
 
-    def _clean_v(v):
-        if not v:
-            return ""
-        v = str(v).strip().lower().removeprefix("v")
-        return RE_OPERATOR_PREFIX.sub("", v)
-
-    if target_text and latest_ver and _clean_v(target_text) == _clean_v(latest_ver):
+    if (
+        target_text
+        and latest_ver
+        and _clean_version_str(target_text) == _clean_version_str(latest_ver)
+    ):
         return None
 
     start_ctx = max(0, line_idx_to_change - 2)
@@ -10771,13 +12188,14 @@ def generate_remediation_diff(
     }
 
 
-def generate_multi_parent_unified_diff(manifest_path, parent_changes, tech):
+def generate_multi_parent_unified_diff(
+    manifest_path, parent_changes, tech, lines=None, manifest_lines_cache=None
+):
     """Generates a consolidated unified diff showing changes for multiple packages in the same manifest file."""
-    try:
-        with open(manifest_path, "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()
-    except Exception:
-        return None
+    if lines is None:
+        lines = _read_manifest_lines_cached(manifest_path, manifest_lines_cache)
+        if lines is None:
+            return None
 
     resolved_changes = []
     for ch in parent_changes:
@@ -10810,7 +12228,13 @@ def generate_multi_parent_unified_diff(manifest_path, parent_changes, tech):
             continue
 
         res_path, res_idx, res_text, res_lines = _resolve_property_placeholder(
-            manifest_path, target_text, tech, lines, line_idx_to_change, declared_ver
+            manifest_path,
+            target_text,
+            tech,
+            lines,
+            line_idx_to_change,
+            declared_ver,
+            manifest_lines_cache=manifest_lines_cache,
         )
         if res_path is None or res_path != manifest_path:
             continue
@@ -10830,13 +12254,11 @@ def generate_multi_parent_unified_diff(manifest_path, parent_changes, tech):
 
         upgraded_str = effective_prefix + target_ver
 
-        def _clean_v(v):
-            if not v:
-                return ""
-            v = str(v).strip().lower().removeprefix("v")
-            return RE_OPERATOR_PREFIX.sub("", v)
-
-        if target_text and target_ver and _clean_v(target_text) == _clean_v(target_ver):
+        if (
+            target_text
+            and target_ver
+            and _clean_version_str(target_text) == _clean_version_str(target_ver)
+        ):
             continue
 
         orig_line = lines[line_idx_to_change].rstrip("\r\n")
@@ -10961,14 +12383,12 @@ def generate_multi_parent_unified_diff(manifest_path, parent_changes, tech):
     }
 
 
-def generate_addition_remediation_diff(manifest_path, package_name, target_ver, tech):
+def generate_addition_remediation_diff(
+    manifest_path, package_name, target_ver, tech, lines=None, anchor_cache=None
+):
     """Generates remediation diff showing an addition to the manifest file when missing."""
-    try:
-        with open(manifest_path, "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()
-    except Exception:
-        return None
-
+    if lines is None:
+        lines = _read_manifest_lines_cached(manifest_path)
     if not lines:
         return None
 
@@ -10978,23 +12398,32 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
 
     raw_ver = str(target_ver).strip()
     clean_numeric = raw_ver.lstrip("^~>=<! v")
+    anchor_key = (manifest_path, tech, "add") if anchor_cache is not None else None
 
     if tech in {"npm", "pnpm", "yarn"}:
         clean_target = (
             f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
         )
-        deps_match_idx = None
-        dev_deps_match_idx = None
-        root_open_idx = None
-
-        for idx, line in enumerate(lines):
-            if RE_DEPS_MATCH.search(line):
-                deps_match_idx = idx
-                break
-            elif RE_DEV_DEPS_MATCH.search(line):
-                dev_deps_match_idx = idx
-            elif root_open_idx is None and "{" in line:
-                root_open_idx = idx
+        if anchor_key is not None and anchor_key in anchor_cache:
+            deps_match_idx, dev_deps_match_idx, root_open_idx = anchor_cache[anchor_key]
+        else:
+            deps_match_idx = None
+            dev_deps_match_idx = None
+            root_open_idx = None
+            for idx, line in enumerate(lines):
+                if RE_DEPS_MATCH.search(line):
+                    deps_match_idx = idx
+                    break
+                elif RE_DEV_DEPS_MATCH.search(line):
+                    dev_deps_match_idx = idx
+                elif root_open_idx is None and "{" in line:
+                    root_open_idx = idx
+            if anchor_key is not None:
+                anchor_cache[anchor_key] = (
+                    deps_match_idx,
+                    dev_deps_match_idx,
+                    root_open_idx,
+                )
 
         if deps_match_idx is not None:
             insert_line_idx = deps_match_idx + 1
@@ -11009,11 +12438,16 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
         clean_target = (
             f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
         )
-        deps_match_idx = None
-        for idx, line in enumerate(lines):
-            if RE_REQUIRE_MATCH.search(line):
-                deps_match_idx = idx
-                break
+        if anchor_key is not None and anchor_key in anchor_cache:
+            deps_match_idx = anchor_cache[anchor_key]
+        else:
+            deps_match_idx = None
+            for idx, line in enumerate(lines):
+                if RE_REQUIRE_MATCH.search(line):
+                    deps_match_idx = idx
+                    break
+            if anchor_key is not None:
+                anchor_cache[anchor_key] = deps_match_idx
         if deps_match_idx is not None:
             insert_line_idx = deps_match_idx + 1
             line_to_add = f'{indent}"{package_name}": "{clean_target}",'
@@ -11023,14 +12457,19 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
     elif tech == "go":
         go_ver = f"v{clean_numeric}" if not raw_ver.startswith("v") else raw_ver
         go_ver = RE_OPERATOR_PREFIX.sub("", go_ver)
-        req_open_idx = None
-        req_close_idx = None
-        for idx, line in enumerate(lines):
-            if RE_GO_REQ_OPEN.match(line):
-                req_open_idx = idx
-            elif req_open_idx is not None and RE_GO_REQ_CLOSE.match(line):
-                req_close_idx = idx
-                break
+        if anchor_key is not None and anchor_key in anchor_cache:
+            req_close_idx = anchor_cache[anchor_key]
+        else:
+            req_open_idx = None
+            req_close_idx = None
+            for idx, line in enumerate(lines):
+                if RE_GO_REQ_OPEN.match(line):
+                    req_open_idx = idx
+                elif req_open_idx is not None and RE_GO_REQ_CLOSE.match(line):
+                    req_close_idx = idx
+                    break
+            if anchor_key is not None:
+                anchor_cache[anchor_key] = req_close_idx
         if req_close_idx is not None:
             insert_line_idx = req_close_idx
             line_to_add = f"\t{package_name} {go_ver}"
@@ -11041,11 +12480,16 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
         insert_line_idx = len(lines)
         line_to_add = f"{package_name}>={clean_numeric}"
     elif tech == "rust":
-        dep_sec_idx = None
-        for idx, line in enumerate(lines):
-            if RE_RUST_DEP.search(line.strip()):
-                dep_sec_idx = idx
-                break
+        if anchor_key is not None and anchor_key in anchor_cache:
+            dep_sec_idx = anchor_cache[anchor_key]
+        else:
+            dep_sec_idx = None
+            for idx, line in enumerate(lines):
+                if RE_RUST_DEP.search(line.strip()):
+                    dep_sec_idx = idx
+                    break
+            if anchor_key is not None:
+                anchor_cache[anchor_key] = dep_sec_idx
         if dep_sec_idx is not None:
             insert_line_idx = dep_sec_idx + 1
             line_to_add = f'{package_name} = "{clean_numeric}"'
@@ -11112,14 +12556,12 @@ def generate_addition_remediation_diff(manifest_path, package_name, target_ver, 
     }
 
 
-def generate_override_remediation_diff(manifest_path, package_name, target_ver, tech):
+def generate_override_remediation_diff(
+    manifest_path, package_name, target_ver, tech, lines=None, anchor_cache=None
+):
     """Generates remediation diff for forcing a transitive dependency override in manifest_path."""
-    try:
-        with open(manifest_path, "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()
-    except Exception:
-        return None
-
+    if lines is None:
+        lines = _read_manifest_lines_cached(manifest_path)
     if not lines:
         return None
 
@@ -11128,46 +12570,54 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
     indent = "    "
     insert_line_idx = None
     line_to_add = ""
+    anchor_key = (manifest_path, tech, "override") if anchor_cache is not None else None
 
     if tech in {"npm", "pnpm"}:
         clean_target = (
             f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
         )
-        overrides_line_idx = None
-        for idx, line in enumerate(lines):
-            if RE_OVERRIDES_MATCH.search(line):
-                overrides_line_idx = idx
-                break
+        if anchor_key is not None and anchor_key in anchor_cache:
+            overrides_line_idx, root_open_idx = anchor_cache[anchor_key]
+        else:
+            overrides_line_idx = None
+            root_open_idx = None
+            for idx, line in enumerate(lines):
+                if root_open_idx is None and "{" in line:
+                    root_open_idx = idx
+                if RE_OVERRIDES_MATCH.search(line):
+                    overrides_line_idx = idx
+                    break
+            if anchor_key is not None:
+                anchor_cache[anchor_key] = (overrides_line_idx, root_open_idx)
 
         if overrides_line_idx is not None:
             insert_line_idx = overrides_line_idx + 1
             line_to_add = f'{indent}  "{package_name}": "{clean_target}",'
         else:
-            root_open_idx = None
-            for idx, line in enumerate(lines):
-                if "{" in line:
-                    root_open_idx = idx
-                    break
             insert_line_idx = (root_open_idx + 1) if root_open_idx is not None else 1
             line_to_add = f'{indent}"overrides": {{\n{indent}  "{package_name}": "{clean_target}"\n{indent}}},'
     elif tech == "yarn":
         clean_target = (
             f"^{clean_numeric}" if not RE_OPERATOR_START.match(raw_ver) else raw_ver
         )
-        resolutions_line_idx = None
-        for idx, line in enumerate(lines):
-            if RE_RESOLUTIONS_MATCH.search(line):
-                resolutions_line_idx = idx
-                break
+        if anchor_key is not None and anchor_key in anchor_cache:
+            resolutions_line_idx, root_open_idx = anchor_cache[anchor_key]
+        else:
+            resolutions_line_idx = None
+            root_open_idx = None
+            for idx, line in enumerate(lines):
+                if root_open_idx is None and "{" in line:
+                    root_open_idx = idx
+                if RE_RESOLUTIONS_MATCH.search(line):
+                    resolutions_line_idx = idx
+                    break
+            if anchor_key is not None:
+                anchor_cache[anchor_key] = (resolutions_line_idx, root_open_idx)
+
         if resolutions_line_idx is not None:
             insert_line_idx = resolutions_line_idx + 1
             line_to_add = f'{indent}  "{package_name}": "{clean_target}",'
         else:
-            root_open_idx = None
-            for idx, line in enumerate(lines):
-                if "{" in line:
-                    root_open_idx = idx
-                    break
             insert_line_idx = (root_open_idx + 1) if root_open_idx is not None else 1
             line_to_add = f'{indent}"resolutions": {{\n{indent}  "{package_name}": "{clean_target}"\n{indent}}},'
     elif tech == "go":
@@ -11176,11 +12626,16 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
         insert_line_idx = len(lines)
         line_to_add = f"replace {package_name} => {package_name} {go_ver}"
     elif tech == "rust":
-        patch_sec_idx = None
-        for idx, line in enumerate(lines):
-            if RE_RUST_PATCH.search(line.strip()):
-                patch_sec_idx = idx
-                break
+        if anchor_key is not None and anchor_key in anchor_cache:
+            patch_sec_idx = anchor_cache[anchor_key]
+        else:
+            patch_sec_idx = None
+            for idx, line in enumerate(lines):
+                if RE_RUST_PATCH.search(line.strip()):
+                    patch_sec_idx = idx
+                    break
+            if anchor_key is not None:
+                anchor_cache[anchor_key] = patch_sec_idx
         if patch_sec_idx is not None:
             insert_line_idx = patch_sec_idx + 1
             line_to_add = f'{package_name} = "{clean_numeric}"'
@@ -11191,7 +12646,12 @@ def generate_override_remediation_diff(manifest_path, package_name, target_ver, 
         return None
     else:
         return generate_addition_remediation_diff(
-            manifest_path, package_name, target_ver, tech
+            manifest_path,
+            package_name,
+            target_ver,
+            tech,
+            lines=lines,
+            anchor_cache=anchor_cache,
         )
 
     start_ctx = max(0, insert_line_idx - 2)
@@ -11267,20 +12727,27 @@ def _populate_rails_remediation_strategies(
     latest_patch,
     latest_sm,
     latest_abs,
+    first_by_name_path=None,
+    manifest_lines_cache=None,
+    anchor_cache=None,
 ):
     """Generates remediation strategies for Rails core components by targeting the 'rails' gem in Gemfile."""
     strategies = []
     project_path = r.get("project_path")
 
-    # Find the 'rails' gem in results
-    rails_candidate = next(
-        (
-            item
-            for item in results
-            if item.get("name") == "rails" and item.get("project_path") == project_path
-        ),
-        None,
-    )
+    # Find the 'rails' gem in results in O(1) when pre-indexed
+    if first_by_name_path is not None:
+        rails_candidate = first_by_name_path.get(("rails", project_path))
+    else:
+        rails_candidate = next(
+            (
+                item
+                for item in results
+                if item.get("name") == "rails"
+                and item.get("project_path") == project_path
+            ),
+            None,
+        )
 
     rails_decl = rails_candidate.get("declared") if rails_candidate else None
     rails_line_idx = get_line_idx_fn(
@@ -11332,6 +12799,9 @@ def _populate_rails_remediation_strategies(
         f"bundle update {cmd_subpkg}",
         "bundle exec rails test",
         label_suffix="rails",
+        lines=lines,
+        manifest_lines_cache=manifest_lines_cache,
+        anchor_cache=anchor_cache,
     )
 
     diagnostic_msg = (
@@ -11484,24 +12954,41 @@ def _build_standard_remediation_options(
     cmd=None,
     val=None,
     label_suffix="",
+    lines=None,
+    manifest_lines_cache=None,
+    anchor_cache=None,
 ):
     """Builds standard Patch, Minor, and Major remediation option objects."""
     options = []
     suffix = f" {label_suffix}" if label_suffix else ""
-    specs = [
+    specs = (
         ("patch", patch, f"Patch{suffix}: v", "Patch / Bugfix", "v-chip-ok"),
         ("minor", sm, f"Minor{suffix}: v", "Minor / Feature", "v-chip-safe"),
         ("major", abs_ver, f"Major{suffix}: v", "Major / Breaking", "v-chip-major"),
-    ]
+    )
     for opt_id, ver, prefix, badge, badge_cls in specs:
         if not ver or (opt_id == "major" and " or " in str(ver)):
             continue
         diff = (
             generate_remediation_diff(
-                manifest_path, line_idx, decl, ver, tech, pkg_name
+                manifest_path,
+                line_idx,
+                decl,
+                ver,
+                tech,
+                pkg_name,
+                lines=lines,
+                manifest_lines_cache=manifest_lines_cache,
             )
             if line_idx
-            else generate_addition_remediation_diff(manifest_path, pkg_name, ver, tech)
+            else generate_addition_remediation_diff(
+                manifest_path,
+                pkg_name,
+                ver,
+                tech,
+                lines=lines,
+                anchor_cache=anchor_cache,
+            )
         )
         if diff:
             options.append(
@@ -11528,6 +13015,9 @@ def _populate_direct_strategies(
     latest_patch,
     latest_sm,
     latest_abs,
+    lines=None,
+    manifest_lines_cache=None,
+    anchor_cache=None,
 ):
     direct_options = []
     target_string = (
@@ -11550,11 +13040,23 @@ def _populate_direct_strategies(
             for p in parts:
                 diff_p = (
                     generate_remediation_diff(
-                        manifest_path, found_line_idx, declared, p, tech, name
+                        manifest_path,
+                        found_line_idx,
+                        declared,
+                        p,
+                        tech,
+                        name,
+                        lines=lines,
+                        manifest_lines_cache=manifest_lines_cache,
                     )
                     if found_line_idx
                     else generate_addition_remediation_diff(
-                        manifest_path, name, p, tech
+                        manifest_path,
+                        name,
+                        p,
+                        tech,
+                        lines=lines,
+                        anchor_cache=anchor_cache,
                     )
                 )
                 if diff_p:
@@ -11571,11 +13073,23 @@ def _populate_direct_strategies(
                     )
             diff_comb = (
                 generate_remediation_diff(
-                    manifest_path, found_line_idx, declared, target_string, tech, name
+                    manifest_path,
+                    found_line_idx,
+                    declared,
+                    target_string,
+                    tech,
+                    name,
+                    lines=lines,
+                    manifest_lines_cache=manifest_lines_cache,
                 )
                 if found_line_idx
                 else generate_addition_remediation_diff(
-                    manifest_path, name, target_string, tech
+                    manifest_path,
+                    name,
+                    target_string,
+                    tech,
+                    lines=lines,
+                    anchor_cache=anchor_cache,
                 )
             )
             if diff_comb:
@@ -11603,6 +13117,9 @@ def _populate_direct_strategies(
             name,
             cmd_direct,
             val_direct,
+            lines=lines,
+            manifest_lines_cache=manifest_lines_cache,
+            anchor_cache=anchor_cache,
         )
     )
 
@@ -11626,27 +13143,38 @@ def _populate_direct_strategies(
 
 
 def _populate_parent_strategies(
-    r, results, manifest_path, lines, tech, name, get_line_idx_fn
+    r,
+    results,
+    manifest_path,
+    lines,
+    tech,
+    name,
+    get_line_idx_fn,
+    results_by_name_path=None,
+    manifest_lines_cache=None,
+    anchor_cache=None,
+    parent_options_cache=None,
 ):
     strategies = []
-    if not r.get("required_by"):
+    req_by = r.get("required_by")
+    if not req_by:
         return strategies
 
-    # Optimization: Pre-index results by (name, project_path) for O(1) hash map lookups instead of O(N) list searches
-    results_by_name_path = {
-        (item.get("name"), item.get("project_path")): item for item in results
-    }
+    # Use pre-indexed results map from caller (O(1)) instead of O(N) rebuild per transitive dep
+    if results_by_name_path is None:
+        results_by_name_path = {
+            (item.get("name"), item.get("project_path")): item for item in results
+        }
 
+    proj_path = r.get("project_path")
     seen_parents = set()
     valid_parents = []
-    for parent_name in r.get("required_by", []):
+    for parent_name in req_by:
         if not parent_name or parent_name in seen_parents:
             continue
         seen_parents.add(parent_name)
 
-        parent_candidate = results_by_name_path.get(
-            (parent_name, r.get("project_path"))
-        )
+        parent_candidate = results_by_name_path.get((parent_name, proj_path))
         if not parent_candidate:
             continue
 
@@ -11678,19 +13206,43 @@ def _populate_parent_strategies(
         cmd_parent = f"bundle update {p_name} {name}" if tech == "ruby" else None
         val_parent = "bundle exec rails test" if tech == "ruby" else None
 
-        parent_options = _build_standard_remediation_options(
-            manifest_path,
-            parent_line_idx,
-            p_decl,
-            p_patch,
-            p_sm,
-            p_abs,
-            tech,
-            p_name,
-            cmd_parent,
-            val_parent,
-            label_suffix=p_name,
+        p_opt_key = (
+            (
+                manifest_path,
+                p_name,
+                parent_line_idx,
+                p_decl,
+                p_patch,
+                p_sm,
+                p_abs,
+                tech,
+                cmd_parent,
+                val_parent,
+            )
+            if parent_options_cache is not None
+            else None
         )
+        if p_opt_key is not None and p_opt_key in parent_options_cache:
+            parent_options = parent_options_cache[p_opt_key]
+        else:
+            parent_options = _build_standard_remediation_options(
+                manifest_path,
+                parent_line_idx,
+                p_decl,
+                p_patch,
+                p_sm,
+                p_abs,
+                tech,
+                p_name,
+                cmd_parent,
+                val_parent,
+                label_suffix=p_name,
+                lines=lines,
+                manifest_lines_cache=manifest_lines_cache,
+                anchor_cache=anchor_cache,
+            )
+            if p_opt_key is not None:
+                parent_options_cache[p_opt_key] = parent_options
 
         if parent_options:
             target_v = p_abs or p_sm or p_patch
@@ -11747,7 +13299,11 @@ def _populate_parent_strategies(
             for vp in valid_parents
         ]
         unified_diff = generate_multi_parent_unified_diff(
-            valid_parents[0]["manifest_path"], parent_changes, tech
+            valid_parents[0]["manifest_path"],
+            parent_changes,
+            tech,
+            lines=lines,
+            manifest_lines_cache=manifest_lines_cache,
         )
         if unified_diff:
             combined_options.append(
@@ -11817,13 +13373,20 @@ def _populate_override_strategies(
     latest_abs,
     clean_installed,
     has_prior_strategies,
+    lines=None,
+    anchor_cache=None,
 ):
     target_ver_str = latest_patch or latest_sm or latest_abs or clean_installed
     if not target_ver_str:
         return []
 
     ov_diff = generate_override_remediation_diff(
-        manifest_path, name, target_ver_str, tech
+        manifest_path,
+        name,
+        target_ver_str,
+        tech,
+        lines=lines,
+        anchor_cache=anchor_cache,
     )
     if not ov_diff:
         return []
@@ -11926,6 +13489,19 @@ def _build_final_remediation(strategies, manifest_missing):
 def populate_remediation_recommendations(results, default_project_path):
     """Calculates and attaches remediation info with multi-level strategies (Patch, Minor, Major, Parent Upgrade, Override) to each result."""
     manifest_file_cache = {}
+    manifest_lower_cache = {}
+    manifest_index_cache = {}
+    anchor_cache = {}
+    parent_options_cache = {}
+
+    # Pre-index results once in O(N) instead of rebuilding dicts inside nested per-package loops
+    results_by_name_path = {}
+    first_by_name_path = {}
+    for item in results:
+        k = (item.get("name"), item.get("project_path"))
+        results_by_name_path[k] = item
+        if k not in first_by_name_path:
+            first_by_name_path[k] = item
 
     def _get_manifest_lines(m_path):
         if m_path not in manifest_file_cache:
@@ -11935,6 +13511,31 @@ def populate_remediation_recommendations(results, default_project_path):
             except Exception:
                 manifest_file_cache[m_path] = []
         return manifest_file_cache[m_path]
+
+    def _get_manifest_content_lower(m_path, lines):
+        if m_path not in manifest_lower_cache:
+            manifest_lower_cache[m_path] = "".join(lines).lower()
+        return manifest_lower_cache[m_path]
+
+    def _get_manifest_index(m_path, tech, lines):
+        cache_key = (m_path, tech)
+        if cache_key in manifest_index_cache:
+            return manifest_index_cache[cache_key]
+        index = {}
+        extractor = RE_MANIFEST_INDEXERS.get(tech)
+        if extractor:
+            for idx, line in enumerate(lines):
+                m = extractor.search(line)
+                if m:
+                    pkg = m.group(1) or (
+                        m.group(2) if m.lastindex and m.lastindex >= 2 else None
+                    )
+                    if pkg:
+                        index.setdefault(pkg.strip().lower(), []).append(
+                            (idx + 1, line)
+                        )
+        manifest_index_cache[cache_key] = index
+        return index
 
     line_search_cache = {}
 
@@ -11953,24 +13554,73 @@ def populate_remediation_recommendations(results, default_project_path):
         )
         declared_str = str(declared).strip() if declared else None
 
-        for idx, line in enumerate(lines):
-            matched = (
-                (f'"{pkg_name}"' in line or '"engines"' in line)
-                if is_engine
-                else match_line_for_dependency(line, pkg_name, tech)
+        if not is_engine:
+            pkg_lower = pkg_name.lower()
+            artifact_needle = (
+                pkg_lower.split(":")[-1]
+                if (tech in {"maven", "gradle"} and ":" in pkg_lower)
+                else pkg_lower
             )
-            if matched:
-                score = 1
-                if declared:
-                    if (declared_digits and declared_digits in line) or (
-                        declared_str and declared_str in line
+
+            # Fast path 1: O(1) lookup in single-pass inverted manifest index
+            inv_index = _get_manifest_index(m_path, tech, lines)
+            candidates = inv_index.get(pkg_lower)
+            if not candidates and artifact_needle != pkg_lower:
+                candidates = inv_index.get(artifact_needle)
+            if candidates:
+                for line_no, line in candidates:
+                    score = 1
+                    if declared and (
+                        (declared_digits and declared_digits in line)
+                        or (declared_str and declared_str in line)
                     ):
                         score = 2
-                if score > best_score:
-                    best_score = score
-                    found_line_idx = idx + 1
-                    if score == 2:
-                        break
+                    if score > best_score:
+                        best_score = score
+                        found_line_idx = line_no
+                        if score == 2:
+                            break
+                if found_line_idx is not None:
+                    line_search_cache[cache_key] = found_line_idx
+                    return found_line_idx
+
+            # Fast path 2: O(1) C-level substring pre-check skips full line regex scan for absent transitive deps
+            content_lower = _get_manifest_content_lower(m_path, lines)
+            if artifact_needle not in content_lower:
+                line_search_cache[cache_key] = None
+                return None
+
+            # Fallback line scan only when package string actually appears in file
+            for idx, line in enumerate(lines):
+                if artifact_needle in line.lower() and match_line_for_dependency(
+                    line, pkg_name, tech
+                ):
+                    score = 1
+                    if declared and (
+                        (declared_digits and declared_digits in line)
+                        or (declared_str and declared_str in line)
+                    ):
+                        score = 2
+                    if score > best_score:
+                        best_score = score
+                        found_line_idx = idx + 1
+                        if score == 2:
+                            break
+        else:
+            for idx, line in enumerate(lines):
+                if f'"{pkg_name}"' in line or '"engines"' in line:
+                    score = 1
+                    if declared and (
+                        (declared_digits and declared_digits in line)
+                        or (declared_str and declared_str in line)
+                    ):
+                        score = 2
+                    if score > best_score:
+                        best_score = score
+                        found_line_idx = idx + 1
+                        if score == 2:
+                            break
+
         line_search_cache[cache_key] = found_line_idx
         return found_line_idx
 
@@ -11990,26 +13640,28 @@ def populate_remediation_recommendations(results, default_project_path):
 
     total_items = len(results)
     last_reported_pct = -1
+    _outdated_statuses = {
+        "major",
+        "minor",
+        "patch",
+        "minor-major",
+        "patch-major",
+    }
 
     for idx, r in enumerate(results, 1):
-        if total_items > 0:
+        if total_items > 0 and _PARALLEL_SCAN_DEPTH == 0:
             pct = int((idx / total_items) * 100)
             if pct != last_reported_pct or idx == total_items or idx % 25 == 0:
-                sys.stdout.write(
-                    f"\r{COLOR_GRAY}{ICON_INFO} Processing results: {pct}% ({idx}/{total_items} packages)...{COLOR_RESET}"
-                )
-                sys.stdout.flush()
+                with console_lock:
+                    sys.stdout.write(
+                        f"\r{COLOR_GRAY}{ICON_INFO} Processing results: {pct}% ({idx}/{total_items} packages)...{COLOR_RESET}"
+                    )
+                    sys.stdout.flush()
                 last_reported_pct = pct
 
         r["remediation"] = None
 
-        is_outdated = r.get("status") in {
-            "major",
-            "minor",
-            "patch",
-            "minor-major",
-            "patch-major",
-        }
+        is_outdated = r.get("status") in _outdated_statuses
         has_vulns = bool(r.get("vulnerabilities"))
         is_depr = bool(r.get("deprecated"))
 
@@ -12072,6 +13724,9 @@ def populate_remediation_recommendations(results, default_project_path):
                 latest_patch,
                 latest_sm,
                 latest_abs,
+                first_by_name_path=first_by_name_path,
+                manifest_lines_cache=manifest_file_cache,
+                anchor_cache=anchor_cache,
             )
             strategies.extend(rails_strategies)
 
@@ -12088,13 +13743,26 @@ def populate_remediation_recommendations(results, default_project_path):
                         latest_patch,
                         latest_sm,
                         latest_abs,
+                        lines=lines,
+                        manifest_lines_cache=manifest_file_cache,
+                        anchor_cache=anchor_cache,
                     )
                 )
 
             if dep_type == "Transitive" and found_line_idx is None:
                 strategies.extend(
                     _populate_parent_strategies(
-                        r, results, manifest_path, lines, tech, name, _find_line_idx
+                        r,
+                        results,
+                        manifest_path,
+                        lines,
+                        tech,
+                        name,
+                        _find_line_idx,
+                        results_by_name_path=results_by_name_path,
+                        manifest_lines_cache=manifest_file_cache,
+                        anchor_cache=anchor_cache,
+                        parent_options_cache=parent_options_cache,
                     )
                 )
                 if tech == "ruby":
@@ -12122,6 +13790,8 @@ def populate_remediation_recommendations(results, default_project_path):
                             latest_abs,
                             clean_installed,
                             bool(strategies),
+                            lines=lines,
+                            anchor_cache=anchor_cache,
                         )
                     )
 
@@ -12131,11 +13801,12 @@ def populate_remediation_recommendations(results, default_project_path):
             if manifest_missing:
                 r["manifest_missing"] = True
 
-    if total_items > 0:
-        sys.stdout.write(
-            f"\r{COLOR_GRAY}{ICON_INFO} Processing results: 100% ({total_items}/{total_items} packages)... Done.{COLOR_RESET}\n"
-        )
-        sys.stdout.flush()
+    if total_items > 0 and _PARALLEL_SCAN_DEPTH == 0:
+        with console_lock:
+            sys.stdout.write(
+                f"\r{COLOR_GRAY}{ICON_INFO} Processing results: 100% ({total_items}/{total_items} packages)... Done.{COLOR_RESET}\n"
+            )
+            sys.stdout.flush()
 
 
 # Compressed embedded HTML Report Template (gzip + base64)
@@ -12426,10 +14097,61 @@ _HTML_TEMPLATE_GZIP_B64 = (
 )
 
 
+_HTML_JSON_ENCODER = json.JSONEncoder()
+
+
+def _escape_json_for_html(json_str):
+    """Fast C-level XSS escape for JSON embedded inside HTML <script> tags."""
+    if "<" in json_str:
+        json_str = json_str.replace("<", "\\u003c")
+    if ">" in json_str:
+        json_str = json_str.replace(">", "\\u003e")
+    if "&" in json_str:
+        json_str = json_str.replace("&", "\\u0026")
+    return json_str
+
+
+def _write_escaped_json_stream(file_obj, data):
+    """Streams JSON directly to a text file using per-element C-accelerated encoding.
+
+    Preserves exact json.dumps() formatting while avoiding multi-MB intermediate
+    strings and CPython PEP 393 4x UCS4 widening with emoji HTML templates.
+    """
+    encode = _HTML_JSON_ENCODER.encode
+    escape = _escape_json_for_html
+    write = file_obj.write
+
+    if isinstance(data, list):
+        write("[")
+        first = True
+        for item in data:
+            if first:
+                first = False
+            else:
+                write(", ")
+            write(escape(encode(item)))
+        write("]")
+    elif isinstance(data, dict):
+        write("{")
+        first = True
+        for k, v in data.items():
+            if first:
+                first = False
+            else:
+                write(", ")
+            write(escape(encode(k)))
+            write(": ")
+            write(escape(encode(v)))
+        write("}")
+    else:
+        write(escape(encode(data)))
+
+
 class HTMLReportTemplateProvider:
     """Provides the HTML/CSS/JS template for interactive dependency reports."""
 
     _cached_template = None
+    _cached_split = None
 
     @classmethod
     def get_template(cls):
@@ -12456,49 +14178,44 @@ class HTMLReportTemplateProvider:
         ).decode("utf-8")
         return cls._cached_template
 
+    @classmethod
+    def get_split_template(cls):
+        """Returns template split around the large JSON payload slots to allow zero-bloat streaming."""
+        tpl = cls.get_template()
+        if cls._cached_split is not None and cls._cached_split[0] is tpl:
+            return cls._cached_split[1]
+        p_tok = "${packages_json_data}"
+        v_tok = "${vulns_json_data}"
+        p_idx = tpl.find(p_tok)
+        v_idx = tpl.find(v_tok)
+        if p_idx != -1 and v_idx != -1 and p_idx < v_idx:
+            # Verify neither placeholder repeats
+            if tpl.find(p_tok, p_idx + len(p_tok)) == -1 and tpl.find(
+                v_tok, v_idx + len(v_tok)
+            ) == -1:
+                parts = (
+                    tpl[:p_idx],
+                    tpl[p_idx + len(p_tok) : v_idx],
+                    tpl[v_idx + len(v_tok) :],
+                )
+                cls._cached_split = (tpl, parts)
+                return parts
+        cls._cached_split = (tpl, None)
+        return None
+
 
 def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
     """Exports results as a rich, interactive HTML dashboard report."""
 
-    def escape_js_string(s):
-        if not s:
-            return ""
-        s = str(s)
-        s = s.replace("\\", "\\\\")
-        s = s.replace("'", "\\'")
-        s = s.replace('"', '\\"')
-        s = s.replace("\n", "\\n")
-        s = s.replace("\r", "\\r")
-        return s
-
-    def js_arg(val):
-        return escape_html(escape_js_string(val))
-
-    # normalize_severity_to_text was moved to the global scope as get_severity_level
-
     try:
-        # Calculate summary statistics
+        # Single-pass statistics, counts, unique sets, and vulnerability store extraction
         total = len(results)
-        # Optimization: Use sets for O(1) membership lookups
-        up_to_date = sum(1 for r in results if r["status"] in {"up-to-date", "local"})
-        outdated = sum(
-            1
-            for r in results
-            if r["status"] in {"major", "minor", "patch", "minor-major", "patch-major"}
-        )
-        deprecated = sum(1 for r in results if r["deprecated"])
-        errors = sum(1 for r in results if r["status"] == "error")
-
+        up_to_date = 0
+        outdated = 0
+        deprecated = 0
+        errors = 0
         total_vulns = 0
         suppressed_vulns = 0
-
-        if vuls_enabled:
-            total_vulns = sum(len(r.get("vulnerabilities", [])) for r in results)
-            suppressed_vulns = sum(
-                len(r.get("suppressed_vulnerabilities", [])) for r in results
-            )
-
-        # Count severities for SVG Chart
         malicious = 0
         critical = 0
         high = 0
@@ -12506,21 +14223,80 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
         low = 0
         unknown = 0
 
+        pkg_counts = {}
+        project_paths_set = set()
+        technologies_set = set()
+        techs_by_project = {}
+        vulnerability_store = {}
+
+        _up_to_date_statuses = {"up-to-date", "local"}
+        _outdated_statuses = {"major", "minor", "patch", "minor-major", "patch-major"}
+
         for r in results:
-            for v in r.get("vulnerabilities", []):
-                level = get_severity_level(v)
-                if level == "malicious":
-                    malicious += 1
-                elif level == "critical":
-                    critical += 1
-                elif level == "high":
-                    high += 1
-                elif level == "medium":
-                    medium += 1
-                elif level == "low":
-                    low += 1
-                else:
-                    unknown += 1
+            status = r["status"]
+            if status in _up_to_date_statuses:
+                up_to_date += 1
+            elif status in _outdated_statuses:
+                outdated += 1
+            elif status == "error":
+                errors += 1
+
+            if r["deprecated"]:
+                deprecated += 1
+
+            r_name = r["name"]
+            pkg_counts[r_name] = pkg_counts.get(r_name, 0) + 1
+
+            p_path = r.get("project_path")
+            r_tech = r.get("technology")
+            if p_path:
+                project_paths_set.add(p_path)
+                if r_tech:
+                    techs_by_project.setdefault(p_path, set()).add(r_tech)
+            if r_tech:
+                technologies_set.add(r_tech)
+
+            r_vulns = r.get("vulnerabilities")
+            if r_vulns:
+                if vuls_enabled:
+                    total_vulns += len(r_vulns)
+                for v in r_vulns:
+                    vid = v["id"]
+                    cached_v = vulnerability_store.get(vid)
+                    if cached_v is not None:
+                        level = cached_v["severity"]
+                    else:
+                        level = get_severity_level(v)
+                        vulnerability_store[vid] = {
+                            "severity": level,
+                            "summary": v.get("summary", ""),
+                            "details": v.get("details", ""),
+                        }
+                    if level == "malicious":
+                        malicious += 1
+                    elif level == "critical":
+                        critical += 1
+                    elif level == "high":
+                        high += 1
+                    elif level == "medium":
+                        medium += 1
+                    elif level == "low":
+                        low += 1
+                    else:
+                        unknown += 1
+
+            r_supp = r.get("suppressed_vulnerabilities")
+            if r_supp:
+                if vuls_enabled:
+                    suppressed_vulns += len(r_supp)
+                for sv in r_supp:
+                    vid = sv["id"]
+                    if vid not in vulnerability_store:
+                        vulnerability_store[vid] = {
+                            "severity": get_severity_level(sv),
+                            "summary": sv.get("summary", ""),
+                            "details": sv.get("details", ""),
+                        }
 
         max_count = max(malicious, critical, high, medium, low, unknown, 1)
         max_h = 130
@@ -12633,19 +14409,9 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
         </svg>
         """
 
-        pkg_counts = {}
-        for r in results:
-            pkg_counts[r["name"]] = pkg_counts.get(r["name"], 0) + 1
-
-        # Check if we should show the project path in the global header or per-card
-        unique_project_paths = sorted(
-            {r.get("project_path") for r in results if r.get("project_path")}
-        )
+        unique_project_paths = sorted(project_paths_set)
         show_project_globally = len(unique_project_paths) <= 1
-
-        unique_technologies = sorted(
-            {r.get("technology") for r in results if r.get("technology")}
-        )
+        unique_technologies = sorted(technologies_set)
 
         technology_dropdown_html = ""
         if len(unique_technologies) > 1:
@@ -12675,84 +14441,85 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
         project_path_header_html = ""
         if show_project_globally and unique_project_paths:
             single_path = unique_project_paths[0]
-            techs = sorted(
-                {
-                    r.get("technology")
-                    for r in results
-                    if r.get("project_path") == single_path and r.get("technology")
-                }
-            )
+            techs = sorted(techs_by_project.get(single_path, ()))
             tech_suffix = f" [{', '.join(techs)}]" if techs else ""
             project_path_header_html = f"<div>Path: <strong>{escape_html(single_path)}{escape_html(tech_suffix)}</strong></div>"
         elif not show_project_globally:
             project_path_header_html = f"<div>Projects: <strong>Multiple ({len(unique_project_paths)})</strong></div>"
 
-        # Extract unique vulnerabilities to global store and build compact JSON packages
-        vulnerability_store = {}
-        for r in results:
-            for v in r.get("vulnerabilities", []):
-                vid = v["id"]
-                if vid not in vulnerability_store:
-                    vulnerability_store[vid] = {
-                        "severity": get_severity_level(v),
-                        "summary": v.get("summary", ""),
-                        "details": v.get("details", ""),
-                    }
-            for sv in r.get("suppressed_vulnerabilities", []):
-                vid = sv["id"]
-                if vid not in vulnerability_store:
-                    vulnerability_store[vid] = {
-                        "severity": get_severity_level(sv),
-                        "summary": sv.get("summary", ""),
-                        "details": sv.get("details", ""),
-                    }
+        all_direct_map = pkg_data.get("all_direct", {}) if pkg_data else {}
+        dev_deps_map = pkg_data.get("devDependencies", {}) if pkg_data else {}
 
         json_packages = []
         for r in results:
             name = r["name"]
             declared = r["declared"]
             installed = r["installed"]
-
-            is_direct_install = False
-            if declared:
-                if pkg_counts.get(name, 0) == 1:
-                    is_direct_install = True
-                else:
-                    is_direct_install = check_semver_satisfies(installed, declared)
+            is_engine = r.get("is_engine", False)
 
             dep_type = r.get("dep_type")
             if not dep_type:
                 dep_type = "Transitive"
-                if r.get("is_engine", False):
+                if is_engine:
                     dep_type = "Engine"
-                elif pkg_data and is_direct_install:
-                    if name in pkg_data.get("all_direct", {}):
-                        dep_type = "Direct"
-                    elif name in pkg_data.get("devDependencies", {}):
-                        dep_type = "Dev"
+                elif pkg_data and declared:
+                    is_direct_install = (
+                        True
+                        if pkg_counts.get(name, 0) == 1
+                        else check_semver_satisfies(installed, declared)
+                    )
+                    if is_direct_install:
+                        if name in all_direct_map:
+                            dep_type = "Direct"
+                        elif name in dev_deps_map:
+                            dep_type = "Dev"
 
+            req_by = r.get("required_by")
             if (
-                r.get("required_by")
-                and not r.get("is_engine", False)
-                and ("indirect" in r.get("required_by", []) or dep_type == "Transitive")
+                req_by
+                and not is_engine
+                and ("indirect" in req_by or dep_type == "Transitive")
             ):
                 dep_type = "Transitive"
 
             pkg_record = {
                 "name": name,
-                "declared": declared,
-                "installed": installed,
-                "latest": r.get("latest"),
-                "latest_same_major": r.get("latest_same_major"),
-                "latest_absolute": r.get("latest_absolute"),
                 "status": r["status"],
-                "deprecated": r["deprecated"],
-                "error": r["error"],
-                "missing_checksum": r.get("missing_checksum", False),
-                "weak_checksum": r.get("weak_checksum", False),
-                "mismatch_checksum": r.get("mismatch_checksum", False),
-                "vulnerabilities": [v["id"] for v in r.get("vulnerabilities", [])],
-                "suppressed_vulnerabilities": [
+                "dep_type": dep_type,
+            }
+            if declared:
+                pkg_record["declared"] = declared
+            if installed:
+                pkg_record["installed"] = installed
+            for opt_key in (
+                "latest",
+                "latest_same_major",
+                "latest_absolute",
+                "deprecated",
+                "error",
+                "missing_checksum",
+                "weak_checksum",
+                "mismatch_checksum",
+                "technology",
+                "project_path",
+                "remediation",
+                "excluded_warning",
+                "compare_url",
+                "releases_url",
+            ):
+                val = r.get(opt_key)
+                if val is not None and val is not False and val != "" and val != []:
+                    pkg_record[opt_key] = val
+            if is_engine:
+                pkg_record["is_engine"] = True
+            if req_by:
+                pkg_record["required_by"] = req_by
+            r_vulns = r.get("vulnerabilities")
+            if r_vulns:
+                pkg_record["vulnerabilities"] = [v["id"] for v in r_vulns]
+            r_supp = r.get("suppressed_vulnerabilities")
+            if r_supp:
+                pkg_record["suppressed_vulnerabilities"] = [
                     {
                         "id": sv["id"],
                         "suppressed_reason": sv.get(
@@ -12762,24 +14529,8 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
                         "expires_at": sv.get("expires_at", "N/A"),
                         "approved_by": sv.get("approved_by", ""),
                     }
-                    for sv in r.get("suppressed_vulnerabilities", [])
-                ],
-                "required_by": r.get("required_by", []),
-                "is_engine": r.get("is_engine", False),
-                "technology": r.get("technology", ""),
-                "project_path": r.get("project_path", ""),
-                "dep_type": dep_type,
-                "remediation": r.get("remediation"),
-                "excluded_warning": r.get("excluded_warning"),
-                "compare_url": r.get("compare_url"),
-                "releases_url": r.get("releases_url"),
-            }
-            # Remove keys with None, False, empty list, or empty string to optimize JSON payload size
-            pkg_record = {
-                k: v
-                for k, v in pkg_record.items()
-                if v is not None and v is not False and v != "" and v != []
-            }
+                    for sv in r_supp
+                ]
             json_packages.append(pkg_record)
 
         # Sort results for JSON display: packages with higher severity vulnerabilities first
@@ -12793,39 +14544,23 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             }
 
             def get_pkg_max_severity(pkg):
-                vuln_ids = pkg.get("vulnerabilities", [])
-                sevs = [
-                    vulnerability_store[vid]["severity"]
-                    for vid in vuln_ids
-                    if vid in vulnerability_store
-                ]
-                if not sevs:
+                vuln_ids = pkg.get("vulnerabilities")
+                if not vuln_ids:
                     return 1
-                return -max(severity_order.get(s.lower(), 0) for s in sevs)
+                max_s = None
+                for vid in vuln_ids:
+                    v_info = vulnerability_store.get(vid)
+                    if v_info is not None:
+                        s_val = severity_order.get(v_info["severity"].lower(), 0)
+                        if max_s is None or s_val > max_s:
+                            max_s = s_val
+                return 1 if max_s is None else -max_s
 
             json_packages.sort(
                 key=lambda p: (get_pkg_max_severity(p), p["name"].lower())
             )
         else:
             json_packages.sort(key=lambda p: p["name"].lower())
-
-        # FIXED: XSS Mitigation via JSON serialization
-        escaped_packages_json = (
-            json.dumps(json_packages)
-            .replace("<", "\\u003c")
-            .replace(">", "\\u003e")
-            .replace("&", "\\u0026")
-        )
-        escaped_vulns_json = (
-            json.dumps(vulnerability_store)
-            .replace("<", "\\u003c")
-            .replace(">", "\\u003e")
-            .replace("&", "\\u0026")
-        )
-
-        # HTML Master Template rendering
-        template_str = HTMLReportTemplateProvider.get_template()
-        template = string.Template(template_str)
 
         project_title = escape_html(
             results[0]["name"].split(":")[0]
@@ -12838,7 +14573,7 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             else '<div style="background:#111827; border-radius:12px; border:1px solid #374151; height:220px; display:flex; align-items:center; justify-content:center; color:#9ca3af; font-size:14px;">Vulnerabilities scan disabled. Run with --vuls to enable charts.</div>'
         )
 
-        mapping = {
+        scalar_mapping = {
             "VERSION": VERSION,
             "deprecated": str(deprecated),
             "errors": str(errors),
@@ -12852,25 +14587,40 @@ def export_html_report(results, pkg_data, filepath, vuls_enabled=False):
             "scan_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "project_title": project_title,
             "svg_chart": svg_chart_html,
-            "packages_json_data": escaped_packages_json,
-            "vulns_json_data": escaped_vulns_json,
             "show_project_globally": json.dumps(show_project_globally),
-            "unique_project_paths": json.dumps(unique_project_paths)
-            .replace("<", "\\u003c")
-            .replace(">", "\\u003e")
-            .replace("&", "\\u0026"),
-            "unique_technologies": json.dumps(unique_technologies)
-            .replace("<", "\\u003c")
-            .replace(">", "\\u003e")
-            .replace("&", "\\u0026"),
+            "unique_project_paths": _escape_json_for_html(
+                json.dumps(unique_project_paths)
+            ),
+            "unique_technologies": _escape_json_for_html(
+                json.dumps(unique_technologies)
+            ),
             "technology_dropdown_html": technology_dropdown_html,
             "vuls_enabled": json.dumps(vuls_enabled),
         }
 
-        html_content = template.safe_substitute(mapping)
+        split_parts = HTMLReportTemplateProvider.get_split_template()
+        with open(filepath, "w", encoding="utf-8", buffering=1024 * 64) as f:
+            if split_parts is not None:
+                part_before_pkg, part_between, part_after_vulns = split_parts
+                f.write(string.Template(part_before_pkg).safe_substitute(scalar_mapping))
+                _write_escaped_json_stream(f, json_packages)
+                f.write(string.Template(part_between).safe_substitute(scalar_mapping))
+                _write_escaped_json_stream(f, vulnerability_store)
+                f.write(string.Template(part_after_vulns).safe_substitute(scalar_mapping))
+            else:
+                # Fallback for custom templates with non-standard placeholder ordering
+                scalar_mapping["packages_json_data"] = _escape_json_for_html(
+                    _HTML_JSON_ENCODER.encode(json_packages)
+                )
+                scalar_mapping["vulns_json_data"] = _escape_json_for_html(
+                    _HTML_JSON_ENCODER.encode(vulnerability_store)
+                )
+                f.write(
+                    string.Template(
+                        HTMLReportTemplateProvider.get_template()
+                    ).safe_substitute(scalar_mapping)
+                )
 
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(html_content)
         print(
             f"{COLOR_GREEN}{ICON_OK} HTML interactive dashboard successfully exported to {filepath}{COLOR_RESET}"
         )
@@ -12895,62 +14645,17 @@ TECHNOLOGIES["gradle"]["runner"] = run_gradle_checker
 TECHNOLOGIES["android"]["runner"] = run_gradle_checker
 
 
-def detect_technologies(dir_path):
-    """Detects which technologies are present in a given directory or file."""
-    detected = []
-    if not os.path.exists(dir_path):
-        return detected
+_TECH_DETECT_RULES = tuple(
+    (
+        tech,
+        frozenset(p.lower() for p in info["files"] if not p.startswith(".")),
+        tuple(p.lower() for p in info["files"] if p.startswith(".")),
+    )
+    for tech, info in TECHNOLOGIES.items()
+)
 
-    if os.path.isfile(dir_path):
-        filename = os.path.basename(dir_path).lower()
-        for tech, info in TECHNOLOGIES.items():
-            matched = False
-            for pattern in info["files"]:
-                if pattern.startswith("."):
-                    if filename.endswith(pattern.lower()):
-                        matched = True
-                        break
-                else:
-                    if pattern.lower() == filename:
-                        matched = True
-                        break
-            if matched:
-                detected.append(tech)
-        if "gradle" in detected and "android" in detected:
-            detected.remove("android")
-        return detected
-
-    try:
-        files = os.listdir(dir_path)
-    except Exception:
-        return detected
-
-    lower_files = [f.lower() for f in files]
-
-    for tech, info in TECHNOLOGIES.items():
-        matched = False
-        for pattern in info["files"]:
-            if pattern.startswith("."):
-                if any(f.endswith(pattern.lower()) for f in lower_files):
-                    matched = True
-                    break
-            else:
-                if pattern.lower() in lower_files:
-                    matched = True
-                    break
-        if matched:
-            detected.append(tech)
-
-    if "gradle" in detected and "android" in detected:
-        detected.remove("android")
-
-    return detected
-
-
-def find_projects_recursively(base_path):
-    """Walks the directory recursively to find all projects and their detected technologies."""
-    projects = []
-    ignored_dirs = {
+_PROJECT_IGNORED_DIRS = frozenset(
+    {
         ".git",
         ".github",
         ".svn",
@@ -12971,18 +14676,84 @@ def find_projects_recursively(base_path):
         ".vscode",
         ".agents",
     }
+)
 
-    detected_base = detect_technologies(base_path)
-    if detected_base:
-        projects.append((base_path, detected_base))
 
-    for root, dirs, files in os.walk(base_path):
-        dirs[:] = [d for d in dirs if d.lower() not in ignored_dirs]
-        for d in dirs:
-            dir_path = os.path.join(root, d)
-            detected = detect_technologies(dir_path)
-            if detected:
-                projects.append((dir_path, detected))
+def _detect_technologies_from_lower_names(lower_names):
+    """O(1) technology detection from a pre-collected set of lowercased filenames."""
+    if not lower_names:
+        return []
+    detected = []
+    for tech, exact_set, suffixes in _TECH_DETECT_RULES:
+        if (exact_set and not exact_set.isdisjoint(lower_names)) or (
+            suffixes and any(f.endswith(suffixes) for f in lower_names)
+        ):
+            detected.append(tech)
+    if "gradle" in detected and "android" in detected:
+        detected.remove("android")
+    return detected
+
+
+def detect_technologies(dir_path):
+    """Detects which technologies are present in a given directory or file."""
+    if not os.path.exists(dir_path):
+        return []
+
+    if os.path.isfile(dir_path):
+        filename = os.path.basename(dir_path).lower()
+        return _detect_technologies_from_lower_names({filename})
+
+    try:
+        with os.scandir(dir_path) as it:
+            lower_names = {entry.name.lower() for entry in it}
+    except OSError:
+        return []
+
+    return _detect_technologies_from_lower_names(lower_names)
+
+
+def find_projects_recursively(base_path):
+    """Walks the directory recursively using single-pass os.scandir with early pruning
+    to find all projects and their detected technologies (eliminating redundant listdir/stat calls).
+    """
+    if not os.path.exists(base_path):
+        return []
+
+    if os.path.isfile(base_path):
+        detected_file = detect_technologies(base_path)
+        return [(base_path, detected_file)] if detected_file else []
+
+    projects = []
+    ignored_dirs = _PROJECT_IGNORED_DIRS
+    detect_from_names = _detect_technologies_from_lower_names
+
+    # Iterative top-down traversal using os.scandir (preserves top-down project order)
+    stack = [base_path]
+    while stack:
+        curr_dir = stack.pop()
+        lower_names = set()
+        subdirs = []
+        try:
+            with os.scandir(curr_dir) as it:
+                for entry in it:
+                    name_lower = entry.name.lower()
+                    lower_names.add(name_lower)
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            if name_lower not in ignored_dirs:
+                                subdirs.append(entry.path)
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+
+        detected = detect_from_names(lower_names)
+        if detected:
+            projects.append((curr_dir, detected))
+
+        if subdirs:
+            subdirs.sort()
+            stack.extend(reversed(subdirs))
 
     return projects
 
@@ -13339,6 +15110,77 @@ Examples:
     return parser
 
 
+@dataclass(slots=True)
+class _ScanTask:
+    index: int
+    project_path: str
+    tech: str
+    task_args: Any
+
+
+@dataclass(slots=True)
+class _ScanTaskOutcome:
+    index: int
+    project_path: str
+    tech: str
+    results: Optional[List[Dict[str, Any]]]
+    pkg_data: Optional[Dict[str, Any]]
+    elapsed: float
+    error: Optional[Exception] = None
+
+
+def _clone_args_for_task(args, path=None, tech=None, concurrent=None):
+    """Creates an isolated argparse.Namespace copy so concurrent tasks never mutate shared args."""
+    cloned = argparse.Namespace(**vars(args))
+    if path is not None:
+        cloned.path = path
+    if tech is not None:
+        cloned.tech = tech
+    if concurrent is not None:
+        cloned.concurrent = concurrent
+    return cloned
+
+
+def _execute_scan_all_task(task: _ScanTask) -> _ScanTaskOutcome:
+    """Runs a single (project_path, technology) scan task in isolation."""
+    tech_info = TECHNOLOGIES[task.tech]
+    try:
+        results, pkg_data, elapsed = tech_info["runner"](task.task_args)
+        if results:
+            for r in results:
+                r["project_path"] = task.project_path
+                r["technology"] = task.tech
+            populate_remediation_recommendations(results, task.project_path)
+            validate_configuration_drift(results)
+            results = sorted(
+                results,
+                key=lambda x: (
+                    x["name"].lower(),
+                    str(x.get("installed") or ""),
+                    str(x.get("project_path") or ""),
+                ),
+            )
+        return _ScanTaskOutcome(
+            index=task.index,
+            project_path=task.project_path,
+            tech=task.tech,
+            results=results,
+            pkg_data=pkg_data,
+            elapsed=elapsed,
+            error=None,
+        )
+    except Exception as exc:
+        return _ScanTaskOutcome(
+            index=task.index,
+            project_path=task.project_path,
+            tech=task.tech,
+            results=None,
+            pkg_data=None,
+            elapsed=0.0,
+            error=exc,
+        )
+
+
 def run_scan_all(args, parser):
     print(
         f"{COLOR_GRAY}{ICON_INFO} Scanning recursively for projects in: {args.path}{COLOR_RESET}"
@@ -13370,107 +15212,164 @@ def run_scan_all(args, parser):
     combined_dependencies = {}
     combined_devDependencies = {}
     combined_all_direct = {}
-    total_elapsed = 0.0
     sarif_runs = []
 
     original_path = args.path
-    original_tech = getattr(args, "tech", None)
-
     generated_report_basenames = set()
 
-    for project_path, techs in projects:
-        for tech in techs:
-            tech_info = TECHNOLOGIES.get(tech)
-            if not tech_info:
-                continue
+    user_concurrent = max(1, getattr(args, "concurrent", 10))
+    raw_pairs = [
+        (project_path, tech)
+        for project_path, techs in projects
+        for tech in techs
+        if tech in TECHNOLOGIES
+    ]
+    project_workers = (
+        min(6, len(raw_pairs), user_concurrent)
+        if (len(raw_pairs) > 1 and user_concurrent > 1)
+        else 1
+    )
+    per_task_concurrent = (
+        max(2, min(user_concurrent, 8)) if project_workers > 1 else user_concurrent
+    )
 
+    tasks = [
+        _ScanTask(
+            index=idx,
+            project_path=project_path,
+            tech=tech,
+            task_args=_clone_args_for_task(
+                args,
+                path=project_path,
+                tech=tech,
+                concurrent=per_task_concurrent,
+            ),
+        )
+        for idx, (project_path, tech) in enumerate(raw_pairs)
+    ]
+
+    scan_all_start = time.time()
+
+    if project_workers > 1:
+        print(
+            f"{COLOR_GRAY}{ICON_INFO} Executing {len(tasks)} project scan task(s) across {project_workers} parallel workers...{COLOR_RESET}"
+        )
+        outcomes: List[Optional[_ScanTaskOutcome]] = [None] * len(tasks)
+        completed_tasks = 0
+        with _parallel_scan_scope():
+            with ThreadPoolExecutor(max_workers=project_workers) as executor:
+                future_map = {
+                    executor.submit(_execute_scan_all_task, task): task
+                    for task in tasks
+                }
+                for future in as_completed(future_map):
+                    outcome = future.result()
+                    outcomes[outcome.index] = outcome
+                    completed_tasks += 1
+                    with console_lock:
+                        print(
+                            f"{COLOR_GRAY}{ICON_INFO} [Scan-All] Completed {completed_tasks}/{len(tasks)}: {outcome.project_path} [{outcome.tech}] ({outcome.elapsed:.2f}s){COLOR_RESET}"
+                        )
+    else:
+        outcomes = []
+        for task in tasks:
+            print()
+            print("=" * 80)
+            print(f"Project: {task.project_path} [{task.tech}]")
+            print("=" * 80)
+            outcomes.append(_execute_scan_all_task(task))
+
+    for outcome in outcomes:
+        if outcome is None:
+            continue
+        project_path = outcome.project_path
+        tech = outcome.tech
+
+        if project_workers > 1:
             print()
             print("=" * 80)
             print(f"Project: {project_path} [{tech}]")
             print("=" * 80)
 
-            try:
-                args.path = project_path
-                args.tech = tech
-                results, pkg_data, elapsed = tech_info["runner"](args)
+        if outcome.error is not None:
+            print(
+                f"{COLOR_RED}{ICON_ERROR} Error scanning project {project_path} with {tech}: {outcome.error}{COLOR_RESET}"
+            )
+            continue
 
-                if not results:
-                    continue
+        results = outcome.results
+        pkg_data = outcome.pkg_data
+        elapsed = outcome.elapsed
 
-                for r in results:
-                    r["project_path"] = project_path
-                    r["technology"] = tech
+        if not results:
+            continue
 
-                populate_remediation_recommendations(results, project_path)
-                validate_configuration_drift(results)
-                apply_vulnerability_suppressions(
-                    results, args.suppress, project_path=project_path
-                )
-                results = sorted(results, key=lambda x: x["name"].lower())
+        try:
+            apply_vulnerability_suppressions(
+                results, args.suppress, project_path=project_path
+            )
 
-                print_results_table(
-                    results,
-                    pkg_data,
-                    args.show_all,
-                    args.vuls,
-                    getattr(args, "no_show_console", False),
-                )
-                print_summary(results, elapsed, args.vuls)
+            print_results_table(
+                results,
+                pkg_data,
+                args.show_all,
+                args.vuls,
+                getattr(args, "no_show_console", False),
+            )
+            print_summary(results, elapsed, args.vuls)
 
-                rel_path = os.path.relpath(project_path, original_path)
-                if rel_path == ".":
-                    proj_dirname = os.path.basename(os.path.abspath(project_path))
-                    if not proj_dirname:
-                        proj_dirname = "project"
+            rel_path = os.path.relpath(project_path, original_path)
+            if rel_path == ".":
+                proj_dirname = os.path.basename(os.path.abspath(project_path))
+                if not proj_dirname:
+                    proj_dirname = "project"
+            else:
+                proj_dirname = rel_path
+
+            proj_dirname = proj_dirname.replace("/", "_").replace("\\", "_")
+            # Optimization: Use global compiled regexes to avoid cache lookup overhead in hot loop
+            safe_proj_dirname = RE_NON_WORD_HYPHEN.sub("_", proj_dirname)
+            safe_proj_dirname = RE_MULTI_UNDERSCORE.sub(
+                "_", safe_proj_dirname
+            ).strip("_")
+
+            base_safe_name = safe_proj_dirname
+            if base_safe_name in generated_report_basenames:
+                candidate = f"{base_safe_name}-{tech}"
+                if candidate in generated_report_basenames:
+                    counter = 2
+                    while f"{candidate}-{counter}" in generated_report_basenames:
+                        counter += 1
+                    safe_proj_dirname = f"{candidate}-{counter}"
                 else:
-                    proj_dirname = rel_path
+                    safe_proj_dirname = candidate
 
-                proj_dirname = proj_dirname.replace("/", "_").replace("\\", "_")
-                # Optimization: Use global compiled regexes to avoid cache lookup overhead in hot loop
-                safe_proj_dirname = RE_NON_WORD_HYPHEN.sub("_", proj_dirname)
-                safe_proj_dirname = RE_MULTI_UNDERSCORE.sub(
-                    "_", safe_proj_dirname
-                ).strip("_")
+            generated_report_basenames.add(safe_proj_dirname)
 
-                base_safe_name = safe_proj_dirname
-                if base_safe_name in generated_report_basenames:
-                    candidate = f"{base_safe_name}-{tech}"
-                    if candidate in generated_report_basenames:
-                        counter = 2
-                        while f"{candidate}-{counter}" in generated_report_basenames:
-                            counter += 1
-                        safe_proj_dirname = f"{candidate}-{counter}"
-                    else:
-                        safe_proj_dirname = candidate
+            if args.format in {"html", "both"}:
+                proj_html_filepath = f"report-{safe_proj_dirname}.html"
+                export_html_report(results, pkg_data, proj_html_filepath, args.vuls)
 
-                generated_report_basenames.add(safe_proj_dirname)
+            if args.format in {"json", "both"}:
+                proj_json_filepath = f"report-{safe_proj_dirname}.json"
+                export_json_report(results, proj_json_filepath)
 
-                if args.format in {"html", "both"}:
-                    proj_html_filepath = f"report-{safe_proj_dirname}.html"
-                    export_html_report(results, pkg_data, proj_html_filepath, args.vuls)
+            if args.format == "sarif":
+                run_obj = generate_sarif_run(results)
+                sarif_runs.append(run_obj)
 
-                if args.format in {"json", "both"}:
-                    proj_json_filepath = f"report-{safe_proj_dirname}.json"
-                    export_json_report(results, proj_json_filepath)
+            combined_results.extend(results)
 
-                if args.format == "sarif":
-                    run_obj = generate_sarif_run(results)
-                    sarif_runs.append(run_obj)
+            if pkg_data:
+                combined_dependencies.update(pkg_data.get("dependencies", {}))
+                combined_devDependencies.update(pkg_data.get("devDependencies", {}))
+                combined_all_direct.update(pkg_data.get("all_direct", {}))
+        except Exception as e:
+            print(
+                f"{COLOR_RED}{ICON_ERROR} Error scanning project {project_path} with {tech}: {e}{COLOR_RESET}"
+            )
 
-                combined_results.extend(results)
-                total_elapsed += elapsed
-
-                if pkg_data:
-                    combined_dependencies.update(pkg_data.get("dependencies", {}))
-                    combined_devDependencies.update(pkg_data.get("devDependencies", {}))
-                    combined_all_direct.update(pkg_data.get("all_direct", {}))
-            except Exception as e:
-                print(
-                    f"{COLOR_RED}{ICON_ERROR} Error scanning project {project_path} with {tech}: {e}{COLOR_RESET}"
-                )
-            finally:
-                args.path = original_path
-                args.tech = original_tech
+    total_elapsed = time.time() - scan_all_start
 
     if not combined_results:
         print(
@@ -13478,7 +15377,14 @@ def run_scan_all(args, parser):
         )
         sys.exit(0)
 
-    combined_results = sorted(combined_results, key=lambda x: x["name"].lower())
+    combined_results = sorted(
+        combined_results,
+        key=lambda x: (
+            x["name"].lower(),
+            str(x.get("installed") or ""),
+            str(x.get("project_path") or ""),
+        ),
+    )
 
     print()
     print("=" * 80)
@@ -13496,8 +15402,9 @@ def run_scan_all(args, parser):
                 "version": "2.1.0",
                 "runs": sarif_runs,
             }
+            payload = json.dumps(consolidated_log, indent=2)
             with open(consolidated_path, "w", encoding="utf-8") as f:
-                json.dump(consolidated_log, f, indent=2)
+                f.write(payload)
             print(
                 f"\n{COLOR_GREEN}{ICON_OK} Consolidated SARIF report successfully exported to {consolidated_path}{COLOR_RESET}"
             )
@@ -13522,27 +15429,70 @@ def run_auto_tech(args):
         f"{COLOR_GRAY}{ICON_INFO} Automatically detected technology: {', '.join(detected_techs)}{COLOR_RESET}"
     )
 
+    valid_techs = [t for t in detected_techs if t in TECHNOLOGIES]
+    user_concurrent = max(1, getattr(args, "concurrent", 10))
+    tech_workers = (
+        min(4, len(valid_techs), user_concurrent)
+        if (len(valid_techs) > 1 and user_concurrent > 1)
+        else 1
+    )
+
     combined_results = []
     combined_dependencies = {}
     combined_devDependencies = {}
     combined_all_direct = {}
-    total_elapsed = 0.0
 
-    original_tech = args.tech
-    try:
-        for tech in detected_techs:
-            tech_info = TECHNOLOGIES.get(tech)
-            if not tech_info:
+    auto_start = time.time()
+
+    if tech_workers > 1:
+        def _run_single_tech(idx_tech):
+            idx, tech = idx_tech
+            task_args = _clone_args_for_task(args, tech=tech)
+            results_tech, pkg_data_tech, elapsed_tech = TECHNOLOGIES[tech]["runner"](
+                task_args
+            )
+            return idx, tech, results_tech, pkg_data_tech, elapsed_tech
+
+        ordered_tech_outcomes = [None] * len(valid_techs)
+        with _parallel_scan_scope():
+            with ThreadPoolExecutor(max_workers=tech_workers) as executor:
+                futs = [
+                    executor.submit(_run_single_tech, (idx, tech))
+                    for idx, tech in enumerate(valid_techs)
+                ]
+                for fut in as_completed(futs):
+                    idx, tech, res_t, pkg_t, el_t = fut.result()
+                    ordered_tech_outcomes[idx] = (tech, res_t, pkg_t, el_t)
+
+        for item in ordered_tech_outcomes:
+            if not item:
                 continue
-
-            if len(detected_techs) > 1:
+            tech, results_tech, pkg_data_tech, _elapsed_tech = item
+            if not results_tech:
+                continue
+            for r in results_tech:
+                r["project_path"] = args.path
+                r["technology"] = tech
+            combined_results.extend(results_tech)
+            if pkg_data_tech:
+                combined_dependencies.update(pkg_data_tech.get("dependencies", {}))
+                combined_devDependencies.update(
+                    pkg_data_tech.get("devDependencies", {})
+                )
+                combined_all_direct.update(pkg_data_tech.get("all_direct", {}))
+        total_elapsed = time.time() - auto_start
+    else:
+        total_elapsed = 0.0
+        for tech in valid_techs:
+            tech_info = TECHNOLOGIES[tech]
+            if len(valid_techs) > 1:
                 print()
                 print("-" * 50)
                 print(f"Running check for: {tech}")
                 print("-" * 50)
 
-            args.tech = tech
-            results_tech, pkg_data_tech, elapsed_tech = tech_info["runner"](args)
+            task_args = _clone_args_for_task(args, tech=tech)
+            results_tech, pkg_data_tech, elapsed_tech = tech_info["runner"](task_args)
 
             if not results_tech:
                 continue
@@ -13560,8 +15510,6 @@ def run_auto_tech(args):
                     pkg_data_tech.get("devDependencies", {})
                 )
                 combined_all_direct.update(pkg_data_tech.get("all_direct", {}))
-    finally:
-        args.tech = original_tech
 
     combined_pkg_data = {
         "dependencies": combined_dependencies,
@@ -13585,7 +15533,14 @@ def process_single_project_results(results, pkg_data, elapsed, args):
     populate_remediation_recommendations(results, args.path)
     validate_configuration_drift(results)
     apply_vulnerability_suppressions(results, args.suppress, project_path=args.path)
-    results = sorted(results, key=lambda x: x["name"].lower())
+    results = sorted(
+        results,
+        key=lambda x: (
+            x["name"].lower(),
+            str(x.get("installed") or ""),
+            str(x.get("project_path") or ""),
+        ),
+    )
 
     print_results_table(
         results,
