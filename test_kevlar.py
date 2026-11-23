@@ -5321,6 +5321,256 @@ require (
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_http_pool_keepalive_gzip_and_stale_retry(self):
+        """Test Phase 1 HTTP Keep-Alive connection reuse, transparent gzip decompression, and stale socket retry."""
+        import gzip
+        import json
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        payload_obj = {"status": "ok", "items": list(range(50))}
+        payload_bytes = json.dumps(payload_obj).encode("utf-8")
+        gz_bytes = gzip.compress(payload_bytes)
+        conn_counter = {"count": 0}
+        seen_gzip_header = {"yes": False}
+
+        class CountingServer(ThreadingHTTPServer):
+            def get_request(self):
+                conn_counter["count"] += 1
+                return super().get_request()
+
+        class KeepAliveGzipHandler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self):
+                ae = self.headers.get("Accept-Encoding", "")
+                if "gzip" in ae.lower():
+                    seen_gzip_header["yes"] = True
+                    body = gz_bytes
+                    self.send_response(200)
+                    self.send_header("Content-Encoding", "gzip")
+                else:
+                    body = payload_bytes
+                    self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        kevlar._HTTP_POOL.close_all()
+        server = CountingServer(("127.0.0.1", 0), KeepAliveGzipHandler)
+        port = server.server_address[1]
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        try:
+            url = f"http://127.0.0.1:{port}/keepalive-test"
+            for _ in range(5):
+                with kevlar.safe_urlopen(url, timeout=5) as resp:
+                    parsed = json.loads(resp.read().decode("utf-8"))
+                    self.assertEqual(parsed, payload_obj)
+            self.assertTrue(seen_gzip_header["yes"])
+            self.assertEqual(conn_counter["count"], 1)
+
+            # Force stale socket by closing server-side sockets cleanly via a fresh close-after-1 server
+            kevlar._HTTP_POOL.close_all()
+        finally:
+            server.shutdown()
+            server.server_close()
+
+        req_num = {"n": 0}
+
+        class DropSecondHandler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self):
+                req_num["n"] += 1
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload_bytes)))
+                self.end_headers()
+                self.wfile.write(payload_bytes)
+                if req_num["n"] == 1:
+                    # Abruptly close socket after 1st response while client thinks it is keep-alive
+                    self.close_connection = True
+
+            def log_message(self, *args):
+                pass
+
+        server2 = ThreadingHTTPServer(("127.0.0.1", 0), DropSecondHandler)
+        port2 = server2.server_address[1]
+        t2 = threading.Thread(target=server2.serve_forever, daemon=True)
+        t2.start()
+        try:
+            url2 = f"http://127.0.0.1:{port2}/stale-test"
+            with kevlar.safe_urlopen(url2, timeout=5) as r1:
+                self.assertEqual(json.loads(r1.read().decode("utf-8")), payload_obj)
+            # Second request encounters closed pooled socket and transparently reconnects
+            with kevlar.safe_urlopen(url2, timeout=5) as r2:
+                self.assertEqual(json.loads(r2.read().decode("utf-8")), payload_obj)
+            self.assertEqual(req_num["n"], 2)
+        finally:
+            kevlar._HTTP_POOL.close_all()
+            server2.shutdown()
+            server2.server_close()
+
+    def test_bounded_lru_dict_eviction_and_refresh(self):
+        """Test Phase 2 bounded LRU cache evicts oldest unused key and refreshes MRU on access."""
+        cache = kevlar._BoundedLRUDict(maxsize=2)
+        cache["a"] = 1
+        cache["b"] = 2
+        self.assertEqual(cache.get("a"), 1)  # refresh 'a' to MRU
+        cache["c"] = 3  # must evict 'b'
+        self.assertIn("a", cache)
+        self.assertIn("c", cache)
+        self.assertNotIn("b", cache)
+        self.assertEqual(len(cache), 2)
+
+    def test_check_npm_package_slim_cache_and_inline_repo(self):
+        """Test Phase 2 npm slimmed metadata cache drops heavy fields and avoids extra repo HTTP call."""
+        import json
+        from unittest.mock import MagicMock
+
+        npm_payload = {
+            "name": "slim-demo",
+            "dist-tags": {"latest": "2.0.0"},
+            "repository": {"type": "git", "url": "git+https://github.com/org/slim-demo.git"},
+            "versions": {
+                "1.0.0": {
+                    "version": "1.0.0",
+                    "dependencies": {f"heavy-dep-{i}": "^1.0.0" for i in range(50)},
+                    "dist": {"integrity": "sha512-abc", "tarball": "https://registry.npmjs.org/t.tgz"},
+                },
+                "2.0.0": {
+                    "version": "2.0.0",
+                    "deprecated": "Use v3",
+                    "dependencies": {f"heavy-dep-{i}": "^2.0.0" for i in range(50)},
+                    "dist": {"shasum": "deadbeef"},
+                },
+            },
+        }
+        call_count = {"n": 0}
+
+        def fake_urlopen(req, timeout=10):
+            call_count["n"] += 1
+            m = MagicMock()
+            m.read.return_value = json.dumps(npm_payload).encode("utf-8")
+            m.__enter__.return_value = m
+            return m
+
+        target = {"name": "slim-demo", "declared": "^1.0.0", "installed": ["1.0.0"]}
+        with patch("kevlar.safe_urlopen", side_effect=fake_urlopen):
+            res1 = kevlar.check_npm_package(target)
+            res2 = kevlar.check_npm_package(target)
+
+        # Only 1 HTTP call total: inline repo avoids resolve_npm_repo, 2nd call hits cache
+        self.assertEqual(call_count["n"], 1)
+        self.assertEqual(res1[0]["repo_url"], "https://github.com/org/slim-demo")
+        self.assertEqual(res2[0]["latest_absolute"], "2.0.0")
+
+        cached = kevlar._get_cached_registry_metadata("npm", "slim-demo")
+        self.assertIsNotNone(cached)
+        self.assertEqual(len(cached), 5)
+        self.assertNotIn("heavy-dep-0", repr(cached))
+
+    def test_clean_jsonc_preserves_strings_and_strips_comments_trailing_commas(self):
+        """Test Phase 3 regex-based clean_jsonc handles comments, URLs, escaped quotes, and trailing commas."""
+        import json
+
+        raw_jsonc = """{
+            // Top-level line comment
+            "url": "https://example.com/a//b/*not-a-comment*/",
+            "escaped": "hello \\" // still in string", /* inline block */
+            "arr": [
+                1,
+                2, /* trailing comment */
+            ],
+            "nested": {
+                "a": true,
+            },
+        }"""
+        cleaned = kevlar.clean_jsonc(raw_jsonc)
+        parsed = json.loads(cleaned)
+        self.assertEqual(parsed["url"], "https://example.com/a//b/*not-a-comment*/")
+        self.assertEqual(parsed["escaped"], 'hello " // still in string')
+        self.assertEqual(parsed["arr"], [1, 2])
+        self.assertEqual(parsed["nested"], {"a": True})
+
+    def test_find_latest_semver_tiers_single_pass_edge_cases(self):
+        """Test Phase 3 O(V) find_latest_semver_tiers handles stable tiers, v-prefix, build metadata, and prerelease fallback."""
+        versions = [
+            "1.2.3",
+            "1.2.4",
+            "v1.2.10",
+            "1.2.11-rc.1",
+            "1.5.0+build123",
+            "1.9.0-beta.2",
+            "2.0.0",
+            "2.3.1",
+            "3.0.0-alpha.1",
+        ]
+        patch_v, minor_v, abs_v = kevlar.find_latest_semver_tiers("1.2.3", versions)
+        self.assertEqual(patch_v, "v1.2.10")
+        self.assertEqual(minor_v, "1.5.0+build123")
+        self.assertEqual(abs_v, "2.3.1")
+
+        # Prerelease-only fallback when no stable versions exist
+        pre_only = ["0.1.0-alpha.1", "0.1.0-alpha.10", "0.2.0-beta.1", "0.2.0-beta.2"]
+        p2, m2, a2 = kevlar.find_latest_semver_tiers("0.1.0-alpha.1", pre_only)
+        self.assertEqual(p2, "0.1.0-alpha.10")
+        self.assertEqual(m2, "0.2.0-beta.2")
+        self.assertEqual(a2, "0.2.0-beta.2")
+
+    def test_find_projects_recursively_scandir_pruning(self):
+        """Test Phase 3 os.scandir directory traversal prunes ignored directories and discovers real projects."""
+        import shutil
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            real_dirs = [
+                (os.path.join(tmpdir, "svc-a"), "package.json", "{}"),
+                (os.path.join(tmpdir, "svc-b"), "Cargo.toml", "[package]\nname='b'\n"),
+                (os.path.join(tmpdir, "nested", "go-svc"), "go.mod", "module x\n"),
+            ]
+            ignored_dirs = [
+                (os.path.join(tmpdir, "svc-a", "node_modules", "dep"), "package.json", "{}"),
+                (os.path.join(tmpdir, ".git", "hooks"), "package.json", "{}"),
+                (os.path.join(tmpdir, "venv", "lib"), "requirements.txt", "flask==1.0\n"),
+                (os.path.join(tmpdir, "svc-b", "target", "debug"), "Cargo.toml", ""),
+            ]
+            for d, fname, body in real_dirs + ignored_dirs:
+                os.makedirs(d, exist_ok=True)
+                with open(os.path.join(d, fname), "w", encoding="utf-8") as f:
+                    f.write(body)
+
+            found = kevlar.find_projects_recursively(tmpdir)
+            found_norm = {os.path.normpath(p) for p, _techs in found}
+            expected_norm = {os.path.normpath(d) for d, _, _ in real_dirs}
+            self.assertEqual(found_norm, expected_norm)
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_parse_secure_xml_utf8_latin1_and_invalid_bytes(self):
+        """Test Phase 3 zero-copy UTF-8 fast path, Latin-1 encoding, invalid byte fallback, and XXE rejection."""
+        root_utf8 = kevlar.parse_secure_xml(b'<?xml version="1.0" encoding="utf-8"?><root><v>1.0.0</v></root>')
+        self.assertEqual(root_utf8.find("v").text, "1.0.0")
+
+        root_latin1 = kevlar.parse_secure_xml(
+            '<?xml version="1.0" encoding="iso-8859-1"?><root><v>café</v></root>'.encode("latin-1")
+        )
+        self.assertEqual(root_latin1.find("v").text, "café")
+
+        # Invalid UTF-8 byte falls back cleanly to errors='replace'
+        root_bad = kevlar.parse_secure_xml(b"<root><v>a\xffb</v></root>")
+        self.assertIn("\ufffd", root_bad.find("v").text)
+
+        # XXE DOCTYPE still rejected
+        with self.assertRaises(ValueError):
+            kevlar.parse_secure_xml(b'<!DOCTYPE foo [<!ENTITY x "y">]><foo/>')
+
 
 if __name__ == "__main__":
     unittest.main()
