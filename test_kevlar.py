@@ -6161,6 +6161,75 @@ snapshots:
             self.assertEqual(by_name[drift_name]["status"], "error", f"Expected drift on {drift_name}")
             self.assertIn("Configuration Drift", by_name[drift_name]["error"])
 
+    def test_pip_vcs_and_direct_url_requirements(self):
+        """Test bare git+/URL Python requirements are parsed cleanly and never trigger bogus PyPI 404 errors."""
+        import shutil
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            req_path = os.path.join(tmpdir, "requirements.txt")
+            with open(req_path, "w", encoding="utf-8") as f:
+                f.write(
+                    "git+https://github.com/openai/swarm.git\n"
+                    "git+https://github.com/org/private-lib.git@v1.2.0#egg=private_lib\n"
+                    "custom-pkg @ git+https://github.com/org/custom-pkg.git@main\n"
+                    "https://files.example.com/my_wheel-2.0.0-py3-none-any.whl\n"
+                    "requests==2.31.0\n"
+                )
+
+            deps, _parents = kevlar.parse_requirements_txt(req_path)
+            self.assertNotIn("git", deps)
+            self.assertEqual(deps.get("swarm"), "git+https://github.com/openai/swarm.git")
+            self.assertEqual(
+                deps.get("private_lib"),
+                "git+https://github.com/org/private-lib.git@v1.2.0#egg=private_lib",
+            )
+            self.assertEqual(
+                deps.get("custom-pkg"),
+                "@ git+https://github.com/org/custom-pkg.git@main",
+            )
+            self.assertEqual(
+                deps.get("my_wheel"),
+                "https://files.example.com/my_wheel-2.0.0-py3-none-any.whl",
+            )
+            self.assertEqual(deps.get("requests"), "==2.31.0")
+
+            # parse_pep508 should also handle bare VCS URLs
+            self.assertEqual(
+                kevlar.parse_pep508("git+https://github.com/openai/swarm.git"),
+                ("swarm", "git+https://github.com/openai/swarm.git"),
+            )
+
+            # check_pypi_package must NOT hit network for VCS/direct URL specs
+            with patch("kevlar.safe_urlopen", side_effect=AssertionError("Should not query PyPI for VCS/URL")):
+                res_swarm = kevlar.check_pypi_package({
+                    "name": "swarm",
+                    "declared": "git+https://github.com/openai/swarm.git",
+                    "installed": ["git+https://github.com/openai/swarm.git"],
+                })
+                res_pep508 = kevlar.check_pypi_package({
+                    "name": "custom-pkg",
+                    "declared": "@ git+https://github.com/org/custom-pkg.git@main",
+                    "installed": [],
+                })
+
+            self.assertEqual(res_swarm[0]["status"], "local")
+            self.assertEqual(res_swarm[0]["latest"], "Local")
+            self.assertIsNone(res_swarm[0]["error"])
+            self.assertEqual(res_swarm[0]["repo_url"], "https://github.com/openai/swarm")
+
+            self.assertEqual(res_pep508[0]["status"], "local")
+            self.assertIsNone(res_pep508[0]["error"])
+            self.assertEqual(res_pep508[0]["repo_url"], "https://github.com/org/custom-pkg")
+
+            # Drift validation must not flag VCS/URL specs
+            kevlar.validate_configuration_drift(res_swarm + res_pep508)
+            self.assertIsNone(res_swarm[0]["error"])
+            self.assertIsNone(res_pep508[0]["error"])
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

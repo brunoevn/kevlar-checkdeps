@@ -5654,6 +5654,9 @@ def parse_pep508(dep_string):
     req_part = dep_string.split(";", 1)[0].strip()
     if not req_part:
         return None, None
+    vcs_name, vcs_spec = _parse_pip_vcs_or_url(req_part)
+    if vcs_name:
+        return vcs_name, vcs_spec
     match = RE_PEP508_NAME.match(req_part)
     if not match:
         return None, None
@@ -9940,6 +9943,9 @@ def validate_configuration_drift(results):
                     "@",
                     "git+",
                     "git:",
+                    "hg+",
+                    "svn+",
+                    "bzr+",
                     "http:",
                     "https:",
                     "ssh:",
