@@ -5789,6 +5789,326 @@ require (
             shutil.rmtree(tmpdir, ignore_errors=True)
             shutil.rmtree(work_cwd, ignore_errors=True)
 
+    def test_parse_npm_alias_spec_variants(self):
+        """Test _parse_npm_alias_spec across scoped/unscoped aliases, dist-tags, no-version aliases, and Yarn Berry specs."""
+        self.assertEqual(
+            kevlar._parse_npm_alias_spec("npm:@typescript/typescript6@6.0.2"),
+            ("@typescript/typescript6", "6.0.2"),
+        )
+        self.assertEqual(
+            kevlar._parse_npm_alias_spec("npm:typescript@7.0.2"),
+            ("typescript", "7.0.2"),
+        )
+        self.assertEqual(
+            kevlar._parse_npm_alias_spec("npm:esbuild-wasm@^0.23.0"),
+            ("esbuild-wasm", "^0.23.0"),
+        )
+        self.assertEqual(
+            kevlar._parse_npm_alias_spec("npm:@babel/core"),
+            ("@babel/core", "*"),
+        )
+        self.assertEqual(
+            kevlar._parse_npm_alias_spec("npm:lodash@latest"),
+            ("lodash", "latest"),
+        )
+        # Yarn Berry version-only npm: protocol specifiers (not package aliases)
+        self.assertEqual(kevlar._parse_npm_alias_spec("npm:^5.0.1"), (None, "^5.0.1"))
+        self.assertEqual(kevlar._parse_npm_alias_spec("npm:5.0.1"), (None, "5.0.1"))
+        # Standard SemVer specifier
+        self.assertEqual(kevlar._parse_npm_alias_spec("^4.17.21"), (None, "^4.17.21"))
+
+    def test_npm_aliases_collision_pnpm_end_to_end(self):
+        """Test real-world pnpm alias collision (typescript -> @typescript/typescript6 & typescript-7 -> typescript) end-to-end."""
+        import argparse
+        import json
+        import shutil
+        import tempfile
+        from unittest.mock import MagicMock
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(tmpdir, "package.json"), "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "name": "alias-api",
+                        "dependencies": {
+                            "@mendable/firecrawl-rs": "workspace:*",
+                            "typescript": "npm:@typescript/typescript6@6.0.2",
+                            "typescript-7": "npm:typescript@7.0.2",
+                        },
+                    },
+                    f,
+                    indent=2,
+                )
+
+            pnpm_lock = """lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      '@mendable/firecrawl-rs':
+        specifier: workspace:*
+        version: link:native
+      typescript:
+        specifier: npm:@typescript/typescript6@6.0.2
+        version: '@typescript/typescript6@6.0.2'
+      typescript-7:
+        specifier: npm:typescript@7.0.2
+        version: typescript@7.0.2
+packages:
+  '@typescript/typescript6@6.0.2':
+    resolution: {integrity: sha512-ts6hash==}
+  typescript@5.9.2:
+    resolution: {integrity: sha512-ts592hash==}
+  typescript@6.0.3:
+    resolution: {integrity: sha512-ts603hash==}
+  typescript@7.0.2:
+    resolution: {integrity: sha512-ts702hash==}
+snapshots:
+  '@typescript/typescript6@6.0.2':
+    dependencies:
+      '@typescript/old': typescript@6.0.3
+  typescript@5.9.2: {}
+  typescript@6.0.3: {}
+  typescript@7.0.2: {}
+"""
+            with open(os.path.join(tmpdir, "pnpm-lock.yaml"), "w", encoding="utf-8") as f:
+                f.write(pnpm_lock)
+
+            requested_urls = []
+            osv_queried_pkgs = []
+
+            def fake_urlopen(req, timeout=10):
+                url = req if isinstance(req, str) else req.full_url
+                requested_urls.append(url)
+                m = MagicMock()
+                if "querybatch" in url:
+                    qs = json.loads(req.data.decode("utf-8"))["queries"]
+                    res = []
+                    for q in qs:
+                        pname = q["package"]["name"]
+                        pver = q["version"]
+                        osv_queried_pkgs.append((pname, pver))
+                        if pname == "typescript" and pver == "7.0.2":
+                            res.append({
+                                "vulns": [{
+                                    "id": "GHSA-ts7-demo",
+                                    "summary": "Demo advisory on typescript 7.0.2",
+                                    "severity": [{"type": "CVSS_V3", "score": "5.3"}],
+                                }]
+                            })
+                        else:
+                            res.append({})
+                    m.read.return_value = json.dumps({"results": res}).encode("utf-8")
+                elif "%2Ftypescript6" in url:
+                    m.read.return_value = json.dumps({
+                        "name": "@typescript/typescript6",
+                        "dist-tags": {"latest": "6.0.2"},
+                        "versions": {
+                            "6.0.2": {"version": "6.0.2", "dist": {"integrity": "sha512-ts6hash=="}}
+                        },
+                    }).encode("utf-8")
+                elif url.endswith("/typescript"):
+                    m.read.return_value = json.dumps({
+                        "name": "typescript",
+                        "dist-tags": {"latest": "7.0.2"},
+                        "versions": {
+                            "5.9.2": {"version": "5.9.2", "dist": {"integrity": "sha512-ts592hash=="}},
+                            "6.0.3": {"version": "6.0.3", "dist": {"integrity": "sha512-ts603hash=="}},
+                            "7.0.2": {"version": "7.0.2", "dist": {"integrity": "sha512-ts702hash=="}},
+                        },
+                    }).encode("utf-8")
+                else:
+                    raise AssertionError(f"Unexpected registry URL requested: {url}")
+                m.__enter__.return_value = m
+                return m
+
+            args = argparse.Namespace(path=tmpdir, all=True, vuls=True, concurrent=4, lockfile=None)
+            with patch("kevlar.safe_urlopen", side_effect=fake_urlopen):
+                results, _pkg_data, _elapsed = kevlar.run_npm_checker(args)
+
+            kevlar.validate_configuration_drift(results)
+
+            # Must never query bogus alias name 'typescript-7' or local workspace '@mendable/firecrawl-rs'
+            self.assertFalse(any("typescript-7" in u for u in requested_urls))
+            self.assertFalse(any("firecrawl-rs" in u for u in requested_urls))
+            self.assertIn(("@typescript/typescript6", "6.0.2"), osv_queried_pkgs)
+            self.assertIn(("typescript", "7.0.2"), osv_queried_pkgs)
+
+            # Check each resolved row
+            by_key = {(r["name"], r["installed"]): r for r in results}
+            self.assertIn(("typescript", "6.0.2"), by_key)
+            self.assertIn(("typescript-7", "7.0.2"), by_key)
+            self.assertIn(("@mendable/firecrawl-rs", "workspace:*"), by_key)
+            self.assertIn(("typescript", "5.9.2"), by_key)
+            self.assertIn(("typescript", "6.0.3"), by_key)
+
+            ts_direct = by_key[("typescript", "6.0.2")]
+            self.assertEqual(ts_direct["dep_type"], "Direct")
+            self.assertEqual(ts_direct["status"], "up-to-date")
+            self.assertIsNone(ts_direct["error"])
+            self.assertFalse(ts_direct["missing_checksum"])
+
+            ts7_direct = by_key[("typescript-7", "7.0.2")]
+            self.assertEqual(ts7_direct["dep_type"], "Direct")
+            self.assertEqual(ts7_direct["status"], "up-to-date")
+            self.assertIsNone(ts7_direct["error"])
+            self.assertFalse(ts7_direct["missing_checksum"])
+            self.assertEqual(len(ts7_direct["vulnerabilities"]), 1)
+            self.assertEqual(ts7_direct["vulnerabilities"][0]["id"], "GHSA-ts7-demo")
+
+            ws_local = by_key[("@mendable/firecrawl-rs", "workspace:*")]
+            self.assertEqual(ws_local["status"], "local")
+            self.assertFalse(ws_local["missing_checksum"])
+
+            # Transitive real typescript versions remain Transitive and error-free
+            for tv in ("5.9.2", "6.0.3"):
+                tr = by_key[("typescript", tv)]
+                self.assertEqual(tr["dep_type"], "Transitive")
+                self.assertIsNone(tr["declared"])
+                self.assertIsNone(tr["error"])
+                self.assertFalse(tr["missing_checksum"])
+
+            # No private helper keys leaked
+            for r in results:
+                self.assertNotIn("_registry_name", r)
+                self.assertNotIn("_force_transitive", r)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_npm_aliases_package_lock_no_lockfile_and_drift_validation(self):
+        """Test npm: aliases with package-lock.json v3, package.json-only (no lockfile), and true vs false drift."""
+        import argparse
+        import json
+        import shutil
+        import tempfile
+        from unittest.mock import MagicMock
+
+        # 1. package-lock.json v3 alias alongside non-aliased same real package
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(tmpdir, "package.json"), "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "name": "lock-v3-alias",
+                        "dependencies": {
+                            "lodash": "^4.17.21",
+                            "lodash-legacy": "npm:lodash@4.17.15",
+                        },
+                    },
+                    f,
+                )
+            with open(os.path.join(tmpdir, "package-lock.json"), "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "name": "lock-v3-alias",
+                        "lockfileVersion": 3,
+                        "packages": {
+                            "": {
+                                "dependencies": {
+                                    "lodash": "^4.17.21",
+                                    "lodash-legacy": "npm:lodash@4.17.15",
+                                }
+                            },
+                            "node_modules/lodash": {
+                                "version": "4.17.21",
+                                "integrity": "sha512-new==",
+                            },
+                            "node_modules/lodash-legacy": {
+                                "name": "lodash",
+                                "version": "4.17.15",
+                                "integrity": "sha512-old==",
+                            },
+                        },
+                    },
+                    f,
+                )
+
+            def fake_lodash(req, timeout=10):
+                url = req if isinstance(req, str) else req.full_url
+                self.assertTrue(url.endswith("/lodash"), f"Unexpected URL: {url}")
+                m = MagicMock()
+                m.read.return_value = json.dumps({
+                    "name": "lodash",
+                    "dist-tags": {"latest": "4.17.21"},
+                    "versions": {
+                        "4.17.15": {"version": "4.17.15", "dist": {"integrity": "sha512-old=="}},
+                        "4.17.21": {"version": "4.17.21", "dist": {"integrity": "sha512-new=="}},
+                    },
+                }).encode("utf-8")
+                m.__enter__.return_value = m
+                return m
+
+            args = argparse.Namespace(path=tmpdir, all=True, vuls=False, concurrent=2, lockfile=None)
+            with patch("kevlar.safe_urlopen", side_effect=fake_lodash):
+                results, _, _ = kevlar.run_npm_checker(args)
+            kevlar.validate_configuration_drift(results)
+
+            by_name = {r["name"]: r for r in results}
+            self.assertEqual(by_name["lodash"]["installed"], "4.17.21")
+            self.assertEqual(by_name["lodash"]["status"], "up-to-date")
+            self.assertFalse(by_name["lodash"]["missing_checksum"])
+            self.assertEqual(by_name["lodash-legacy"]["installed"], "4.17.15")
+            self.assertEqual(by_name["lodash-legacy"]["status"], "patch")
+            self.assertIsNone(by_name["lodash-legacy"]["error"])
+            self.assertFalse(by_name["lodash-legacy"]["missing_checksum"])
+
+            # 2. No lockfile (package.json only) alias should strip prefix cleanly
+            os.remove(os.path.join(tmpdir, "package-lock.json"))
+            kevlar.clear_kevlar_cache()
+            with patch("kevlar.safe_urlopen", side_effect=fake_lodash):
+                res_nolock, _, _ = kevlar.run_npm_checker(args)
+            kevlar.validate_configuration_drift(res_nolock)
+            by_name_nl = {r["name"]: r for r in res_nolock}
+            self.assertEqual(by_name_nl["lodash-legacy"]["installed"], "4.17.15")
+            self.assertIsNone(by_name_nl["lodash-legacy"]["error"])
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        # 3. Direct validate_configuration_drift checks: genuine drift vs non-drift aliases & dist-tags
+        drift_rows = [
+            {
+                "name": "genuine-drift-alias",
+                "declared": "npm:typescript@7.0.2",
+                "installed": "6.0.2",
+                "status": "major",
+                "error": None,
+                "dep_type": "Direct",
+            },
+            {
+                "name": "unstripped-installed-alias",
+                "declared": "npm:typescript@7.0.2",
+                "installed": "npm:typescript@7.0.2",
+                "status": "up-to-date",
+                "error": None,
+                "dep_type": "Direct",
+            },
+            {
+                "name": "dist-tag-alias",
+                "declared": "npm:lodash@latest",
+                "installed": "4.17.21",
+                "status": "up-to-date",
+                "error": None,
+                "dep_type": "Direct",
+            },
+            {
+                "name": "no-version-alias",
+                "declared": "npm:@scope/pkg",
+                "installed": "1.2.3",
+                "status": "up-to-date",
+                "error": None,
+                "dep_type": "Direct",
+            },
+        ]
+        kevlar.validate_configuration_drift(drift_rows)
+        self.assertEqual(drift_rows[0]["status"], "error")
+        self.assertIn("Configuration Drift", drift_rows[0]["error"])
+        self.assertEqual(drift_rows[1]["status"], "up-to-date")
+        self.assertIsNone(drift_rows[1]["error"])
+        self.assertEqual(drift_rows[2]["status"], "up-to-date")
+        self.assertIsNone(drift_rows[2]["error"])
+        self.assertEqual(drift_rows[3]["status"], "up-to-date")
+        self.assertIsNone(drift_rows[3]["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

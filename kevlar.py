@@ -3286,32 +3286,140 @@ def parse_bun_lock(filepath):
         return {}, {}, {}, {}
 
 
-def build_check_targets(pkg_data, lock_data, check_all):
-    """Builds list of targets to scan."""
+def _parse_npm_alias_spec(spec):
+    """Parses an npm: protocol specifier into (real_package_name_or_None, version_constraint).
+
+    Examples:
+        'npm:@typescript/typescript6@6.0.2' -> ('@typescript/typescript6', '6.0.2')
+        'npm:typescript@7.0.2'              -> ('typescript', '7.0.2')
+        'npm:@scope/pkg'                    -> ('@scope/pkg', '*')
+        'npm:pkg'                           -> ('pkg', '*')
+        'npm:^5.0.1'                        -> (None, '^5.0.1')
+        '^1.2.3'                            -> (None, '^1.2.3')
+    """
+    if not spec or not isinstance(spec, str):
+        return None, spec
+    s = spec.strip()
+    if not s.startswith("npm:"):
+        return None, spec
+    rest = s[4:].strip()
+    if not rest:
+        return None, ""
+    # Version-only Yarn Berry npm: specifier (e.g. 'npm:^1.2.3', 'npm:1.2.3', 'npm:*')
+    if rest[0] in "^~><=*0123456789":
+        return None, rest
+    if rest.startswith("@"):
+        at_idx = rest.find("@", 1)
+        if at_idx != -1:
+            return rest[:at_idx], rest[at_idx + 1 :] or "*"
+        return rest, "*"
+    at_idx = rest.find("@")
+    if at_idx != -1:
+        return rest[:at_idx], rest[at_idx + 1 :] or "*"
+    return rest, "*"
+
+
+def build_check_targets(pkg_data, lock_data, check_all, direct_versions_lock=None):
+    """Builds list of targets to scan, resolving npm: package aliases cleanly."""
     targets = []
 
-    if check_all:
-        all_packages = set(lock_data.keys())
-        if pkg_data:
-            all_packages.update(pkg_data["all_direct"].keys())
+    if not pkg_data:
+        if check_all:
+            for name in sorted(lock_data.keys()):
+                targets.append(
+                    {
+                        "name": name,
+                        "declared": None,
+                        "installed": lock_data.get(name, []),
+                    }
+                )
+            return targets
+        print(
+            f"{COLOR_RED}{ICON_ERROR} Cannot check direct dependencies: package.json is missing.{COLOR_RESET}"
+        )
+        return []
 
-        for name in sorted(all_packages):
-            declared = None
-            if pkg_data and name in pkg_data["all_direct"]:
-                declared = pkg_data["all_direct"][name]
-            installed = lock_data.get(name, [])
-            targets.append({"name": name, "declared": declared, "installed": installed})
-    else:
-        if not pkg_data:
-            print(
-                f"{COLOR_RED}{ICON_ERROR} Cannot check direct dependencies: package.json is missing.{COLOR_RESET}"
+    all_direct = pkg_data.get("all_direct", {})
+    claimed_lock_versions = set()
+    aliased_direct_names = set()
+    handled_direct_names = set()
+
+    # Pass 1: Process npm: aliased direct dependencies first so they claim their exact resolved versions
+    for name, declared in sorted(all_direct.items()):
+        real_pkg, alias_constraint = _parse_npm_alias_spec(declared)
+        if not real_pkg:
+            continue
+
+        handled_direct_names.add(name)
+        if real_pkg != name:
+            aliased_direct_names.add(name)
+
+        alias_installed = []
+        if direct_versions_lock and name in direct_versions_lock:
+            best_v = direct_versions_lock[name]
+            alias_installed = [best_v]
+            claimed_lock_versions.add((name, best_v))
+        elif real_pkg in lock_data and lock_data[real_pkg]:
+            best_v = find_direct_installed_version(
+                name, alias_constraint, lock_data[real_pkg]
             )
-            return []
+            if best_v:
+                alias_installed = [best_v]
+                claimed_lock_versions.add((real_pkg, best_v))
+        elif name in lock_data and lock_data[name]:
+            best_v = find_direct_installed_version(
+                name, alias_constraint, lock_data[name]
+            )
+            if best_v:
+                alias_installed = [best_v]
+                claimed_lock_versions.add((name, best_v))
 
-        for name, declared in sorted(pkg_data["all_direct"].items()):
-            installed = lock_data.get(name, [])
-            targets.append({"name": name, "declared": declared, "installed": installed})
+        targets.append(
+            {
+                "name": name,
+                "registry_name": real_pkg,
+                "declared": declared,
+                "installed": alias_installed,
+            }
+        )
 
+    # Pass 2: Process standard (non-aliased) direct dependencies
+    for name, declared in sorted(all_direct.items()):
+        if name in handled_direct_names:
+            continue
+        raw_installed = lock_data.get(name, [])
+        if raw_installed and claimed_lock_versions:
+            unclaimed = [
+                v for v in raw_installed if (name, v) not in claimed_lock_versions
+            ]
+            installed = unclaimed if unclaimed else raw_installed
+        else:
+            installed = raw_installed
+        targets.append({"name": name, "declared": declared, "installed": installed})
+
+    # Pass 3: Add remaining transitive lockfile packages when --all is enabled
+    if check_all:
+        normal_direct_names = set(all_direct.keys()) - handled_direct_names
+        for name in sorted(lock_data.keys()):
+            if name in normal_direct_names:
+                continue
+            remaining = [
+                v
+                for v in lock_data.get(name, [])
+                if (name, v) not in claimed_lock_versions
+            ]
+            if not remaining:
+                continue
+            target_entry = {
+                "name": name,
+                "declared": None,
+                "installed": remaining,
+            }
+            if name in aliased_direct_names:
+                target_entry["force_transitive"] = True
+            targets.append(target_entry)
+
+    targets.sort(key=lambda t: (t["name"], 0 if t.get("declared") is not None else 1))
     return targets
 
 
@@ -3335,11 +3443,12 @@ def find_direct_installed_version(
 
     # Fallback 1: The version that satisfies the declared constraint
     if declared_constraint:
+        _, effective_constraint = _parse_npm_alias_spec(declared_constraint)
         try:
             satisfying = [
                 v
                 for v in installed_versions
-                if check_semver_satisfies(v, declared_constraint)
+                if check_semver_satisfies(v, effective_constraint)
             ]
             if len(satisfying) == 1:
                 return satisfying[0]
@@ -3364,6 +3473,9 @@ def check_npm_package(target):
     name = target["name"]
     declared = target["declared"]
     installed_versions = target["installed"]
+    alias_pkg, alias_constraint = _parse_npm_alias_spec(declared)
+    registry_name = target.get("registry_name") or alias_pkg or name
+    force_transitive = bool(target.get("force_transitive", False))
 
     # Helper to check if a version string is explicitly local
     def is_local_version(ver_str):
@@ -3374,21 +3486,53 @@ def check_npm_package(target):
             ("file:", "link:", "portal:", "workspace:", "./", "../", "/")
         )
 
-    versions_to_check = installed_versions if installed_versions else [declared]
+    if installed_versions:
+        versions_to_check = installed_versions
+    elif alias_pkg is not None:
+        versions_to_check = [alias_constraint]
+    else:
+        versions_to_check = [declared]
     results = []
+
+    if versions_to_check and all(is_local_version(v) for v in versions_to_check):
+        for ver_str in versions_to_check:
+            row = {
+                "name": name,
+                "declared": declared,
+                "installed": ver_str,
+                "latest": "Local",
+                "latest_same_major": None,
+                "latest_absolute": None,
+                "status": "local",
+                "deprecated": None,
+                "error": None,
+                "repo_url": None,
+                "compare_url": None,
+                "releases_url": None,
+                "mismatch_checksum": False,
+                "lockfile_checksum": None,
+                "registry_checksums": [],
+            }
+            if registry_name != name:
+                row["_registry_name"] = registry_name
+            if force_transitive:
+                row["_force_transitive"] = True
+            results.append(row)
+        _set_cached_target_result("npm", target, results)
+        return results
 
     try:
         # Check package-level metadata cache with in-flight singleflight deduplication
         def _fetch_npm_meta():
             # Properly URL-encode scoped packages (e.g. @babel/core -> @babel%2Fcore)
-            if name.startswith("@"):
-                parts = name.split("/")
+            if registry_name.startswith("@"):
+                parts = registry_name.split("/")
                 if len(parts) == 2:
                     encoded_name = f"{parts[0]}%2F{parts[1]}"
                 else:
-                    encoded_name = urllib.parse.quote(name)
+                    encoded_name = urllib.parse.quote(registry_name)
             else:
-                encoded_name = urllib.parse.quote(name)
+                encoded_name = urllib.parse.quote(registry_name)
 
             url = f"{URL_NPM_REGISTRY}{encoded_name}"
             req = urllib.request.Request(url)
@@ -3425,34 +3569,42 @@ def check_npm_package(target):
             deprecated_map,
             dist_hashes_map,
             inline_repo_url,
-        ) = _get_or_fetch_registry_metadata("npm", name, _fetch_npm_meta)
+        ) = _get_or_fetch_registry_metadata("npm", registry_name, _fetch_npm_meta)
 
         for ver_str in versions_to_check:
             # If the version itself is explicitly local, we treat it as Local/local
             if is_local_version(ver_str):
-                results.append(
-                    {
-                        "name": name,
-                        "declared": declared,
-                        "installed": ver_str,
-                        "latest": "Local",
-                        "latest_same_major": None,
-                        "latest_absolute": None,
-                        "status": "local",
-                        "deprecated": None,
-                        "error": None,
-                        "repo_url": None,
-                        "compare_url": None,
-                        "releases_url": None,
-                        "mismatch_checksum": False,
-                        "lockfile_checksum": None,
-                        "registry_checksums": [],
-                    }
-                )
+                row = {
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": "Local",
+                    "latest_same_major": None,
+                    "latest_absolute": None,
+                    "status": "local",
+                    "deprecated": None,
+                    "error": None,
+                    "repo_url": None,
+                    "compare_url": None,
+                    "releases_url": None,
+                    "mismatch_checksum": False,
+                    "lockfile_checksum": None,
+                    "registry_checksums": [],
+                }
+                if registry_name != name:
+                    row["_registry_name"] = registry_name
+                if force_transitive:
+                    row["_force_transitive"] = True
+                results.append(row)
                 continue
 
-            # Strip ranges prefixes to get base version for check
-            clean_ver = RE_CLEAN_VER.sub("", ver_str) if ver_str else "0.0.0"
+            # Strip npm: alias prefix if present, then strip range prefixes to get base version
+            effective_ver = (
+                _parse_npm_alias_spec(ver_str)[1]
+                if isinstance(ver_str, str) and ver_str.startswith("npm:")
+                else ver_str
+            )
+            clean_ver = RE_CLEAN_VER.sub("", effective_ver) if effective_ver else "0.0.0"
             if not clean_ver:
                 clean_ver = "0.0.0"
 
@@ -3502,7 +3654,7 @@ def check_npm_package(target):
             compare_url = None
             releases_url = None
             if update_type in {"major", "minor-major", "patch-major"}:
-                repo_url = inline_repo_url or resolve_npm_repo(name)
+                repo_url = inline_repo_url or resolve_npm_repo(registry_name)
                 if repo_url:
                     compare_url = get_compare_url(repo_url, clean_ver, latest_absolute)
                     releases_url = (
@@ -3510,25 +3662,28 @@ def check_npm_package(target):
                     )
 
             display_latest = format_latest_versions(latest_same_major, latest_absolute)
-            results.append(
-                {
-                    "name": name,
-                    "declared": declared,
-                    "installed": ver_str,
-                    "latest": display_latest,
-                    "latest_same_major": latest_same_major,
-                    "latest_absolute": latest_absolute,
-                    "status": update_type,
-                    "deprecated": deprecation_msg,
-                    "error": None,
-                    "repo_url": repo_url,
-                    "compare_url": compare_url,
-                    "releases_url": releases_url,
-                    "mismatch_checksum": mismatch,
-                    "lockfile_checksum": lockfile_integrity,
-                    "registry_checksums": reg_hashes,
-                }
-            )
+            row = {
+                "name": name,
+                "declared": declared,
+                "installed": ver_str,
+                "latest": display_latest,
+                "latest_same_major": latest_same_major,
+                "latest_absolute": latest_absolute,
+                "status": update_type,
+                "deprecated": deprecation_msg,
+                "error": None,
+                "repo_url": repo_url,
+                "compare_url": compare_url,
+                "releases_url": releases_url,
+                "mismatch_checksum": mismatch,
+                "lockfile_checksum": lockfile_integrity,
+                "registry_checksums": reg_hashes,
+            }
+            if registry_name != name:
+                row["_registry_name"] = registry_name
+            if force_transitive:
+                row["_force_transitive"] = True
+            results.append(row)
 
     except urllib.error.HTTPError as e:
         _close_http_error(e)
@@ -3686,43 +3841,63 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
     query_mapping = []
     seen_query_keys = set()
     dup_mappings = []
+    alias_backmaps = []
 
     for t in targets:
         name = t["name"]
         declared = t["declared"]
         installed_versions = t["installed"]
+        alias_pkg, alias_constraint = _parse_npm_alias_spec(declared)
+        query_name = t.get("registry_name") or alias_pkg or name
 
-        versions_to_check = installed_versions if installed_versions else [declared]
+        if installed_versions:
+            versions_to_check = installed_versions
+        elif alias_pkg is not None:
+            versions_to_check = [alias_constraint]
+        else:
+            versions_to_check = [declared]
+
         for ver_str in versions_to_check:
-            # Clean range prefix symbols
-            clean_ver = RE_CLEAN_VER.sub("", ver_str) if ver_str else "0.0.0"
+            # Clean npm: alias prefix if present and range prefix symbols
+            eff_ver = (
+                _parse_npm_alias_spec(ver_str)[1]
+                if isinstance(ver_str, str) and ver_str.startswith("npm:")
+                else ver_str
+            )
+            clean_ver = RE_CLEAN_VER.sub("", eff_ver) if eff_ver else "0.0.0"
             if not clean_ver:
                 clean_ver = "0.0.0"
 
-            cache_key = (ecosystem, name.lower(), clean_ver)
+            cache_key = (ecosystem, query_name.lower(), clean_ver)
             with _CACHE_LOCK:
                 cached_vulns = _OSV_VULNS_CACHE.get(cache_key)
                 is_cached = cache_key in _OSV_VULNS_CACHE
             if is_cached:
                 if cached_vulns:
                     cached_copies = [dict(v) for v in cached_vulns]
-                    final_package_to_vulns[(name, ver_str)] = cached_copies
-                    final_package_to_vulns[(name, clean_ver)] = cached_copies
+                    final_package_to_vulns[(query_name, ver_str)] = cached_copies
+                    final_package_to_vulns[(query_name, clean_ver)] = cached_copies
+                    if query_name != name:
+                        final_package_to_vulns[(name, ver_str)] = cached_copies
+                        final_package_to_vulns[(name, clean_ver)] = cached_copies
                 continue
 
-            dedup_key = (name, clean_ver)
+            if query_name != name:
+                alias_backmaps.append((name, ver_str, query_name, clean_ver))
+
+            dedup_key = (query_name, clean_ver)
             if dedup_key in seen_query_keys:
-                dup_mappings.append((name, ver_str, clean_ver))
+                dup_mappings.append((query_name, ver_str, clean_ver))
                 continue
             seen_query_keys.add(dedup_key)
 
             queries.append(
                 {
-                    "package": {"name": name, "ecosystem": ecosystem},
+                    "package": {"name": query_name, "ecosystem": ecosystem},
                     "version": clean_ver,
                 }
             )
-            query_mapping.append((name, ver_str, clean_ver))
+            query_mapping.append((query_name, ver_str, clean_ver))
 
     if not queries:
         return final_package_to_vulns
@@ -4000,6 +4175,15 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
         if (name, clean_ver) in final_package_to_vulns:
             final_package_to_vulns[(name, ver_str)] = final_package_to_vulns[
                 (name, clean_ver)
+            ]
+
+    for orig_name, ver_str, q_name, clean_ver in alias_backmaps:
+        if (q_name, clean_ver) in final_package_to_vulns:
+            final_package_to_vulns[(orig_name, ver_str)] = final_package_to_vulns[
+                (q_name, clean_ver)
+            ]
+            final_package_to_vulns[(orig_name, clean_ver)] = final_package_to_vulns[
+                (q_name, clean_ver)
             ]
 
     return final_package_to_vulns
@@ -4337,7 +4521,11 @@ def _isolate_direct_npm_results(results, pkg_data, direct_versions_lock):
         return
     by_name = {}
     for idx, r in enumerate(results):
-        if not r.get("is_engine", False):
+        if (
+            not r.get("is_engine", False)
+            and not r.get("_force_transitive", False)
+            and r.get("declared") is not None
+        ):
             by_name.setdefault(r["name"], []).append(idx)
 
     for name, indices in by_name.items():
@@ -4359,13 +4547,17 @@ def _check_npm_integrity(results, lock_file, integrity_data):
     for r in results:
         r["missing_checksum"] = False
         r["weak_checksum"] = False
-        if r.get("is_engine", False):
+        if r.get("is_engine", False) or r.get("status") == "local":
             continue
 
         if lock_file:
             key = (r["name"], r["installed"])
-            if integrity_data.get(key):
-                integrity_str = integrity_data[key].lower()
+            reg_name = r.get("_registry_name")
+            integrity_raw = integrity_data.get(key)
+            if not integrity_raw and reg_name:
+                integrity_raw = integrity_data.get((reg_name, r["installed"]))
+            if integrity_raw:
+                integrity_str = integrity_raw.lower()
                 if "sha512-" in integrity_str or "sha256-" in integrity_str:
                     pass
                 elif "sha1-" in integrity_str:
@@ -4430,7 +4622,13 @@ def _resolve_npm_dependency_types(results, pkg_data, parents_data):
 
     for r in results:
         if not r.get("is_engine", False):
-            if r["name"] in direct_packages:
+            if r.get("_force_transitive", False):
+                r["dep_type"] = "Transitive"
+                direct_parents = find_direct_parents(
+                    r["name"], parents_data, direct_packages
+                )
+                r["required_by"] = sorted(direct_parents - {r["name"]})
+            elif r["name"] in direct_packages:
                 dev_deps = pkg_data.get("devDependencies", {}) if pkg_data else {}
                 r["dep_type"] = "Dev" if r["name"] in dev_deps else "Direct"
                 r["required_by"] = []
@@ -4448,10 +4646,13 @@ def _resolve_npm_dependency_types(results, pkg_data, parents_data):
 def _assign_npm_integrity_to_targets(targets, integrity_data):
     for t in targets:
         t_integrity = {}
+        reg_name = t.get("registry_name")
         for ver in t["installed"]:
             key = (t["name"], ver)
             if key in integrity_data:
                 t_integrity[ver] = integrity_data[key]
+            elif reg_name and (reg_name, ver) in integrity_data:
+                t_integrity[ver] = integrity_data[(reg_name, ver)]
         t["integrity"] = t_integrity
 
 
@@ -4475,7 +4676,9 @@ def run_npm_checker(args):
         _prepare_npm_lock_data(lock_file)
     )
 
-    targets = build_check_targets(pkg_data, lock_data, args.all)
+    targets = build_check_targets(
+        pkg_data, lock_data, args.all, direct_versions_lock=direct_versions_lock
+    )
     _assign_npm_integrity_to_targets(targets, integrity_data)
 
     node_constraint, _source = find_node_constraint(args.path, pkg_data)
@@ -4506,8 +4709,14 @@ def run_npm_checker(args):
     _check_npm_integrity(results, lock_file, integrity_data)
     if vuls_enabled:
         for r in results:
-            key = (r["name"], r["installed"])
-            r["vulnerabilities"] = osv_vulns.get(key, [])
+            reg_name = r.get("_registry_name")
+            if reg_name:
+                r["vulnerabilities"] = osv_vulns.get(
+                    (reg_name, r["installed"]),
+                    osv_vulns.get((r["name"], r["installed"]), []),
+                )
+            else:
+                r["vulnerabilities"] = osv_vulns.get((r["name"], r["installed"]), [])
     else:
         for r in results:
             r["vulnerabilities"] = []
@@ -4515,6 +4724,11 @@ def run_npm_checker(args):
         results, node_constraint, analysis=extra_results.get("node")
     )
     _resolve_npm_dependency_types(results, pkg_data, parents_data)
+
+    # Strip internal alias helper keys so output JSON/HTML/SARIF schema remains 100% clean
+    for r in results:
+        r.pop("_registry_name", None)
+        r.pop("_force_transitive", None)
 
     elapsed = time.time() - start_time
 
@@ -9439,18 +9653,16 @@ def validate_configuration_drift(results):
         ):
             continue
 
-        # Strip Yarn Berry npm: prefix from the declared constraint
-        # e.g., npm:esbuild-wasm@^0.23.0 -> ^0.23.0
+        # Strip npm: alias / Yarn Berry protocol prefix from declared and installed strings
+        # e.g., 'npm:@typescript/typescript6@6.0.2' -> '6.0.2', 'npm:esbuild-wasm@^0.23.0' -> '^0.23.0'
         if decl_str.startswith("npm:"):
-            rest = decl_str[4:]
-            if rest.startswith("@"):
-                parts = rest[1:].split("@", 1)
-                if len(parts) == 2:
-                    decl_str = parts[1]
-            else:
-                parts = rest.split("@", 1)
-                if len(parts) == 2:
-                    decl_str = parts[1]
+            _, decl_str = _parse_npm_alias_spec(decl_str)
+        if inst_str.startswith("npm:"):
+            _, inst_str = _parse_npm_alias_spec(inst_str)
+
+        # Skip wildcard or dist-tag constraints (e.g., '*', 'latest', 'next') that contain no digits
+        if not decl_str or decl_str == "*" or not any(ch.isdigit() for ch in decl_str):
+            continue
 
         # Ensure we can extract a valid semantic version from installed version
         if parse_semver(inst_str) == (0, 0, 0, 0, 0, ""):
