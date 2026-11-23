@@ -1778,6 +1778,12 @@ def fetch_node_schedule():
     return _AUX_SINGLEFLIGHT.do(cache_key, _fetch)
 
 
+RE_SEMVER_OR_SPLIT = re.compile(r"\|\|?")
+RE_HYPHEN_RANGE = re.compile(
+    r"(?P<lo>v?\d+(?:\.\d+)*(?:-[0-9A-Za-z.-]+)?)\s+-\s+(?P<hi>v?\d+(?:\.\d+)*(?:-[0-9A-Za-z.-]+)?)"
+)
+
+
 def satisfy_term(version_str, term):
     try:
         term = term.strip()
@@ -1785,14 +1791,14 @@ def satisfy_term(version_str, term):
             return True
 
         op = ""
-        for possible_op in (">=", "<=", ">", "<", "^", "~", "=="):
+        for possible_op in ("===", ">=", "<=", "!=", "~=", "~>", "==", ">", "<", "^", "~"):
             if term.startswith(possible_op):
                 op = possible_op
                 break
         if not op and term.startswith("="):
             op = "="
 
-        ver_part = term[len(op) :] if op else term
+        ver_part = term[len(op) :].strip() if op else term
 
         _, v_maj, v_min, v_pat, _, _ = parse_semver(version_str)
 
@@ -1803,12 +1809,14 @@ def satisfy_term(version_str, term):
             parts = ver_part.split(".")
             try:
                 if len(parts) == 2:
-                    return v_maj == int(parts[0])
+                    matched = v_maj == int(parts[0])
                 elif len(parts) == 3:
-                    return v_maj == int(parts[0]) and v_min == int(parts[1])
+                    matched = v_maj == int(parts[0]) and v_min == int(parts[1])
+                else:
+                    matched = True
             except ValueError:
                 return False
-            return True
+            return (not matched) if op == "!=" else matched
 
         if not op:
             parts = ver_part.split(".")
@@ -1833,8 +1841,28 @@ def satisfy_term(version_str, term):
             return compare_versions(version_str, ver_part) > 0
         elif op == "<":
             return compare_versions(version_str, ver_part) < 0
-        elif op in {"=", "==", ""}:
+        elif op == "!=":
+            return compare_versions(version_str, ver_part) != 0
+        elif op in {"=", "==", "===", ""}:
             return compare_versions(version_str, ver_part) == 0
+        elif op in {"~=", "~>"}:
+            # PEP 440 compatible release (~=) and Ruby Bundler pessimistic operator (~>):
+            # ~=1.4 / ~>1.4 -> >=1.4, <2.0; ~=1.4.2 / ~>1.4.2 -> >=1.4.2, <1.5.0
+            if compare_versions(version_str, ver_part) < 0:
+                return False
+            clean_ver = ver_part.strip().lower().removeprefix("v")
+            if "+" in clean_ver:
+                clean_ver = clean_ver.split("+", 1)[0]
+            if "-" in clean_ver:
+                clean_ver = clean_ver.split("-", 1)[0]
+            parts = [
+                p.strip()
+                for p in clean_ver.split(".")
+                if p.strip() and p.strip() not in {"x", "*"}
+            ]
+            if len(parts) >= 3:
+                return v_maj == t_maj and v_min == t_min
+            return v_maj == t_maj
         elif op == "^":
             if compare_versions(version_str, ver_part) < 0:
                 return False
@@ -1906,7 +1934,9 @@ def check_semver_satisfies(version_str, range_str):
         return True
 
     range_str = RE_RANGE_CLEAN.sub(r"\1", range_str.strip())
-    or_parts = range_str.split("||")
+    if " - " in range_str:
+        range_str = RE_HYPHEN_RANGE.sub(r">=\g<lo> <=\g<hi>", range_str)
+    or_parts = RE_SEMVER_OR_SPLIT.split(range_str)
 
     for or_part in or_parts:
         or_part = or_part.strip()
@@ -4975,6 +5005,94 @@ def get_env_markers():
     }
 
 
+_PIP_VCS_URL_PREFIXES = (
+    "git+",
+    "hg+",
+    "svn+",
+    "bzr+",
+    "http://",
+    "https://",
+    "file:",
+    "ssh://",
+)
+
+
+def _is_pip_vcs_or_local_spec(spec):
+    """Returns True if a Python version specifier/installed value is a VCS, direct URL, or local path."""
+    if not spec or not isinstance(spec, str):
+        return False
+    s = spec.strip()
+    if s.startswith("@"):
+        s = s[1:].strip()
+    sl = s.lower()
+    return sl.startswith(_PIP_VCS_URL_PREFIXES) or s.startswith(("./", "../", "/"))
+
+
+def _extract_pip_vcs_repo_url(spec):
+    """Extracts a clean repository URL from a Python VCS/direct URL specifier if available."""
+    if not spec or not isinstance(spec, str):
+        return None
+    s = spec.strip()
+    if s.startswith("@"):
+        s = s[1:].strip()
+    # Strip #egg=... fragment and @ref suffix before cleaning
+    if "#" in s:
+        s = s.split("#", 1)[0]
+    parsed = urllib.parse.urlsplit(s)
+    if parsed.path and "@" in parsed.path:
+        clean_path = parsed.path.rsplit("@", 1)[0]
+        s = urllib.parse.urlunsplit(
+            (parsed.scheme, parsed.netloc, clean_path, "", "")
+        )
+    return clean_repo_url(s)
+
+
+def _parse_pip_vcs_or_url(req_part):
+    """Parses bare VCS or direct URL Python requirements (e.g. 'git+https://github.com/openai/swarm.git').
+    Returns (package_name, declared_spec) if req_part is a bare VCS/URL requirement, else (None, None).
+    """
+    if not req_part or not isinstance(req_part, str):
+        return None, None
+    s = req_part.strip()
+    if not s.lower().startswith(_PIP_VCS_URL_PREFIXES):
+        return None, None
+
+    pkg_name = None
+    # 1. Prefer explicit #egg=<name> fragment when present
+    if "#" in s:
+        fragment = s.split("#", 1)[1]
+        for frag_part in fragment.split("&"):
+            if frag_part.lower().startswith("egg="):
+                raw_egg = frag_part[4:].strip()
+                if "[" in raw_egg:
+                    raw_egg = raw_egg.split("[", 1)[0].strip()
+                if raw_egg:
+                    pkg_name = raw_egg
+                    break
+
+    # 2. Fallback: derive package name from the last path segment of the URL
+    if not pkg_name:
+        base_url = s.split("#", 1)[0].split("?", 1)[0]
+        parsed = urllib.parse.urlsplit(base_url)
+        path_part = parsed.path.rstrip("/")
+        if "@" in path_part:
+            path_part = path_part.rsplit("@", 1)[0].rstrip("/")
+        seg = path_part.rsplit("/", 1)[-1] if "/" in path_part else path_part
+        for suffix in (".git", ".tar.gz", ".tgz", ".tar.bz2", ".zip", ".whl"):
+            if seg.lower().endswith(suffix):
+                seg = seg[: -len(suffix)]
+                break
+        # For wheel/archive filenames like 'pkg_name-1.2.3-py3-none-any', take leading dist name
+        if seg and "-" in seg and any(
+            s.lower().split("#", 1)[0].split("?", 1)[0].endswith(ext)
+            for ext in (".whl", ".tar.gz", ".tgz", ".zip")
+        ):
+            seg = seg.split("-", 1)[0]
+        pkg_name = seg.strip() or base_url
+
+    return pkg_name, s
+
+
 def parse_requirements_txt(filepath, seen_files=None, base_dir=None):
     """Parses requirements.txt to extract dependencies and parent traces, supporting PEP 508 and file inclusions."""
     if seen_files is None:
@@ -5092,6 +5210,28 @@ def parse_requirements_txt(filepath, seen_files=None, base_dir=None):
                 req_part = stripped_line
                 marker_part = None
 
+            # Handle bare VCS/URL requirements (e.g. 'git+https://github.com/openai/swarm.git')
+            vcs_name, vcs_spec = _parse_pip_vcs_or_url(req_part)
+            if vcs_name:
+                if marker_part:
+                    try:
+                        env = get_env_markers()
+                        if not parse_and_evaluate_marker(marker_part, env):
+                            continue
+                    except Exception as e:
+                        print(
+                            f"{COLOR_YELLOW}{ICON_WARN} Warning evaluating marker '{marker_part}': {e}{COLOR_RESET}"
+                        )
+                dependencies[vcs_name] = vcs_spec
+                last_pkg = vcs_name
+                if comment.startswith("via"):
+                    parent_part = comment[3:].strip()
+                    for p in parent_part.split(","):
+                        p_clean = p.strip()
+                        if p_clean:
+                            parents.setdefault(vcs_name, set()).add(p_clean)
+                continue
+
             # Parse package name, optional extras, and specifier/URL (PEP 508 names must start with alphanumeric)
             match = RE_PEP508_REQ.match(req_part)
             if not match:
@@ -5151,6 +5291,27 @@ def check_pypi_package(target):
 
     versions_to_check = installed_versions if installed_versions else [declared]
     results = []
+
+    if versions_to_check and all(_is_pip_vcs_or_local_spec(v) for v in versions_to_check):
+        for ver_str in versions_to_check:
+            results.append(
+                {
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": "Local",
+                    "latest_same_major": None,
+                    "latest_absolute": None,
+                    "status": "local",
+                    "deprecated": None,
+                    "error": None,
+                    "repo_url": _extract_pip_vcs_repo_url(ver_str or declared),
+                    "compare_url": None,
+                    "releases_url": None,
+                }
+            )
+        _set_cached_target_result("pip", target, results)
+        return results
 
     try:
         def _fetch_pypi_meta():
@@ -6006,6 +6167,27 @@ def check_nuget_package(target):
     versions_to_check = installed_versions if installed_versions else [declared]
     results = []
 
+    if versions_to_check and all(_is_pip_vcs_or_local_spec(v) for v in versions_to_check):
+        for ver_str in versions_to_check:
+            results.append(
+                {
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": "Local",
+                    "latest_same_major": None,
+                    "latest_absolute": None,
+                    "status": "local",
+                    "deprecated": None,
+                    "error": None,
+                    "repo_url": _extract_pip_vcs_repo_url(ver_str or declared),
+                    "compare_url": None,
+                    "releases_url": None,
+                }
+            )
+        _set_cached_target_result("pip", target, results)
+        return results
+
     try:
         def _fetch_nuget_meta():
             encoded_name = urllib.parse.quote(name.lower())
@@ -6304,6 +6486,27 @@ def check_composer_package(target):
 
     versions_to_check = installed_versions if installed_versions else [declared]
     results = []
+
+    if versions_to_check and all(_is_pip_vcs_or_local_spec(v) for v in versions_to_check):
+        for ver_str in versions_to_check:
+            results.append(
+                {
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": "Local",
+                    "latest_same_major": None,
+                    "latest_absolute": None,
+                    "status": "local",
+                    "deprecated": None,
+                    "error": None,
+                    "repo_url": _extract_pip_vcs_repo_url(ver_str or declared),
+                    "compare_url": None,
+                    "releases_url": None,
+                }
+            )
+        _set_cached_target_result("pip", target, results)
+        return results
 
     try:
         def _fetch_php_meta():
@@ -7106,6 +7309,27 @@ def check_maven_package(target):
     versions_to_check = installed_versions if installed_versions else [declared]
     results = []
 
+    if versions_to_check and all(_is_pip_vcs_or_local_spec(v) for v in versions_to_check):
+        for ver_str in versions_to_check:
+            results.append(
+                {
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": "Local",
+                    "latest_same_major": None,
+                    "latest_absolute": None,
+                    "status": "local",
+                    "deprecated": None,
+                    "error": None,
+                    "repo_url": _extract_pip_vcs_repo_url(ver_str or declared),
+                    "compare_url": None,
+                    "releases_url": None,
+                }
+            )
+        _set_cached_target_result("pip", target, results)
+        return results
+
     try:
         if ":" not in name:
             raise ValueError(f"Invalid Maven coordinate structure: {name}")
@@ -7763,6 +7987,27 @@ def check_go_package(target):
 
     versions_to_check = installed_versions if installed_versions else [declared]
     results = []
+
+    if versions_to_check and all(_is_pip_vcs_or_local_spec(v) for v in versions_to_check):
+        for ver_str in versions_to_check:
+            results.append(
+                {
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": "Local",
+                    "latest_same_major": None,
+                    "latest_absolute": None,
+                    "status": "local",
+                    "deprecated": None,
+                    "error": None,
+                    "repo_url": _extract_pip_vcs_repo_url(ver_str or declared),
+                    "compare_url": None,
+                    "releases_url": None,
+                }
+            )
+        _set_cached_target_result("pip", target, results)
+        return results
 
     try:
         def _fetch_go_meta():
@@ -9080,6 +9325,27 @@ def check_ruby_package(target):
     versions_to_check = installed_versions if installed_versions else [declared]
     results = []
 
+    if versions_to_check and all(_is_pip_vcs_or_local_spec(v) for v in versions_to_check):
+        for ver_str in versions_to_check:
+            results.append(
+                {
+                    "name": name,
+                    "declared": declared,
+                    "installed": ver_str,
+                    "latest": "Local",
+                    "latest_same_major": None,
+                    "latest_absolute": None,
+                    "status": "local",
+                    "deprecated": None,
+                    "error": None,
+                    "repo_url": _extract_pip_vcs_repo_url(ver_str or declared),
+                    "compare_url": None,
+                    "releases_url": None,
+                }
+            )
+        _set_cached_target_result("pip", target, results)
+        return results
+
     try:
         def _fetch_ruby_meta():
             r_url = None
@@ -9603,6 +9869,44 @@ def run_gradle_checker(args):
     return results, pkg_data, elapsed
 
 
+def _normalize_ecosystem_constraint(decl_str, technology):
+    """Translates ecosystem-native version constraint conventions into standard SemVer ranges."""
+    tech = (technology or "").lower()
+    s = decl_str.strip()
+    if not s:
+        return s
+
+    # NuGet / Maven / Gradle interval bracket notation: [1.0], [1.0,2.0), (1.0,2.0], [1.0,), (,2.0]
+    if tech in {"nuget", "maven", "gradle", "android"} and len(s) >= 3 and s[0] in "[(" and s[-1] in "])":
+        inner = s[1:-1].strip()
+        if "," not in inner:
+            if s[0] == "[" and s[-1] == "]":
+                return f"={inner}"
+            return inner
+        lo, hi = (p.strip() for p in inner.split(",", 1))
+        terms = []
+        if lo:
+            terms.append(f"{'>=' if s[0] == '[' else '>'}{lo}")
+        if hi:
+            terms.append(f"{'<=' if s[-1] == ']' else '<'}{hi}")
+        return " ".join(terms) if terms else "*"
+
+    # Detect bare version string (no operators, wildcards, commas, spaces, or OR pipes)
+    has_operator_or_compound = any(ch in s for ch in ("^", "~", ">", "<", "=", "!", "*", "|", ",", " ", "[", "]"))
+    if not has_operator_or_compound and not s.lower().endswith(".x"):
+        if tech == "rust" and s[0].isdigit():
+            # Cargo specification: bare version '2.6.0' / '0.4' / '2' is implicitly a caret requirement '^2.6.0'
+            return f"^{s}"
+        if tech == "nuget" and s[0].isdigit():
+            # NuGet specification: bare version '13.0.1' is minimum inclusive '>=13.0.1' (exact pin is '[13.0.1]')
+            return f">={s}"
+        if tech == "go" and (s[0].isdigit() or (s[0] in "vV" and len(s) > 1 and s[1].isdigit())):
+            # Go Minimal Version Selection (MVS): declared version is a minimum version bound
+            return f">={s}"
+
+    return s
+
+
 def validate_configuration_drift(results):
     """
     Validates that the installed version of each package satisfies the declared constraint.
@@ -9668,8 +9972,10 @@ def validate_configuration_drift(results):
         if parse_semver(inst_str) == (0, 0, 0, 0, 0, ""):
             continue
 
+        effective_decl = _normalize_ecosystem_constraint(decl_str, r.get("technology"))
+
         try:
-            satisfied = check_semver_satisfies(inst_str, decl_str)
+            satisfied = check_semver_satisfies(inst_str, effective_decl)
         except Exception:
             satisfied = True
 

@@ -6109,6 +6109,58 @@ snapshots:
         self.assertEqual(drift_rows[3]["status"], "up-to-date")
         self.assertIsNone(drift_rows[3]["error"])
 
+    def test_validate_configuration_drift_ecosystem_native_semantics(self):
+        """Test ecosystem-native version semantics across Rust/Cargo, NuGet, Go, pip, Ruby, PHP, and npm."""
+        # 1. Operator support in check_semver_satisfies: ~=, ~>, !=, |, hyphen ranges
+        self.assertTrue(kevlar.check_semver_satisfies("1.4.9", "~=1.4.2"))
+        self.assertFalse(kevlar.check_semver_satisfies("1.5.0", "~=1.4.2"))
+        self.assertTrue(kevlar.check_semver_satisfies("1.9.0", "~=1.4"))
+        self.assertFalse(kevlar.check_semver_satisfies("2.0.0", "~=1.4"))
+        self.assertTrue(kevlar.check_semver_satisfies("1.6.0", ">=1.0.0, !=1.5.0"))
+        self.assertFalse(kevlar.check_semver_satisfies("1.5.0", ">=1.0.0, !=1.5.0"))
+        self.assertFalse(kevlar.check_semver_satisfies("1.5.3", ">=1.0.0, !=1.5.*"))
+        self.assertTrue(kevlar.check_semver_satisfies("1.6.0", ">=1.0.0, !=1.5.*"))
+        self.assertTrue(kevlar.check_semver_satisfies("7.1.3", "~> 7.0"))
+        self.assertFalse(kevlar.check_semver_satisfies("8.0.0", "~> 7.0"))
+        self.assertTrue(kevlar.check_semver_satisfies("7.1.9", "~> 7.1.2"))
+        self.assertFalse(kevlar.check_semver_satisfies("7.2.0", "~> 7.1.2"))
+        self.assertTrue(kevlar.check_semver_satisfies("8.2.0", "^7.0|^8.0"))
+        self.assertFalse(kevlar.check_semver_satisfies("9.0.0", "^7.0|^8.0"))
+        self.assertTrue(kevlar.check_semver_satisfies("2.1.0", "1.0.0 - 2.3.4"))
+        self.assertFalse(kevlar.check_semver_satisfies("2.4.0", "1.0.0 - 2.3.4"))
+
+        # 2. Ecosystem-aware validate_configuration_drift matrix
+        rows = [
+            # Rust bare caret: 2.6.0 -> ^2.6.0 (valid 2.9.0, drift on 3.0.0 and 2.5.0)
+            {"name": "lol_html", "technology": "rust", "declared": "2.6.0", "installed": "2.9.0", "status": "up-to-date", "error": None, "dep_type": "Direct"},
+            {"name": "napi", "technology": "rust", "declared": "3.0.0", "installed": "3.15.0", "status": "up-to-date", "error": None, "dep_type": "Direct"},
+            {"name": "chrono", "technology": "rust", "declared": "0.4", "installed": "0.4.38", "status": "up-to-date", "error": None, "dep_type": "Direct"},
+            {"name": "rust-major-drift", "technology": "rust", "declared": "2.6.0", "installed": "3.0.0", "status": "up-to-date", "error": None, "dep_type": "Direct"},
+            {"name": "rust-downgrade-drift", "technology": "rust", "declared": "2.6.0", "installed": "2.5.0", "status": "up-to-date", "error": None, "dep_type": "Direct"},
+            {"name": "rust-exact-pin-drift", "technology": "rust", "declared": "=2.6.0", "installed": "2.9.0", "status": "up-to-date", "error": None, "dep_type": "Direct"},
+            # NuGet bare minimum (>=) vs exact bracket [x] vs interval [1.0,2.0)
+            {"name": "Newtonsoft.Json", "technology": "nuget", "declared": "13.0.1", "installed": "13.0.3", "status": "up-to-date", "error": None, "dep_type": "Direct"},
+            {"name": "nuget-exact-drift", "technology": "nuget", "declared": "[13.0.1]", "installed": "13.0.3", "status": "up-to-date", "error": None, "dep_type": "Direct"},
+            {"name": "nuget-range-ok", "technology": "nuget", "declared": "[1.0.0, 2.0.0)", "installed": "1.5.0", "status": "up-to-date", "error": None, "dep_type": "Direct"},
+            {"name": "nuget-range-drift", "technology": "nuget", "declared": "[1.0.0, 2.0.0)", "installed": "2.0.0", "status": "up-to-date", "error": None, "dep_type": "Direct"},
+            # Go MVS minimum version
+            {"name": "github.com/org/mod", "technology": "go", "declared": "v1.18.0", "installed": "v1.19.2", "status": "up-to-date", "error": None, "dep_type": "Direct"},
+            {"name": "go-downgrade-drift", "technology": "go", "declared": "v1.18.0", "installed": "v1.17.0", "status": "up-to-date", "error": None, "dep_type": "Direct"},
+            # npm bare version remains exact pin
+            {"name": "npm-exact-drift", "technology": "npm", "declared": "2.6.0", "installed": "2.9.0", "status": "up-to-date", "error": None, "dep_type": "Direct"},
+        ]
+
+        kevlar.validate_configuration_drift(rows)
+        by_name = {r["name"]: r for r in rows}
+
+        for ok_name in ("lol_html", "napi", "chrono", "Newtonsoft.Json", "nuget-range-ok", "github.com/org/mod"):
+            self.assertEqual(by_name[ok_name]["status"], "up-to-date", f"Unexpected drift on {ok_name}: {by_name[ok_name]}")
+            self.assertIsNone(by_name[ok_name]["error"])
+
+        for drift_name in ("rust-major-drift", "rust-downgrade-drift", "rust-exact-pin-drift", "nuget-exact-drift", "nuget-range-drift", "go-downgrade-drift", "npm-exact-drift"):
+            self.assertEqual(by_name[drift_name]["status"], "error", f"Expected drift on {drift_name}")
+            self.assertIn("Configuration Drift", by_name[drift_name]["error"])
+
 
 if __name__ == "__main__":
     unittest.main()
