@@ -11793,6 +11793,7 @@ def find_manifest_files(project_path, technology):
     while stack:
         curr_dir = stack.pop()
         subdirs = []
+        local_manifests = []
         try:
             with os.scandir(curr_dir) as it:
                 for entry in it:
@@ -11805,12 +11806,16 @@ def find_manifest_files(project_path, technology):
                             if name in exact_names or (
                                 suffixes and name.lower().endswith(suffixes)
                             ):
-                                manifest_files.append(entry.path)
+                                local_manifests.append(entry.path)
                     except OSError:
                         continue
         except OSError:
             continue
+        if local_manifests:
+            local_manifests.sort()
+            manifest_files.extend(local_manifests)
         if subdirs:
+            subdirs.sort()
             stack.extend(reversed(subdirs))
 
     if technology == "nuget":
@@ -13812,8 +13817,6 @@ _HTML_TEMPLATE_GZIP_B64 = (
     "d/u9gC/8NOcF7EdwZlZVd3V3VXU1AGooH3FGJNBdP1lZWVmZWZlZTx4/f3v+4S/vXjjjxXRy9ugJ/nEm7uzqtOLNKvjAc4dnjxz4"
     "eTL1Fq4zGLth5C1OK99/+EO9V5Ffzdypd1q58b3beRAuKs4gmC28GRS99YeL8enQu/EHXp2+7Dr+zF/47qQeDdyJd9pqNEVTC38x"
     "8c6ee3NvNvRmg5VzsXAXy8j52rnwBsvQX6yc9x528GSPFWXVJv7s2hmH3ui0Ml4s5tHx3t4I+o8aV0FwNfHcuR81BsF0bxBF7d+P"
-    "3Kk/WZ2+XS5G/uL49mq8+IdOs3myD/8O4N8h/Os1m18P/Wg+cVen0a07rzihNzmtRIvVxIvGnrcQ8NIT9hl/jsMgWDi/xt/xp17v"
-    "X9UHwSQIj52vmv3mqHV0kikwcMMhlIL3rVar1z5Uvh8HNx420Rq1jzq5Igvv46I+df0ZlBgdjdxRX11iufCGUORo4HbcUbZIPwiH"
     "XhgD2zncb3Vb2ULz0J+64Qrf9/rDUS/7PloOBl4UIaTN/lEvV//WDWf+DAc76h55zRycXhhS795oH36yb/3ZKEA8em7Xy+Fx6M2x"
     "ptvrdkc5DImh7/e73YNO8vYu/hR/6AfDVWYW++7g+ioMlrOhQM+NG1aTua2lu0uViecmUwhJtM6o8djZYfS4s+vU3fl84tWjVbTw"
     "prvOMyTu1+7ggr7/AersOpUL7yrwnO9fVnad90E/WAS7TuTOonrkhX5mWmGyrpAsmunHc3c4pGnYb84/Om34lX7Pyf/YGU28zKtf"
@@ -14747,6 +14750,7 @@ def find_projects_recursively(base_path):
             projects.append((curr_dir, detected))
 
         if subdirs:
+            subdirs.sort()
             stack.extend(reversed(subdirs))
 
     return projects
