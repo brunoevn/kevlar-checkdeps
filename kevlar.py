@@ -11,6 +11,7 @@ import atexit
 import base64
 import codecs
 import collections
+import contextlib
 import ctypes
 import functools
 import gzip
@@ -36,6 +37,7 @@ import urllib.response
 import xml.etree.ElementTree as ET
 import xml.parsers.expat
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple, TypedDict, Union
 
@@ -49,25 +51,90 @@ class SafeWriter:
         self.encoding = (
             original_stream.encoding if hasattr(original_stream, "encoding") else None
         ) or "utf-8"
+        self._lock = threading.RLock()
 
     def write(self, data):
-        try:
-            self.original_stream.write(data)
-        except UnicodeEncodeError:
-            self.original_stream.write(
-                data.encode(self.encoding, errors="replace").decode(self.encoding)
-            )
+        with self._lock:
+            try:
+                self.original_stream.write(data)
+            except UnicodeEncodeError:
+                self.original_stream.write(
+                    data.encode(self.encoding, errors="replace").decode(self.encoding)
+                )
 
     def flush(self):
-        if hasattr(self.original_stream, "flush"):
-            self.original_stream.flush()
+        with self._lock:
+            if hasattr(self.original_stream, "flush"):
+                self.original_stream.flush()
 
 
 sys.stdout = SafeWriter(sys.stdout)
 sys.stderr = SafeWriter(sys.stderr)
 
-# Global lock to protect concurrent console writes (sys.stdout, sys.stderr, print)
-console_lock = threading.Lock()
+# Global reentrant lock to protect concurrent console writes (sys.stdout, sys.stderr, print)
+console_lock = threading.RLock()
+
+# Depth counter > 0 while multiple projects/technologies execute concurrently
+_PARALLEL_SCAN_DEPTH = 0
+_PARALLEL_SCAN_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def _parallel_scan_scope():
+    """Marks execution as inside a parallel macro-orchestration batch to avoid garbled \\r progress."""
+    global _PARALLEL_SCAN_DEPTH
+    with _PARALLEL_SCAN_LOCK:
+        _PARALLEL_SCAN_DEPTH += 1
+    try:
+        yield
+    finally:
+        with _PARALLEL_SCAN_LOCK:
+            _PARALLEL_SCAN_DEPTH = max(0, _PARALLEL_SCAN_DEPTH - 1)
+
+
+class _SingleFlight:
+    """Coalesces concurrent in-flight network fetches for the same cache key (stdlib-only)."""
+
+    __slots__ = ("_lock", "_inflight")
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._inflight = {}
+
+    def do(self, key, fetch_fn):
+        with self._lock:
+            entry = self._inflight.get(key)
+            if entry is None:
+                event = threading.Event()
+                entry = [event, None, None]  # [event, result, exc]
+                self._inflight[key] = entry
+                is_leader = True
+            else:
+                event = entry[0]
+                is_leader = False
+
+        if not is_leader:
+            event.wait()
+            if entry[2] is not None:
+                raise entry[2]
+            return entry[1]
+
+        try:
+            res = fetch_fn()
+            entry[1] = res
+            return res
+        except BaseException as exc:
+            entry[2] = exc
+            raise
+        finally:
+            with self._lock:
+                self._inflight.pop(key, None)
+            event.set()
+
+
+_REGISTRY_SINGLEFLIGHT = _SingleFlight()
+_AUX_SINGLEFLIGHT = _SingleFlight()
+_MAVEN_POM_SINGLEFLIGHT = _SingleFlight()
 
 
 class _BoundedLRUDict(collections.OrderedDict):
@@ -176,6 +243,25 @@ def _set_cached_registry_metadata(tech: str, package_name: str, data: Any) -> No
     key = (tech, package_name.lower())
     with _CACHE_LOCK:
         _REGISTRY_METADATA_CACHE[key] = data
+
+
+def _get_or_fetch_registry_metadata(tech: str, package_name: str, fetch_fn):
+    """Returns cached registry metadata or coalesces concurrent in-flight fetches via singleflight."""
+    cached = _get_cached_registry_metadata(tech, package_name)
+    if cached is not None:
+        return cached
+
+    key = (tech, package_name.lower())
+
+    def _load():
+        rechecked = _get_cached_registry_metadata(tech, package_name)
+        if rechecked is not None:
+            return rechecked
+        data = fetch_fn()
+        _set_cached_registry_metadata(tech, package_name, data)
+        return data
+
+    return _REGISTRY_SINGLEFLIGHT.do(key, _load)
 
 
 class CheckTarget(TypedDict, total=False):
@@ -1171,6 +1257,23 @@ class _HTTPConnectionPool:
 _HTTP_POOL = _HTTPConnectionPool(max_per_host=16, idle_ttl=30.0)
 atexit.register(_HTTP_POOL.close_all)
 
+# Per-host concurrency cap to prevent HTTP 429 rate-limiting and socket exhaustion under macro parallelism
+_DOMAIN_SEMAPHORE_LOCK = threading.Lock()
+_DOMAIN_SEMAPHORES: Dict[str, threading.BoundedSemaphore] = {}
+_MAX_CONCURRENT_PER_HOST = 16
+
+
+def _get_domain_semaphore(host: str) -> threading.BoundedSemaphore:
+    key = host.lower()
+    sem = _DOMAIN_SEMAPHORES.get(key)
+    if sem is None:
+        with _DOMAIN_SEMAPHORE_LOCK:
+            sem = _DOMAIN_SEMAPHORES.get(key)
+            if sem is None:
+                sem = threading.BoundedSemaphore(_MAX_CONCURRENT_PER_HOST)
+                _DOMAIN_SEMAPHORES[key] = sem
+    return sem
+
 
 def _execute_pooled_request(scheme, req):
     """Executes an HTTP/HTTPS urllib Request over _HTTP_POOL with Keep-Alive and gzip support."""
@@ -1217,44 +1320,45 @@ def _execute_pooled_request(scheme, req):
     if body is not None and not has_cl:
         headers["Content-Length"] = str(len(body))
 
-    for retry_stale in range(2):
-        conn, is_reused = _HTTP_POOL.acquire(scheme, host, port, timeout)
-        try:
-            conn.request(method, target, body=body, headers=headers)
-            resp = conn.getresponse()
-            raw_bytes = resp.read()
-            resp_headers = resp.headers
-            status = resp.status
-            reason = resp.reason
-            will_close = resp.will_close
-            conn_hdr = (resp_headers.get("Connection") or "").lower()
-            if will_close or "close" in conn_hdr:
-                conn.close()
-            else:
-                _HTTP_POOL.release(scheme, host, port, conn)
-            break
-        except (
-            http.client.RemoteDisconnected,
-            http.client.BadStatusLine,
-            http.client.CannotSendRequest,
-            http.client.ResponseNotReady,
-            ConnectionResetError,
-            BrokenPipeError,
-            OSError,
-        ) as exc:
+    with _get_domain_semaphore(host):
+        for retry_stale in range(2):
+            conn, is_reused = _HTTP_POOL.acquire(scheme, host, port, timeout)
             try:
-                conn.close()
-            except Exception:
-                pass
-            if is_reused and retry_stale == 0:
-                continue
-            raise urllib.error.URLError(exc) from exc
-        except http.client.HTTPException as exc:
-            try:
-                conn.close()
-            except Exception:
-                pass
-            raise urllib.error.URLError(exc) from exc
+                conn.request(method, target, body=body, headers=headers)
+                resp = conn.getresponse()
+                raw_bytes = resp.read()
+                resp_headers = resp.headers
+                status = resp.status
+                reason = resp.reason
+                will_close = resp.will_close
+                conn_hdr = (resp_headers.get("Connection") or "").lower()
+                if will_close or "close" in conn_hdr:
+                    conn.close()
+                else:
+                    _HTTP_POOL.release(scheme, host, port, conn)
+                break
+            except (
+                http.client.RemoteDisconnected,
+                http.client.BadStatusLine,
+                http.client.CannotSendRequest,
+                http.client.ResponseNotReady,
+                ConnectionResetError,
+                BrokenPipeError,
+                OSError,
+            ) as exc:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                if is_reused and retry_stale == 0:
+                    continue
+                raise urllib.error.URLError(exc) from exc
+            except http.client.HTTPException as exc:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                raise urllib.error.URLError(exc) from exc
 
     content_encoding = (resp_headers.get("Content-Encoding") or "").lower()
     if "gzip" in content_encoding and raw_bytes:
@@ -1641,30 +1745,37 @@ def fetch_node_schedule():
     if cached is not None:
         return cached
 
-    url = "https://raw.githubusercontent.com/nodejs/Release/main/schedule.json"
+    def _fetch():
+        with _CACHE_LOCK:
+            rechecked = _AUX_NET_CACHE.get(cache_key)
+        if rechecked is not None:
+            return rechecked
 
-    schedule = {}
-    try:
-        req = urllib.request.Request(
-            url, headers={"User-Agent": "Mozilla/5.0 (Kevlar Dependency Scanner)"}
-        )
-        with safe_urlopen(req, timeout=5) as response:
-            data = json.loads(response.read().decode("utf-8"))
-            for k, v in data.items():
-                major = k.removeprefix("v")
-                schedule[major] = {
-                    "maintenance": v.get("maintenance", "N/A"),
-                    "end": v.get("end", "N/A"),
-                }
-        if schedule:
-            with _CACHE_LOCK:
-                _AUX_NET_CACHE[cache_key] = schedule
-    except Exception as e:
-        print(
-            f"{COLOR_YELLOW}{ICON_WARN} Warning fetching Node.js release schedule: {e}{COLOR_RESET}"
-        )
+        url = "https://raw.githubusercontent.com/nodejs/Release/main/schedule.json"
+        schedule = {}
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "Mozilla/5.0 (Kevlar Dependency Scanner)"}
+            )
+            with safe_urlopen(req, timeout=5) as response:
+                data = json.loads(response.read().decode("utf-8"))
+                for k, v in data.items():
+                    major = k.removeprefix("v")
+                    schedule[major] = {
+                        "maintenance": v.get("maintenance", "N/A"),
+                        "end": v.get("end", "N/A"),
+                    }
+            if schedule:
+                with _CACHE_LOCK:
+                    _AUX_NET_CACHE[cache_key] = schedule
+        except Exception as e:
+            with console_lock:
+                print(
+                    f"{COLOR_YELLOW}{ICON_WARN} Warning fetching Node.js release schedule: {e}{COLOR_RESET}"
+                )
+        return schedule
 
-    return schedule
+    return _AUX_SINGLEFLIGHT.do(cache_key, _fetch)
 
 
 def satisfy_term(version_str, term):
@@ -1830,9 +1941,10 @@ def _check_all_targets_unified(targets, check_func, label, max_workers):
         futures = {executor.submit(check_func, t): t for t in targets}
         for future in as_completed(futures):
             completed += 1
-            with console_lock:
-                sys.stdout.write(f"\r{label}: {completed}/{total}... ")
-                sys.stdout.flush()
+            if _PARALLEL_SCAN_DEPTH == 0:
+                with console_lock:
+                    sys.stdout.write(f"\r{label}: {completed}/{total}... ")
+                    sys.stdout.flush()
             try:
                 res = future.result()
                 if isinstance(res, list):
@@ -1872,9 +1984,10 @@ def _check_all_targets_unified(targets, check_func, label, max_workers):
                         }
                     )
 
-    with console_lock:
-        sys.stdout.write("\r\033[K")
-        sys.stdout.flush()
+    if _PARALLEL_SCAN_DEPTH == 0:
+        with console_lock:
+            sys.stdout.write("\r\033[K")
+            sys.stdout.flush()
     return results
 
 
@@ -3265,17 +3378,8 @@ def check_npm_package(target):
     results = []
 
     try:
-        # Check package-level metadata cache (compact projection to minimize RAM)
-        cached_meta = _get_cached_registry_metadata("npm", name)
-        if cached_meta is not None:
-            (
-                latest_version,
-                all_versions,
-                deprecated_map,
-                dist_hashes_map,
-                inline_repo_url,
-            ) = cached_meta
-        else:
+        # Check package-level metadata cache with in-flight singleflight deduplication
+        def _fetch_npm_meta():
             # Properly URL-encode scoped packages (e.g. @babel/core -> @babel%2Fcore)
             if name.startswith("@"):
                 parts = name.split("/")
@@ -3294,36 +3398,34 @@ def check_npm_package(target):
             with safe_urlopen(req, timeout=10) as response:
                 data = json.loads(response.read().decode("utf-8"))
 
-            latest_version = data.get("dist-tags", {}).get("latest")
+            lv = data.get("dist-tags", {}).get("latest")
             raw_versions_meta = data.get("versions") or {}
-            all_versions = tuple(raw_versions_meta.keys())
-            deprecated_map = {}
-            dist_hashes_map = {}
+            av = tuple(raw_versions_meta.keys())
+            d_map = {}
+            h_map = {}
             for v_key, v_meta in raw_versions_meta.items():
                 if not isinstance(v_meta, dict):
                     continue
                 dep_val = v_meta.get("deprecated")
                 if dep_val:
-                    deprecated_map[v_key] = dep_val
+                    d_map[v_key] = dep_val
                 dist_val = v_meta.get("dist")
                 if isinstance(dist_val, dict):
                     r_int = dist_val.get("integrity") or ""
                     r_sha = dist_val.get("shasum") or ""
                     if r_int or r_sha:
-                        dist_hashes_map[v_key] = (r_int, r_sha)
-            inline_repo_url = clean_repo_url(data.get("repository"))
+                        h_map[v_key] = (r_int, r_sha)
+            repo_u = clean_repo_url(data.get("repository"))
             del raw_versions_meta, data
-            _set_cached_registry_metadata(
-                "npm",
-                name,
-                (
-                    latest_version,
-                    all_versions,
-                    deprecated_map,
-                    dist_hashes_map,
-                    inline_repo_url,
-                ),
-            )
+            return (lv, av, d_map, h_map, repo_u)
+
+        (
+            latest_version,
+            all_versions,
+            deprecated_map,
+            dist_hashes_map,
+            inline_repo_url,
+        ) = _get_or_fetch_registry_metadata("npm", name, _fetch_npm_meta)
 
         for ver_str in versions_to_check:
             # If the version itself is explicitly local, we treat it as Local/local
@@ -3625,42 +3727,69 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
     if not queries:
         return final_package_to_vulns
 
-    with console_lock:
-        print(
-            f"{COLOR_BOLD}{COLOR_CYAN}Querying OSV vulnerability database...{COLOR_RESET}\n"
-        )
+    if _PARALLEL_SCAN_DEPTH == 0:
+        with console_lock:
+            print(
+                f"{COLOR_BOLD}{COLOR_CYAN}Querying OSV vulnerability database...{COLOR_RESET}\n"
+            )
 
     results_list = []
     chunk_size = 1000
     total_queries = len(queries)
-    for i in range(0, total_queries, chunk_size):
-        chunk_queries = queries[i : i + chunk_size]
-        current_count = min(i + chunk_size, total_queries)
-        with console_lock:
-            sys.stdout.write(
-                f"\r{COLOR_GRAY}[OSV] Sending batch query: {current_count}/{total_queries} packages...{COLOR_RESET}\033[K"
-            )
-            sys.stdout.flush()
+    chunks = [
+        queries[i : i + chunk_size] for i in range(0, total_queries, chunk_size)
+    ]
+
+    def _query_osv_chunk(chunk_idx, chunk_queries):
         try:
-            url = URL_OSV_QUERYBATCH
             req = urllib.request.Request(
-                url,
+                URL_OSV_QUERYBATCH,
                 data=json.dumps({"queries": chunk_queries}).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
             )
-
             with safe_urlopen(req, timeout=15) as response:
                 res_data = json.loads(response.read().decode("utf-8"))
-
-            results_list.extend(res_data.get("results", []))
+            return chunk_idx, res_data.get("results", [])
         except Exception as e:
             with console_lock:
-                sys.stdout.write("\n")
+                if _PARALLEL_SCAN_DEPTH == 0:
+                    sys.stdout.write("\n")
                 print(
                     f"{COLOR_RED}{ICON_ERROR} Failed to query OSV database batch: {e}{COLOR_RESET}"
                 )
-            # Extend results_list with empty results to maintain index alignment with query_mapping
-            results_list.extend([{"vulns": []}] * len(chunk_queries))
+            return chunk_idx, [{"vulns": []}] * len(chunk_queries)
+
+    if len(chunks) == 1:
+        if _PARALLEL_SCAN_DEPTH == 0:
+            with console_lock:
+                sys.stdout.write(
+                    f"\r{COLOR_GRAY}[OSV] Sending batch query: {total_queries}/{total_queries} packages...{COLOR_RESET}\033[K"
+                )
+                sys.stdout.flush()
+        _, chunk_res = _query_osv_chunk(0, chunks[0])
+        results_list.extend(chunk_res)
+    else:
+        ordered_chunk_results = [None] * len(chunks)
+        sent_count = 0
+        chunk_workers = min(max(1, max_workers), len(chunks), 4)
+        with ThreadPoolExecutor(max_workers=chunk_workers) as chunk_exec:
+            futs = {
+                chunk_exec.submit(_query_osv_chunk, idx, cq): len(cq)
+                for idx, cq in enumerate(chunks)
+            }
+            for fut in as_completed(futs):
+                c_idx, c_res = fut.result()
+                ordered_chunk_results[c_idx] = c_res
+                sent_count += futs[fut]
+                if _PARALLEL_SCAN_DEPTH == 0:
+                    with console_lock:
+                        sys.stdout.write(
+                            f"\r{COLOR_GRAY}[OSV] Sending batch query: {sent_count}/{total_queries} packages...{COLOR_RESET}\033[K"
+                        )
+                        sys.stdout.flush()
+        for c_res in ordered_chunk_results:
+            if c_res:
+                results_list.extend(c_res)
 
     # Process batch results and collect compact vulnerability details
     hydrated_details = {}
@@ -3674,7 +3803,9 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
             break
         name, ver_str, clean_ver = query_mapping[i]
 
-        if i == 0 or i + 1 == total_results or (i & 63) == 0:
+        if _PARALLEL_SCAN_DEPTH == 0 and (
+            i == 0 or i + 1 == total_results or (i & 63) == 0
+        ):
             now = time.monotonic()
             if i + 1 == total_results or (now - last_progress_ts) >= 0.1:
                 last_progress_ts = now
@@ -3724,9 +3855,10 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
             package_to_vuln_ids[(name, clean_ver)] = []
 
     # Clean current line after in-memory hydration
-    with console_lock:
-        sys.stdout.write("\r\033[K")
-        sys.stdout.flush()
+    if _PARALLEL_SCAN_DEPTH == 0:
+        with console_lock:
+            sys.stdout.write("\r\033[K")
+            sys.stdout.flush()
 
     # Collect all referenced IDs (and aliases) and check existing global cache selectively
     all_vuln_ids = set()
@@ -3781,11 +3913,12 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
             for future in as_completed(futures):
                 completed += 1
                 vid = futures[future]
-                with console_lock:
-                    sys.stdout.write(
-                        f"\r{COLOR_GRAY}[Progress: {completed}/{total_orphaned}] Fetching missing advisory details for {vid}...{COLOR_RESET}\033[K"
-                    )
-                    sys.stdout.flush()
+                if _PARALLEL_SCAN_DEPTH == 0:
+                    with console_lock:
+                        sys.stdout.write(
+                            f"\r{COLOR_GRAY}[Progress: {completed}/{total_orphaned}] Fetching missing advisory details for {vid}...{COLOR_RESET}\033[K"
+                        )
+                        sys.stdout.flush()
 
                 vid_res, detail = future.result()
                 hydrated_details[vid_res] = detail
@@ -3795,9 +3928,10 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
             for vid_res, detail in fetched_orphans.items():
                 _OSV_HYDRATED_DETAILS_CACHE[vid_res] = detail
 
-        with console_lock:
-            sys.stdout.write("\r\033[K")
-            sys.stdout.flush()
+        if _PARALLEL_SCAN_DEPTH == 0:
+            with console_lock:
+                sys.stdout.write("\r\033[K")
+                sys.stdout.flush()
 
     # Pull any alias records present in global cache (without copying entire cache)
     missing_aliases = set()
@@ -3869,6 +4003,47 @@ def check_osv_vulnerabilities(targets, ecosystem, max_workers=10):
             ]
 
     return final_package_to_vulns
+
+
+def _run_registry_and_osv_parallel(
+    registry_fn,
+    targets,
+    osv_ecosystem,
+    max_workers,
+    vuls_enabled,
+    extra_tasks=None,
+):
+    """Runs registry metadata queries, OSV vulnerability batching, and optional independent network tasks concurrently."""
+    run_osv = bool(vuls_enabled and targets and osv_ecosystem)
+    extras = extra_tasks or {}
+    task_count = (
+        (1 if registry_fn is not None else 0) + (1 if run_osv else 0) + len(extras)
+    )
+    if task_count <= 1:
+        res = registry_fn() if registry_fn is not None else []
+        osv = (
+            check_osv_vulnerabilities(targets, osv_ecosystem, max_workers)
+            if run_osv
+            else {}
+        )
+        ex = {k: fn() for k, fn in extras.items()}
+        return res, osv, ex
+
+    with ThreadPoolExecutor(max_workers=task_count) as executor:
+        reg_future = executor.submit(registry_fn) if registry_fn is not None else None
+        osv_future = (
+            executor.submit(
+                check_osv_vulnerabilities, targets, osv_ecosystem, max_workers
+            )
+            if run_osv
+            else None
+        )
+        extra_futures = {k: executor.submit(fn) for k, fn in extras.items()}
+
+        results = reg_future.result() if reg_future is not None else []
+        osv_vulns = osv_future.result() if osv_future is not None else {}
+        extra_results = {k: fut.result() for k, fut in extra_futures.items()}
+    return results, osv_vulns, extra_results
 
 
 def validate_suppressions_schema(data):
@@ -4215,11 +4390,11 @@ def _check_npm_vulnerabilities(results, targets, args):
             r["vulnerabilities"] = []
 
 
-def _add_node_constraint_result(results, node_constraint):
+def _add_node_constraint_result(results, node_constraint, analysis=None):
     if not node_constraint:
         return
-    status, deprecated_msg, error_msg, recommendation = analyze_node_constraint(
-        node_constraint
+    status, deprecated_msg, error_msg, recommendation = (
+        analysis if analysis is not None else analyze_node_constraint(node_constraint)
     )
     results.append(
         {
@@ -4312,12 +4487,33 @@ def run_npm_checker(args):
         return None, None, 0
 
     start_time = time.time()
-    results = check_all_targets(targets, args.concurrent) if targets else []
+    vuls_enabled = getattr(args, "vuls", False)
+    extra_tasks = (
+        {"node": lambda: analyze_node_constraint(node_constraint)}
+        if node_constraint
+        else None
+    )
+    results, osv_vulns, extra_results = _run_registry_and_osv_parallel(
+        (lambda: check_all_targets(targets, args.concurrent)) if targets else None,
+        targets,
+        TECHNOLOGIES["npm"]["osv_ecosystem"],
+        args.concurrent,
+        vuls_enabled,
+        extra_tasks=extra_tasks,
+    )
 
     _isolate_direct_npm_results(results, pkg_data, direct_versions_lock)
     _check_npm_integrity(results, lock_file, integrity_data)
-    _check_npm_vulnerabilities(results, targets, args)
-    _add_node_constraint_result(results, node_constraint)
+    if vuls_enabled:
+        for r in results:
+            key = (r["name"], r["installed"])
+            r["vulnerabilities"] = osv_vulns.get(key, [])
+    else:
+        for r in results:
+            r["vulnerabilities"] = []
+    _add_node_constraint_result(
+        results, node_constraint, analysis=extra_results.get("node")
+    )
     _resolve_npm_dependency_types(results, pkg_data, parents_data)
 
     elapsed = time.time() - start_time
@@ -4743,10 +4939,7 @@ def check_pypi_package(target):
     results = []
 
     try:
-        cached_meta = _get_cached_registry_metadata("pip", name)
-        if cached_meta is not None:
-            latest_version, all_versions, yanked_map, repo_url_raw = cached_meta
-        else:
+        def _fetch_pypi_meta():
             encoded_name = urllib.parse.quote(name)
             url = f"{URL_PYPI_REGISTRY}{encoded_name}/json"
 
@@ -4755,23 +4948,23 @@ def check_pypi_package(target):
                 data = json.loads(response.read().decode("utf-8"))
 
             info = data.get("info", {})
-            latest_version = info.get("version")
+            lv = info.get("version")
             releases = data.get("releases") or {}
-            all_versions = tuple(releases.keys())
-            yanked_map = {}
+            av = tuple(releases.keys())
+            y_map = {}
             for r_ver, files_list in releases.items():
                 if not files_list:
                     continue
                 for file_info in files_list:
                     if isinstance(file_info, dict) and file_info.get("yanked"):
-                        yanked_map[r_ver] = (
+                        y_map[r_ver] = (
                             file_info.get("yanked_reason")
                             or "This release was yanked from PyPI."
                         )
                         break
 
             urls = info.get("project_urls") or {}
-            repo_url_raw = None
+            r_url = None
             for key in ["Source", "Repository", "Code", "Homepage"]:
                 for k, v in urls.items():
                     if (
@@ -4779,26 +4972,28 @@ def check_pypi_package(target):
                         and v
                         and is_github_url(clean_repo_url(v))
                     ):
-                        repo_url_raw = v
+                        r_url = v
                         break
-                if repo_url_raw:
+                if r_url:
                     break
-            if not repo_url_raw:
+            if not r_url:
                 hp = info.get("home_page")
                 if hp and is_github_url(clean_repo_url(hp)):
-                    repo_url_raw = hp
-            if not repo_url_raw:
+                    r_url = hp
+            if not r_url:
                 for v in urls.values():
                     if v and is_github_url(clean_repo_url(v)):
-                        repo_url_raw = v
+                        r_url = v
                         break
-            if not repo_url_raw:
-                repo_url_raw = info.get("home_page") or urls.get("Homepage")
+            if not r_url:
+                r_url = info.get("home_page") or urls.get("Homepage")
 
             del releases, data
-            _set_cached_registry_metadata(
-                "pip", name, (latest_version, all_versions, yanked_map, repo_url_raw)
-            )
+            return (lv, av, y_map, r_url)
+
+        latest_version, all_versions, yanked_map, repo_url_raw = (
+            _get_or_fetch_registry_metadata("pip", name, _fetch_pypi_meta)
+        )
 
         for ver_str in versions_to_check:
             # Clean version constraints prefixes
@@ -5285,14 +5480,16 @@ def run_pip_checker(args):
         return None, None, 0
 
     start_time = time.time()
-    results = check_all_pip_targets(targets, args.concurrent)
+    vuls_enabled = getattr(args, "vuls", False)
+    results, osv_vulns, _ = _run_registry_and_osv_parallel(
+        lambda: check_all_pip_targets(targets, args.concurrent),
+        targets,
+        TECHNOLOGIES["pip"]["osv_ecosystem"],
+        args.concurrent,
+        vuls_enabled,
+    )
 
-    if getattr(args, "vuls", False):
-        tech_info = TECHNOLOGIES["pip"]
-        osv_vulns = check_osv_vulnerabilities(
-            targets, tech_info["osv_ecosystem"], args.concurrent
-        )
-
+    if vuls_enabled:
         for r in results:
             key = (r["name"], r["installed"])
             r["vulnerabilities"] = osv_vulns.get(key, [])
@@ -5596,10 +5793,7 @@ def check_nuget_package(target):
     results = []
 
     try:
-        cached_meta = _get_cached_registry_metadata("nuget", name)
-        if cached_meta is not None:
-            valid_versions = cached_meta
-        else:
+        def _fetch_nuget_meta():
             encoded_name = urllib.parse.quote(name.lower())
             url = f"{URL_NUGET_REGISTRY}{encoded_name}/index.json"
 
@@ -5608,14 +5802,12 @@ def check_nuget_package(target):
                 data = json.loads(response.read().decode("utf-8"))
 
             versions_list = data.get("versions", [])
+            stable_versions = [v for v in versions_list if "-" not in v]
+            return tuple(stable_versions if stable_versions else versions_list)
 
-            stable_versions = []
-            for v in versions_list:
-                if "-" not in v:
-                    stable_versions.append(v)
-
-            valid_versions = stable_versions if stable_versions else versions_list
-            _set_cached_registry_metadata("nuget", name, valid_versions)
+        valid_versions = _get_or_fetch_registry_metadata(
+            "nuget", name, _fetch_nuget_meta
+        )
 
         for ver_str in versions_to_check:
             clean_ver = RE_CLEAN_VER.sub("", ver_str) if ver_str else "0.0.0"
@@ -5756,16 +5948,17 @@ def run_nuget_checker(args):
         return None, None, 0
 
     start_time = time.time()
-    results = check_all_nuget_targets(targets, args.concurrent)
+    vuls_enabled = getattr(args, "vuls", False)
+    results, osv_vulns, _ = _run_registry_and_osv_parallel(
+        lambda: check_all_nuget_targets(targets, args.concurrent),
+        targets,
+        TECHNOLOGIES["nuget"]["osv_ecosystem"],
+        args.concurrent,
+        vuls_enabled,
+    )
 
-    # Check vulnerabilities via OSV if requested
-    if getattr(args, "vuls", False):
-        tech_info = TECHNOLOGIES["nuget"]
-        osv_vulns = check_osv_vulnerabilities(
-            targets, tech_info["osv_ecosystem"], args.concurrent
-        )
-
-        # Attach vulns back to results
+    # Attach vulnerabilities from OSV if requested
+    if vuls_enabled:
         for r in results:
             key = (r["name"], r["installed"])
             r["vulnerabilities"] = osv_vulns.get(key, [])
@@ -5899,10 +6092,7 @@ def check_composer_package(target):
     results = []
 
     try:
-        cached_meta = _get_cached_registry_metadata("php", name)
-        if cached_meta is not None:
-            valid_versions, default_repo_raw, ver_repo_overrides = cached_meta
-        else:
+        def _fetch_php_meta():
             name_lower = name.lower()
             url = f"{URL_PACKAGIST_REGISTRY}{name_lower}.json"
 
@@ -5914,13 +6104,13 @@ def check_composer_package(target):
             pkg_data = packages.get(name_lower, [])
 
             versions_list = []
-            default_repo_raw = None
-            ver_repo_overrides = {}
+            def_repo = None
+            v_overrides = {}
             if pkg_data:
                 first_item = pkg_data[0]
-                default_repo_raw = (first_item.get("source") or {}).get(
-                    "url"
-                ) or first_item.get("homepage")
+                def_repo = (first_item.get("source") or {}).get("url") or first_item.get(
+                    "homepage"
+                )
 
             for item in pkg_data:
                 v_str = item.get("version")
@@ -5932,10 +6122,10 @@ def check_composer_package(target):
                     )
                     if (
                         item_repo
-                        and item_repo != default_repo_raw
-                        and v_clean not in ver_repo_overrides
+                        and item_repo != def_repo
+                        and v_clean not in v_overrides
                     ):
-                        ver_repo_overrides[v_clean] = item_repo
+                        v_overrides[v_clean] = item_repo
 
             stable_versions = []
             for v in versions_list:
@@ -5945,11 +6135,13 @@ def check_composer_package(target):
                 ) and RE_DECIMAL_VER_STRICT.match(v):
                     stable_versions.append(v)
 
-            valid_versions = tuple(stable_versions if stable_versions else versions_list)
+            vv = tuple(stable_versions if stable_versions else versions_list)
             del pkg_data, packages, data
-            _set_cached_registry_metadata(
-                "php", name, (valid_versions, default_repo_raw, ver_repo_overrides)
-            )
+            return (vv, def_repo, v_overrides)
+
+        valid_versions, default_repo_raw, ver_repo_overrides = (
+            _get_or_fetch_registry_metadata("php", name, _fetch_php_meta)
+        )
 
         for ver_str in versions_to_check:
             clean_ver = ver_str.lstrip("v") if ver_str else "0.0.0"
@@ -6087,16 +6279,17 @@ def run_composer_checker(args):
         return None, None, 0
 
     start_time = time.time()
-    results = check_all_composer_targets(targets, args.concurrent)
+    vuls_enabled = getattr(args, "vuls", False)
+    results, osv_vulns, _ = _run_registry_and_osv_parallel(
+        lambda: check_all_composer_targets(targets, args.concurrent),
+        targets,
+        TECHNOLOGIES["php"]["osv_ecosystem"],
+        args.concurrent,
+        vuls_enabled,
+    )
 
-    # Check vulnerabilities via OSV if requested
-    if getattr(args, "vuls", False):
-        tech_info = TECHNOLOGIES["php"]
-        osv_vulns = check_osv_vulnerabilities(
-            targets, tech_info["osv_ecosystem"], args.concurrent
-        )
-
-        # Attach vulns back to results
+    # Attach vulnerabilities from OSV if requested
+    if vuls_enabled:
         for r in results:
             key = (r["name"], r["installed"])
             r["vulnerabilities"] = osv_vulns.get(key, [])
@@ -6472,40 +6665,47 @@ def fetch_remote_maven_pom(group_id, artifact_id, version, custom_registries=Non
         if cache_key in _MAVEN_REMOTE_POM_CACHE:
             return _MAVEN_REMOTE_POM_CACHE[cache_key]
 
-    group_path = group_id.replace(".", "/")
-    use_google_maven = (
-        group_id.startswith(
-            ("androidx.", "com.google.android.", "com.android.", "android.arch.")
+    def _fetch_pom():
+        with _CACHE_LOCK:
+            if cache_key in _MAVEN_REMOTE_POM_CACHE:
+                return _MAVEN_REMOTE_POM_CACHE[cache_key]
+
+        group_path = group_id.replace(".", "/")
+        use_google_maven = (
+            group_id.startswith(
+                ("androidx.", "com.google.android.", "com.android.", "android.arch.")
+            )
+            or "android" in group_id
         )
-        or "android" in group_id
-    )
-    base_registries = (
-        [URL_GOOGLE_MAVEN, URL_MAVEN_REGISTRY]
-        if use_google_maven
-        else [URL_MAVEN_REGISTRY, URL_GOOGLE_MAVEN]
-    )
-    registries = []
-    if custom_registries:
-        for r in custom_registries:
+        base_registries = (
+            [URL_GOOGLE_MAVEN, URL_MAVEN_REGISTRY]
+            if use_google_maven
+            else [URL_MAVEN_REGISTRY, URL_GOOGLE_MAVEN]
+        )
+        registries = []
+        if custom_registries:
+            for r in custom_registries:
+                if r not in registries:
+                    registries.append(r)
+        for r in base_registries:
             if r not in registries:
                 registries.append(r)
-    for r in base_registries:
-        if r not in registries:
-            registries.append(r)
 
-    root = None
-    for registry_url in registries:
-        url = f"{registry_url}{group_path}/{artifact_id}/{version}/{artifact_id}-{version}.pom"
-        try:
-            root = _fetch_registry_json_or_xml(url, format="xml")
-            if root is not None:
-                break
-        except (urllib.error.URLError, OSError, ET.ParseError, TimeoutError):
-            continue
+        root = None
+        for registry_url in registries:
+            url = f"{registry_url}{group_path}/{artifact_id}/{version}/{artifact_id}-{version}.pom"
+            try:
+                root = _fetch_registry_json_or_xml(url, format="xml")
+                if root is not None:
+                    break
+            except (urllib.error.URLError, OSError, ET.ParseError, TimeoutError):
+                continue
 
-    with _CACHE_LOCK:
-        _MAVEN_REMOTE_POM_CACHE[cache_key] = root
-    return root
+        with _CACHE_LOCK:
+            _MAVEN_REMOTE_POM_CACHE[cache_key] = root
+        return root
+
+    return _MAVEN_POM_SINGLEFLIGHT.do(cache_key, _fetch_pom)
 
 
 def resolve_maven_transitive_dependencies(
@@ -6519,6 +6719,7 @@ def resolve_maven_transitive_dependencies(
     required_by_map = {coord: set() for coord in direct_deps}
     dep_types = {coord: "Direct" for coord in direct_deps}
     visited = set()
+    visited_lock = threading.Lock()
 
     current_level = []
     for coord, ver in direct_deps.items():
@@ -6531,9 +6732,10 @@ def resolve_maven_transitive_dependencies(
 
         def _process_item(item):
             parent_coord, version = item
-            if (parent_coord, version) in visited:
-                return []
-            visited.add((parent_coord, version))
+            with visited_lock:
+                if (parent_coord, version) in visited:
+                    return []
+                visited.add((parent_coord, version))
 
             if ":" not in parent_coord:
                 return []
@@ -6697,10 +6899,7 @@ def check_maven_package(target):
         group_id, artifact_id = name.split(":", 1)
         group_path = group_id.replace(".", "/")
 
-        cached_meta = _get_cached_registry_metadata("maven", name)
-        if cached_meta is not None:
-            valid_versions, successful_registry, group_path, artifact_id = cached_meta
-        else:
+        def _fetch_maven_meta():
             use_google_maven = (
                 group_id.startswith(
                     (
@@ -6729,7 +6928,7 @@ def check_maven_package(target):
                     registries.append(r)
 
             last_error = None
-            successful_registry = URL_MAVEN_REGISTRY
+            succ_reg = URL_MAVEN_REGISTRY
             for registry_url in registries:
                 url = f"{registry_url}{group_path}/{artifact_id}/maven-metadata.xml"
                 try:
@@ -6737,9 +6936,10 @@ def check_maven_package(target):
                     req.add_header("User-Agent", f"Kevlar-CheckDeps/{VERSION}")
                     with safe_urlopen(req, timeout=10) as response:
                         xml_data = response.read()
-                    successful_registry = registry_url
+                    succ_reg = registry_url
                     break
                 except Exception as e:
+                    _close_http_error(e)
                     last_error = e
                     continue
 
@@ -6767,6 +6967,7 @@ def check_maven_package(target):
                         if v_val:
                             versions_list.append(str(v_val))
                 except Exception as solr_err:
+                    _close_http_error(solr_err)
                     last_error = solr_err
 
             if not versions_list:
@@ -6787,12 +6988,12 @@ def check_maven_package(target):
                 if not is_prerelease:
                     stable_versions.append(v)
 
-            valid_versions = stable_versions if stable_versions else versions_list
-            _set_cached_registry_metadata(
-                "maven",
-                name,
-                (valid_versions, successful_registry, group_path, artifact_id),
-            )
+            vv = tuple(stable_versions if stable_versions else versions_list)
+            return (vv, succ_reg, group_path, artifact_id)
+
+        valid_versions, successful_registry, group_path, artifact_id = (
+            _get_or_fetch_registry_metadata("maven", name, _fetch_maven_meta)
+        )
 
         for ver_str in versions_to_check:
             clean_ver = RE_CLEAN_VER.sub("", ver_str) if ver_str else "0.0.0"
@@ -7072,20 +7273,20 @@ def run_maven_checker(args):
         return None, None, 0
 
     start_time = time.time()
-    results = (
-        check_all_maven_targets(remote_targets, args.concurrent)
+    vuls_enabled = bool(getattr(args, "vuls", False) and remote_targets)
+    results, osv_vulns, _ = _run_registry_and_osv_parallel(
+        (lambda: check_all_maven_targets(remote_targets, args.concurrent))
         if remote_targets
-        else []
+        else None,
+        remote_targets,
+        TECHNOLOGIES["maven"]["osv_ecosystem"],
+        args.concurrent,
+        vuls_enabled,
     )
     results.extend(local_results)
 
-    # Check vulnerabilities via OSV if requested
-    if getattr(args, "vuls", False) and remote_targets:
-        tech_info = TECHNOLOGIES["maven"]
-        osv_vulns = check_osv_vulnerabilities(
-            remote_targets, tech_info["osv_ecosystem"], args.concurrent
-        )
-
+    # Attach vulnerabilities from OSV if requested
+    if vuls_enabled:
         for r in results:
             if r["status"] != "local":
                 key = (r["name"], r["installed"])
@@ -7350,10 +7551,7 @@ def check_go_package(target):
     results = []
 
     try:
-        cached_meta = _get_cached_registry_metadata("go", name)
-        if cached_meta is not None:
-            versions_list = cached_meta
-        else:
+        def _fetch_go_meta():
             candidate_name = name
             resp_data = None
 
@@ -7367,12 +7565,14 @@ def check_go_package(target):
                     break
                 except urllib.error.HTTPError as err:
                     if err.code == 404 and "/" in candidate_name:
+                        _close_http_error(err)
                         candidate_name = candidate_name.rsplit("/", 1)[0]
                     else:
                         raise
 
-            versions_list = [v.strip() for v in resp_data.split("\n") if v.strip()]
-            _set_cached_registry_metadata("go", name, versions_list)
+            return tuple(v.strip() for v in resp_data.split("\n") if v.strip())
+
+        versions_list = _get_or_fetch_registry_metadata("go", name, _fetch_go_meta)
 
         stable_versions = []
         for v in versions_list:
@@ -7503,6 +7703,7 @@ def resolve_go_parent_graph(direct_deps, max_workers=10):
     def _fetch_single_mod(item):
         nonlocal completed
         name, ver = item
+        local_children = set()
         if name and ver:
             try:
                 esc = escape_go_module(name)
@@ -7533,36 +7734,42 @@ def resolve_go_parent_graph(direct_deps, max_workers=10):
 
                     parts = line_content.split()
                     if in_require_block and len(parts) >= 2:
-                        child_pkg = parts[0]
-                        parents.setdefault(child_pkg, set()).add(name)
+                        local_children.add(parts[0])
                     elif (
                         not in_require_block
                         and line_content.startswith("require")
                         and len(parts) >= 3
                     ):
-                        child_pkg = parts[1]
-                        parents.setdefault(child_pkg, set()).add(name)
+                        local_children.add(parts[1])
             except (OSError, UnicodeDecodeError, IndexError):
                 pass
 
         with lock:
+            for child_pkg in local_children:
+                parents.setdefault(child_pkg, set()).add(name)
             completed += 1
             pct = int((completed / total) * 100)
+            if _PARALLEL_SCAN_DEPTH == 0:
+                with console_lock:
+                    sys.stdout.write(
+                        f"\r{COLOR_GRAY}{ICON_INFO} Resolving parent dependency graph for Go modules: {completed}/{total} ({pct}%)...{COLOR_RESET}"
+                    )
+                    sys.stdout.flush()
+
+    if _PARALLEL_SCAN_DEPTH == 0:
+        with console_lock:
             sys.stdout.write(
-                f"\r{COLOR_GRAY}{ICON_INFO} Resolving parent dependency graph for Go modules: {completed}/{total} ({pct}%)...{COLOR_RESET}"
+                f"{COLOR_GRAY}{ICON_INFO} Resolving parent dependency graph for Go modules: 0/{total} (0%)...{COLOR_RESET}"
             )
             sys.stdout.flush()
 
-    sys.stdout.write(
-        f"{COLOR_GRAY}{ICON_INFO} Resolving parent dependency graph for Go modules: 0/{total} (0%)...{COLOR_RESET}"
-    )
-    sys.stdout.flush()
-
     with ThreadPoolExecutor(max_workers=min(max_workers, 15)) as executor:
-        executor.map(_fetch_single_mod, direct_deps.items())
+        list(executor.map(_fetch_single_mod, direct_deps.items()))
 
-    sys.stdout.write("\n")
-    sys.stdout.flush()
+    if _PARALLEL_SCAN_DEPTH == 0:
+        with console_lock:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
     return parents
 
 
@@ -7589,49 +7796,22 @@ def parse_go_sum(filepath):
     return checksums
 
 
-def verify_go_checksums(results, go_sum_path, max_workers=10):
-    """Verifies local go.sum entries against sum.golang.org Checksum Database."""
-    has_sum_file = (
-        os.path.exists(go_sum_path)
-        if (go_sum_path and os.path.exists(go_sum_path))
-        else False
-    )
-    local_checksums = parse_go_sum(go_sum_path) if has_sum_file else {}
-
-    if not has_sum_file:
-        for r in results:
-            if r.get("status") != "local":
-                r["missing_checksum"] = True
-        return
-
-    items_to_verify = []
-    for r in results:
-        if r.get("status") == "local":
-            continue
-        name = r["name"]
-        installed = r.get("installed") or r.get("declared")
-        if isinstance(installed, list):
-            installed = installed[0] if installed else None
-
-        if not installed:
-            continue
-
-        key = (name, installed)
-        if key not in local_checksums:
-            r["missing_checksum"] = True
-        else:
-            items_to_verify.append((r, name, installed, local_checksums[key]))
-
+def _fetch_go_checksum_statuses(items_to_verify, max_workers=10):
+    """Concurrently verifies (name, ver, local_hash) entries against sum.golang.org.
+    Returns dict mapping (name, ver) -> 'verified' | 'mismatch'.
+    """
     total = len(items_to_verify)
     if total == 0:
-        return
+        return {}
 
+    statuses = {}
     completed = 0
     lock = threading.Lock()
 
     def _verify_single(item):
         nonlocal completed
-        r, name, ver, local_hash = item
+        name, ver, local_hash = item
+        outcome = None
         try:
             esc = escape_go_module(name)
             url = f"https://sum.golang.org/lookup/{esc}@{ver}"
@@ -7649,30 +7829,86 @@ def verify_go_checksums(results, go_sum_path, max_workers=10):
             if official_hash and (
                 f"h1:{official_hash}" != local_hash and official_hash != local_hash
             ):
-                r["mismatch_checksum"] = True
+                outcome = "mismatch"
             elif official_hash:
-                r["checksum_verified"] = True
+                outcome = "verified"
         except (urllib.error.URLError, OSError, ValueError, TimeoutError):
             pass
 
         with lock:
+            if outcome:
+                statuses[(name, ver)] = outcome
             completed += 1
             pct = int((completed / total) * 100)
+            if _PARALLEL_SCAN_DEPTH == 0:
+                with console_lock:
+                    sys.stdout.write(
+                        f"\r{COLOR_GRAY}{ICON_INFO} Verifying go.sum checksums against sum.golang.org: {completed}/{total} ({pct}%)...{COLOR_RESET}"
+                    )
+                    sys.stdout.flush()
+
+    if _PARALLEL_SCAN_DEPTH == 0:
+        with console_lock:
             sys.stdout.write(
-                f"\r{COLOR_GRAY}{ICON_INFO} Verifying go.sum checksums against sum.golang.org: {completed}/{total} ({pct}%)...{COLOR_RESET}"
+                f"{COLOR_GRAY}{ICON_INFO} Verifying go.sum checksums against sum.golang.org: 0/{total} (0%)...{COLOR_RESET}"
             )
             sys.stdout.flush()
 
-    sys.stdout.write(
-        f"{COLOR_GRAY}{ICON_INFO} Verifying go.sum checksums against sum.golang.org: 0/{total} (0%)...{COLOR_RESET}"
-    )
-    sys.stdout.flush()
-
     with ThreadPoolExecutor(max_workers=min(max_workers, 15)) as executor:
-        executor.map(_verify_single, items_to_verify)
+        list(executor.map(_verify_single, items_to_verify))
 
-    sys.stdout.write("\n")
-    sys.stdout.flush()
+    if _PARALLEL_SCAN_DEPTH == 0:
+        with console_lock:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+    return statuses
+
+
+def verify_go_checksums(results, go_sum_path, max_workers=10):
+    """Verifies local go.sum entries against sum.golang.org Checksum Database."""
+    has_sum_file = (
+        os.path.exists(go_sum_path)
+        if (go_sum_path and os.path.exists(go_sum_path))
+        else False
+    )
+    local_checksums = parse_go_sum(go_sum_path) if has_sum_file else {}
+
+    if not has_sum_file:
+        for r in results:
+            if r.get("status") != "local":
+                r["missing_checksum"] = True
+        return
+
+    items_to_verify = []
+    seen_verify = set()
+    rows_by_key = {}
+    for r in results:
+        if r.get("status") == "local":
+            continue
+        name = r["name"]
+        installed = r.get("installed") or r.get("declared")
+        if isinstance(installed, list):
+            installed = installed[0] if installed else None
+
+        if not installed:
+            continue
+
+        key = (name, installed)
+        if key not in local_checksums:
+            r["missing_checksum"] = True
+        else:
+            rows_by_key.setdefault(key, []).append(r)
+            if key not in seen_verify:
+                seen_verify.add(key)
+                items_to_verify.append((name, installed, local_checksums[key]))
+
+    statuses = _fetch_go_checksum_statuses(items_to_verify, max_workers=max_workers)
+    for key, outcome in statuses.items():
+        for r in rows_by_key.get(key, ()):
+            if outcome == "mismatch":
+                r["mismatch_checksum"] = True
+            elif outcome == "verified":
+                r["checksum_verified"] = True
 
 
 def run_go_checker(args):
@@ -7784,19 +8020,54 @@ def run_go_checker(args):
                 }
             )
 
-    start_time = time.time()
-    results = check_all_go_targets(targets, args.concurrent) if targets else []
-    results.extend(local_results)
+    # Locate and parse go.sum locally so checksum lookups can overlap with registry, OSV, and parent graph
+    sum_file = None
+    if os.path.isdir(args.path):
+        cand_sum = os.path.join(args.path, "go.sum")
+        if os.path.exists(cand_sum):
+            sum_file = cand_sum
+    elif os.path.isfile(args.path):
+        cand_sum = os.path.join(os.path.dirname(args.path), "go.sum")
+        if os.path.exists(cand_sum):
+            sum_file = cand_sum
 
-    # Check vulnerabilities via OSV if requested
-    if getattr(args, "vuls", False):
-        tech_info = TECHNOLOGIES["go"]
-        osv_vulns = check_osv_vulnerabilities(
-            [t for t in targets if t.get("installed")],
-            tech_info["osv_ecosystem"],
-            args.concurrent,
+    has_sum_file = bool(sum_file and os.path.exists(sum_file))
+    local_checksums = parse_go_sum(sum_file) if has_sum_file else {}
+    checksum_items = []
+    if has_sum_file:
+        seen_ck = set()
+        for t in targets:
+            t_name = t["name"]
+            t_inst = t["installed"][0] if t.get("installed") else t.get("declared")
+            if t_inst and (t_name, t_inst) in local_checksums and (t_name, t_inst) not in seen_ck:
+                seen_ck.add((t_name, t_inst))
+                checksum_items.append((t_name, t_inst, local_checksums[(t_name, t_inst)]))
+
+    start_time = time.time()
+    concurrent = getattr(args, "concurrent", 10)
+    vuls_enabled = getattr(args, "vuls", False)
+    osv_targets = [t for t in targets if t.get("installed")] if vuls_enabled else []
+
+    extra_tasks = {}
+    if all_deps:
+        extra_tasks["parents"] = lambda: resolve_go_parent_graph(all_deps, concurrent)
+    if checksum_items:
+        extra_tasks["checksums"] = lambda: _fetch_go_checksum_statuses(
+            checksum_items, max_workers=concurrent
         )
 
+    results, osv_vulns, extra_results = _run_registry_and_osv_parallel(
+        (lambda: check_all_go_targets(targets, concurrent)) if targets else None,
+        osv_targets,
+        TECHNOLOGIES["go"]["osv_ecosystem"],
+        concurrent,
+        vuls_enabled,
+        extra_tasks=extra_tasks,
+    )
+    results.extend(local_results)
+
+    # Attach vulnerabilities from OSV if requested
+    if vuls_enabled:
         for r in results:
             key = (r["name"], r["installed"])
             r["vulnerabilities"] = osv_vulns.get(key, [])
@@ -7811,8 +8082,7 @@ def run_go_checker(args):
         for r in results:
             r["vulnerabilities"] = []
 
-    # Resolve exact parent dependency tree via GOPROXY
-    parent_map = resolve_go_parent_graph(all_deps, getattr(args, "concurrent", 10))
+    parent_map = extra_results.get("parents", {})
 
     direct_keys = set(all_deps.keys())
     for r in results:
@@ -7827,18 +8097,30 @@ def run_go_checker(args):
             r["dep_type"] = "Direct"
             r["required_by"] = []
 
-    # Verify go.sum checksums against sum.golang.org
-    sum_file = None
-    if os.path.isdir(args.path):
-        cand_sum = os.path.join(args.path, "go.sum")
-        if os.path.exists(cand_sum):
-            sum_file = cand_sum
-    elif os.path.isfile(args.path):
-        cand_sum = os.path.join(os.path.dirname(args.path), "go.sum")
-        if os.path.exists(cand_sum):
-            sum_file = cand_sum
-
-    verify_go_checksums(results, sum_file, getattr(args, "concurrent", 10))
+    # Apply go.sum checksum verification outcomes
+    checksum_statuses = extra_results.get("checksums", {})
+    if not has_sum_file:
+        for r in results:
+            if r.get("status") != "local":
+                r["missing_checksum"] = True
+    else:
+        for r in results:
+            if r.get("status") == "local":
+                continue
+            r_inst = r.get("installed") or r.get("declared")
+            if isinstance(r_inst, list):
+                r_inst = r_inst[0] if r_inst else None
+            if not r_inst:
+                continue
+            ck_key = (r["name"], r_inst)
+            if ck_key not in local_checksums:
+                r["missing_checksum"] = True
+            else:
+                outcome = checksum_statuses.get(ck_key)
+                if outcome == "mismatch":
+                    r["mismatch_checksum"] = True
+                elif outcome == "verified":
+                    r["checksum_verified"] = True
 
     elapsed = time.time() - start_time
 
@@ -8137,14 +8419,14 @@ def check_rust_package(target):
         return results
 
     try:
-        cached_meta = _get_cached_registry_metadata("rust", name)
-        if cached_meta is not None:
-            all_versions, yanked_versions, latest_version, repo_url_raw = cached_meta
-        else:
-            all_versions = []
-            yanked_versions = set()
-            repo_url_raw = None
-            latest_version = None
+        class _RustCrateNotFound(Exception):
+            pass
+
+        def _fetch_rust_meta():
+            av = []
+            yv = set()
+            r_url = None
+            lv = None
 
             # 1. Primary: Fast official CDN Cargo sparse index (no rate limits)
             url_index = get_crates_index_url(name)
@@ -8160,36 +8442,17 @@ def check_rust_package(target):
                             v_data = json.loads(line)
                             v_num = v_data.get("vers")
                             if v_num:
-                                all_versions.append(v_num)
+                                av.append(v_num)
                                 if v_data.get("yanked"):
-                                    yanked_versions.add(v_num)
+                                    yv.add(v_num)
                         except (json.JSONDecodeError, KeyError, ValueError):
                             pass
-                    if all_versions:
+                    if av:
                         fetched_index = True
             except urllib.error.HTTPError as e:
                 _close_http_error(e)
                 if e.code == 404:
-                    # Private/internal crate not in public crates.io index
-                    for ver_str in versions_to_check:
-                        results.append(
-                            {
-                                "name": name,
-                                "declared": declared,
-                                "installed": ver_str,
-                                "latest": "Local",
-                                "latest_same_major": None,
-                                "latest_absolute": None,
-                                "status": "local",
-                                "deprecated": None,
-                                "error": None,
-                                "repo_url": None,
-                                "compare_url": None,
-                                "releases_url": None,
-                            }
-                        )
-                    _set_cached_target_result("rust", target, results)
-                    return results
+                    raise _RustCrateNotFound()
             except (urllib.error.URLError, OSError, TimeoutError):
                 pass
 
@@ -8203,25 +8466,45 @@ def check_rust_package(target):
                     data = json.loads(response.read().decode("utf-8"))
 
                 crate_info = data.get("crate", {})
-                latest_version = crate_info.get("max_stable_version") or crate_info.get(
+                lv = crate_info.get("max_stable_version") or crate_info.get(
                     "max_version"
                 )
-                repo_url_raw = crate_info.get("repository") or crate_info.get(
-                    "homepage"
-                )
+                r_url = crate_info.get("repository") or crate_info.get("homepage")
 
                 versions_meta = data.get("versions", [])
                 for v_meta in versions_meta:
                     if v_meta.get("yanked"):
-                        yanked_versions.add(v_meta.get("num"))
+                        yv.add(v_meta.get("num"))
 
-                all_versions = [v.get("num") for v in versions_meta if v.get("num")]
+                av = [v.get("num") for v in versions_meta if v.get("num")]
 
-            _set_cached_registry_metadata(
-                "rust",
-                name,
-                (all_versions, yanked_versions, latest_version, repo_url_raw),
+            return (tuple(av), frozenset(yv), lv, r_url)
+
+        try:
+            all_versions, yanked_versions, latest_version, repo_url_raw = (
+                _get_or_fetch_registry_metadata("rust", name, _fetch_rust_meta)
             )
+        except _RustCrateNotFound:
+            # Private/internal crate not in public crates.io index
+            for ver_str in versions_to_check:
+                results.append(
+                    {
+                        "name": name,
+                        "declared": declared,
+                        "installed": ver_str,
+                        "latest": "Local",
+                        "latest_same_major": None,
+                        "latest_absolute": None,
+                        "status": "local",
+                        "deprecated": None,
+                        "error": None,
+                        "repo_url": None,
+                        "compare_url": None,
+                        "releases_url": None,
+                    }
+                )
+            _set_cached_target_result("rust", target, results)
+            return results
 
         for ver_str in versions_to_check:
             clean_ver = RE_CLEAN_VER.sub("", ver_str) if ver_str else "0.0.0"
@@ -8408,15 +8691,17 @@ def run_rust_checker(args):
         return None, None, 0
 
     start_time = time.time()
-    results = check_all_rust_targets(targets, args.concurrent)
+    vuls_enabled = getattr(args, "vuls", False)
+    results, osv_vulns, _ = _run_registry_and_osv_parallel(
+        lambda: check_all_rust_targets(targets, args.concurrent),
+        targets,
+        TECHNOLOGIES["rust"]["osv_ecosystem"],
+        args.concurrent,
+        vuls_enabled,
+    )
 
-    # Check vulnerabilities via OSV if requested
-    if getattr(args, "vuls", False):
-        tech_info = TECHNOLOGIES["rust"]
-        osv_vulns = check_osv_vulnerabilities(
-            targets, tech_info["osv_ecosystem"], args.concurrent
-        )
-
+    # Attach vulnerabilities from OSV if requested
+    if vuls_enabled:
         for r in results:
             key = (r["name"], r["installed"])
             r["vulnerabilities"] = osv_vulns.get(key, [])
@@ -8582,11 +8867,8 @@ def check_ruby_package(target):
     results = []
 
     try:
-        cached_meta = _get_cached_registry_metadata("ruby", name)
-        if cached_meta is not None:
-            valid_versions, repo_url_raw = cached_meta
-        else:
-            repo_url_raw = None
+        def _fetch_ruby_meta():
+            r_url = None
             try:
                 url_versions = f"https://rubygems.org/api/v1/versions/{urllib.parse.quote(name)}.json"
                 req_v = urllib.request.Request(url_versions)
@@ -8601,22 +8883,23 @@ def check_ruby_package(target):
                         all_versions.append(v_num)
                         if not item.get("prerelease"):
                             stable_versions.append(v_num)
-                valid_versions = stable_versions if stable_versions else all_versions
+                vv = stable_versions if stable_versions else all_versions
             except urllib.error.HTTPError as e:
                 if e.code == 404:
                     raise
+                _close_http_error(e)
                 try:
                     url_fallback = f"{URL_RUBY_REGISTRY}{urllib.parse.quote(name)}.json"
                     req_fb = urllib.request.Request(url_fallback)
                     with safe_urlopen(req_fb, timeout=10) as response:
                         data_fb = json.loads(response.read().decode("utf-8"))
                     latest_version = data_fb.get("version")
-                    valid_versions = [latest_version] if latest_version else []
-                    repo_url_raw = data_fb.get("source_code_uri") or data_fb.get(
+                    vv = [latest_version] if latest_version else []
+                    r_url = data_fb.get("source_code_uri") or data_fb.get(
                         "homepage_uri"
                     )
                 except Exception:
-                    valid_versions = []
+                    vv = []
             except Exception:
                 # Fallback to single latest version endpoint
                 try:
@@ -8625,14 +8908,18 @@ def check_ruby_package(target):
                     with safe_urlopen(req_fb, timeout=10) as response:
                         data_fb = json.loads(response.read().decode("utf-8"))
                     latest_version = data_fb.get("version")
-                    valid_versions = [latest_version] if latest_version else []
-                    repo_url_raw = data_fb.get("source_code_uri") or data_fb.get(
+                    vv = [latest_version] if latest_version else []
+                    r_url = data_fb.get("source_code_uri") or data_fb.get(
                         "homepage_uri"
                     )
                 except Exception:
-                    valid_versions = []
+                    vv = []
 
-            _set_cached_registry_metadata("ruby", name, (valid_versions, repo_url_raw))
+            return (tuple(vv), r_url)
+
+        valid_versions, repo_url_raw = _get_or_fetch_registry_metadata(
+            "ruby", name, _fetch_ruby_meta
+        )
 
         for ver_str in versions_to_check:
             clean_ver = RE_CLEAN_VER.sub("", ver_str) if ver_str else "0.0.0"
@@ -8795,15 +9082,17 @@ def run_ruby_checker(args):
         return None, None, 0
 
     start_time = time.time()
-    results = check_all_ruby_targets(targets, args.concurrent)
+    vuls_enabled = getattr(args, "vuls", False)
+    results, osv_vulns, _ = _run_registry_and_osv_parallel(
+        lambda: check_all_ruby_targets(targets, args.concurrent),
+        targets,
+        TECHNOLOGIES["ruby"]["osv_ecosystem"],
+        args.concurrent,
+        vuls_enabled,
+    )
 
-    # Check vulnerabilities via OSV if requested
-    if getattr(args, "vuls", False):
-        tech_info = TECHNOLOGIES["ruby"]
-        osv_vulns = check_osv_vulnerabilities(
-            targets, tech_info["osv_ecosystem"], args.concurrent
-        )
-
+    # Attach vulnerabilities from OSV if requested
+    if vuls_enabled:
         for r in results:
             key = (r["name"], r["installed"])
             r["vulnerabilities"] = osv_vulns.get(key, [])
@@ -9069,16 +9358,18 @@ def run_gradle_checker(args):
         return None, None, 0
 
     start_time = time.time()
-    # Reuses Maven Central checking logic
-    results = check_all_maven_targets(targets, args.concurrent)
+    # Reuses Maven Central checking logic in parallel with OSV if enabled
+    vuls_enabled = getattr(args, "vuls", False)
+    results, osv_vulns, _ = _run_registry_and_osv_parallel(
+        lambda: check_all_maven_targets(targets, args.concurrent),
+        targets,
+        TECHNOLOGIES["gradle"]["osv_ecosystem"],
+        args.concurrent,
+        vuls_enabled,
+    )
 
-    # Check vulnerabilities via OSV if requested
-    if getattr(args, "vuls", False):
-        tech_info = TECHNOLOGIES["gradle"]
-        osv_vulns = check_osv_vulnerabilities(
-            targets, tech_info["osv_ecosystem"], args.concurrent
-        )
-
+    # Attach vulnerabilities from OSV if requested
+    if vuls_enabled:
         for r in results:
             key = (r["name"], r["installed"])
             r["vulnerabilities"] = osv_vulns.get(key, [])
@@ -12829,13 +13120,14 @@ def populate_remediation_recommendations(results, default_project_path):
     }
 
     for idx, r in enumerate(results, 1):
-        if total_items > 0:
+        if total_items > 0 and _PARALLEL_SCAN_DEPTH == 0:
             pct = int((idx / total_items) * 100)
             if pct != last_reported_pct or idx == total_items or idx % 25 == 0:
-                sys.stdout.write(
-                    f"\r{COLOR_GRAY}{ICON_INFO} Processing results: {pct}% ({idx}/{total_items} packages)...{COLOR_RESET}"
-                )
-                sys.stdout.flush()
+                with console_lock:
+                    sys.stdout.write(
+                        f"\r{COLOR_GRAY}{ICON_INFO} Processing results: {pct}% ({idx}/{total_items} packages)...{COLOR_RESET}"
+                    )
+                    sys.stdout.flush()
                 last_reported_pct = pct
 
         r["remediation"] = None
@@ -12980,11 +13272,12 @@ def populate_remediation_recommendations(results, default_project_path):
             if manifest_missing:
                 r["manifest_missing"] = True
 
-    if total_items > 0:
-        sys.stdout.write(
-            f"\r{COLOR_GRAY}{ICON_INFO} Processing results: 100% ({total_items}/{total_items} packages)... Done.{COLOR_RESET}\n"
-        )
-        sys.stdout.flush()
+    if total_items > 0 and _PARALLEL_SCAN_DEPTH == 0:
+        with console_lock:
+            sys.stdout.write(
+                f"\r{COLOR_GRAY}{ICON_INFO} Processing results: 100% ({total_items}/{total_items} packages)... Done.{COLOR_RESET}\n"
+            )
+            sys.stdout.flush()
 
 
 # Compressed embedded HTML Report Template (gzip + base64)
@@ -14287,6 +14580,77 @@ Examples:
     return parser
 
 
+@dataclass(slots=True)
+class _ScanTask:
+    index: int
+    project_path: str
+    tech: str
+    task_args: Any
+
+
+@dataclass(slots=True)
+class _ScanTaskOutcome:
+    index: int
+    project_path: str
+    tech: str
+    results: Optional[List[Dict[str, Any]]]
+    pkg_data: Optional[Dict[str, Any]]
+    elapsed: float
+    error: Optional[Exception] = None
+
+
+def _clone_args_for_task(args, path=None, tech=None, concurrent=None):
+    """Creates an isolated argparse.Namespace copy so concurrent tasks never mutate shared args."""
+    cloned = argparse.Namespace(**vars(args))
+    if path is not None:
+        cloned.path = path
+    if tech is not None:
+        cloned.tech = tech
+    if concurrent is not None:
+        cloned.concurrent = concurrent
+    return cloned
+
+
+def _execute_scan_all_task(task: _ScanTask) -> _ScanTaskOutcome:
+    """Runs a single (project_path, technology) scan task in isolation."""
+    tech_info = TECHNOLOGIES[task.tech]
+    try:
+        results, pkg_data, elapsed = tech_info["runner"](task.task_args)
+        if results:
+            for r in results:
+                r["project_path"] = task.project_path
+                r["technology"] = task.tech
+            populate_remediation_recommendations(results, task.project_path)
+            validate_configuration_drift(results)
+            results = sorted(
+                results,
+                key=lambda x: (
+                    x["name"].lower(),
+                    str(x.get("installed") or ""),
+                    str(x.get("project_path") or ""),
+                ),
+            )
+        return _ScanTaskOutcome(
+            index=task.index,
+            project_path=task.project_path,
+            tech=task.tech,
+            results=results,
+            pkg_data=pkg_data,
+            elapsed=elapsed,
+            error=None,
+        )
+    except Exception as exc:
+        return _ScanTaskOutcome(
+            index=task.index,
+            project_path=task.project_path,
+            tech=task.tech,
+            results=None,
+            pkg_data=None,
+            elapsed=0.0,
+            error=exc,
+        )
+
+
 def run_scan_all(args, parser):
     print(
         f"{COLOR_GRAY}{ICON_INFO} Scanning recursively for projects in: {args.path}{COLOR_RESET}"
@@ -14318,107 +14682,164 @@ def run_scan_all(args, parser):
     combined_dependencies = {}
     combined_devDependencies = {}
     combined_all_direct = {}
-    total_elapsed = 0.0
     sarif_runs = []
 
     original_path = args.path
-    original_tech = getattr(args, "tech", None)
-
     generated_report_basenames = set()
 
-    for project_path, techs in projects:
-        for tech in techs:
-            tech_info = TECHNOLOGIES.get(tech)
-            if not tech_info:
-                continue
+    user_concurrent = max(1, getattr(args, "concurrent", 10))
+    raw_pairs = [
+        (project_path, tech)
+        for project_path, techs in projects
+        for tech in techs
+        if tech in TECHNOLOGIES
+    ]
+    project_workers = (
+        min(6, len(raw_pairs), user_concurrent)
+        if (len(raw_pairs) > 1 and user_concurrent > 1)
+        else 1
+    )
+    per_task_concurrent = (
+        max(2, min(user_concurrent, 8)) if project_workers > 1 else user_concurrent
+    )
 
+    tasks = [
+        _ScanTask(
+            index=idx,
+            project_path=project_path,
+            tech=tech,
+            task_args=_clone_args_for_task(
+                args,
+                path=project_path,
+                tech=tech,
+                concurrent=per_task_concurrent,
+            ),
+        )
+        for idx, (project_path, tech) in enumerate(raw_pairs)
+    ]
+
+    scan_all_start = time.time()
+
+    if project_workers > 1:
+        print(
+            f"{COLOR_GRAY}{ICON_INFO} Executing {len(tasks)} project scan task(s) across {project_workers} parallel workers...{COLOR_RESET}"
+        )
+        outcomes: List[Optional[_ScanTaskOutcome]] = [None] * len(tasks)
+        completed_tasks = 0
+        with _parallel_scan_scope():
+            with ThreadPoolExecutor(max_workers=project_workers) as executor:
+                future_map = {
+                    executor.submit(_execute_scan_all_task, task): task
+                    for task in tasks
+                }
+                for future in as_completed(future_map):
+                    outcome = future.result()
+                    outcomes[outcome.index] = outcome
+                    completed_tasks += 1
+                    with console_lock:
+                        print(
+                            f"{COLOR_GRAY}{ICON_INFO} [Scan-All] Completed {completed_tasks}/{len(tasks)}: {outcome.project_path} [{outcome.tech}] ({outcome.elapsed:.2f}s){COLOR_RESET}"
+                        )
+    else:
+        outcomes = []
+        for task in tasks:
+            print()
+            print("=" * 80)
+            print(f"Project: {task.project_path} [{task.tech}]")
+            print("=" * 80)
+            outcomes.append(_execute_scan_all_task(task))
+
+    for outcome in outcomes:
+        if outcome is None:
+            continue
+        project_path = outcome.project_path
+        tech = outcome.tech
+
+        if project_workers > 1:
             print()
             print("=" * 80)
             print(f"Project: {project_path} [{tech}]")
             print("=" * 80)
 
-            try:
-                args.path = project_path
-                args.tech = tech
-                results, pkg_data, elapsed = tech_info["runner"](args)
+        if outcome.error is not None:
+            print(
+                f"{COLOR_RED}{ICON_ERROR} Error scanning project {project_path} with {tech}: {outcome.error}{COLOR_RESET}"
+            )
+            continue
 
-                if not results:
-                    continue
+        results = outcome.results
+        pkg_data = outcome.pkg_data
+        elapsed = outcome.elapsed
 
-                for r in results:
-                    r["project_path"] = project_path
-                    r["technology"] = tech
+        if not results:
+            continue
 
-                populate_remediation_recommendations(results, project_path)
-                validate_configuration_drift(results)
-                apply_vulnerability_suppressions(
-                    results, args.suppress, project_path=project_path
-                )
-                results = sorted(results, key=lambda x: x["name"].lower())
+        try:
+            apply_vulnerability_suppressions(
+                results, args.suppress, project_path=project_path
+            )
 
-                print_results_table(
-                    results,
-                    pkg_data,
-                    args.show_all,
-                    args.vuls,
-                    getattr(args, "no_show_console", False),
-                )
-                print_summary(results, elapsed, args.vuls)
+            print_results_table(
+                results,
+                pkg_data,
+                args.show_all,
+                args.vuls,
+                getattr(args, "no_show_console", False),
+            )
+            print_summary(results, elapsed, args.vuls)
 
-                rel_path = os.path.relpath(project_path, original_path)
-                if rel_path == ".":
-                    proj_dirname = os.path.basename(os.path.abspath(project_path))
-                    if not proj_dirname:
-                        proj_dirname = "project"
+            rel_path = os.path.relpath(project_path, original_path)
+            if rel_path == ".":
+                proj_dirname = os.path.basename(os.path.abspath(project_path))
+                if not proj_dirname:
+                    proj_dirname = "project"
+            else:
+                proj_dirname = rel_path
+
+            proj_dirname = proj_dirname.replace("/", "_").replace("\\", "_")
+            # Optimization: Use global compiled regexes to avoid cache lookup overhead in hot loop
+            safe_proj_dirname = RE_NON_WORD_HYPHEN.sub("_", proj_dirname)
+            safe_proj_dirname = RE_MULTI_UNDERSCORE.sub(
+                "_", safe_proj_dirname
+            ).strip("_")
+
+            base_safe_name = safe_proj_dirname
+            if base_safe_name in generated_report_basenames:
+                candidate = f"{base_safe_name}-{tech}"
+                if candidate in generated_report_basenames:
+                    counter = 2
+                    while f"{candidate}-{counter}" in generated_report_basenames:
+                        counter += 1
+                    safe_proj_dirname = f"{candidate}-{counter}"
                 else:
-                    proj_dirname = rel_path
+                    safe_proj_dirname = candidate
 
-                proj_dirname = proj_dirname.replace("/", "_").replace("\\", "_")
-                # Optimization: Use global compiled regexes to avoid cache lookup overhead in hot loop
-                safe_proj_dirname = RE_NON_WORD_HYPHEN.sub("_", proj_dirname)
-                safe_proj_dirname = RE_MULTI_UNDERSCORE.sub(
-                    "_", safe_proj_dirname
-                ).strip("_")
+            generated_report_basenames.add(safe_proj_dirname)
 
-                base_safe_name = safe_proj_dirname
-                if base_safe_name in generated_report_basenames:
-                    candidate = f"{base_safe_name}-{tech}"
-                    if candidate in generated_report_basenames:
-                        counter = 2
-                        while f"{candidate}-{counter}" in generated_report_basenames:
-                            counter += 1
-                        safe_proj_dirname = f"{candidate}-{counter}"
-                    else:
-                        safe_proj_dirname = candidate
+            if args.format in {"html", "both"}:
+                proj_html_filepath = f"report-{safe_proj_dirname}.html"
+                export_html_report(results, pkg_data, proj_html_filepath, args.vuls)
 
-                generated_report_basenames.add(safe_proj_dirname)
+            if args.format in {"json", "both"}:
+                proj_json_filepath = f"report-{safe_proj_dirname}.json"
+                export_json_report(results, proj_json_filepath)
 
-                if args.format in {"html", "both"}:
-                    proj_html_filepath = f"report-{safe_proj_dirname}.html"
-                    export_html_report(results, pkg_data, proj_html_filepath, args.vuls)
+            if args.format == "sarif":
+                run_obj = generate_sarif_run(results)
+                sarif_runs.append(run_obj)
 
-                if args.format in {"json", "both"}:
-                    proj_json_filepath = f"report-{safe_proj_dirname}.json"
-                    export_json_report(results, proj_json_filepath)
+            combined_results.extend(results)
 
-                if args.format == "sarif":
-                    run_obj = generate_sarif_run(results)
-                    sarif_runs.append(run_obj)
+            if pkg_data:
+                combined_dependencies.update(pkg_data.get("dependencies", {}))
+                combined_devDependencies.update(pkg_data.get("devDependencies", {}))
+                combined_all_direct.update(pkg_data.get("all_direct", {}))
+        except Exception as e:
+            print(
+                f"{COLOR_RED}{ICON_ERROR} Error scanning project {project_path} with {tech}: {e}{COLOR_RESET}"
+            )
 
-                combined_results.extend(results)
-                total_elapsed += elapsed
-
-                if pkg_data:
-                    combined_dependencies.update(pkg_data.get("dependencies", {}))
-                    combined_devDependencies.update(pkg_data.get("devDependencies", {}))
-                    combined_all_direct.update(pkg_data.get("all_direct", {}))
-            except Exception as e:
-                print(
-                    f"{COLOR_RED}{ICON_ERROR} Error scanning project {project_path} with {tech}: {e}{COLOR_RESET}"
-                )
-            finally:
-                args.path = original_path
-                args.tech = original_tech
+    total_elapsed = time.time() - scan_all_start
 
     if not combined_results:
         print(
@@ -14426,7 +14847,14 @@ def run_scan_all(args, parser):
         )
         sys.exit(0)
 
-    combined_results = sorted(combined_results, key=lambda x: x["name"].lower())
+    combined_results = sorted(
+        combined_results,
+        key=lambda x: (
+            x["name"].lower(),
+            str(x.get("installed") or ""),
+            str(x.get("project_path") or ""),
+        ),
+    )
 
     print()
     print("=" * 80)
@@ -14471,27 +14899,70 @@ def run_auto_tech(args):
         f"{COLOR_GRAY}{ICON_INFO} Automatically detected technology: {', '.join(detected_techs)}{COLOR_RESET}"
     )
 
+    valid_techs = [t for t in detected_techs if t in TECHNOLOGIES]
+    user_concurrent = max(1, getattr(args, "concurrent", 10))
+    tech_workers = (
+        min(4, len(valid_techs), user_concurrent)
+        if (len(valid_techs) > 1 and user_concurrent > 1)
+        else 1
+    )
+
     combined_results = []
     combined_dependencies = {}
     combined_devDependencies = {}
     combined_all_direct = {}
-    total_elapsed = 0.0
 
-    original_tech = args.tech
-    try:
-        for tech in detected_techs:
-            tech_info = TECHNOLOGIES.get(tech)
-            if not tech_info:
+    auto_start = time.time()
+
+    if tech_workers > 1:
+        def _run_single_tech(idx_tech):
+            idx, tech = idx_tech
+            task_args = _clone_args_for_task(args, tech=tech)
+            results_tech, pkg_data_tech, elapsed_tech = TECHNOLOGIES[tech]["runner"](
+                task_args
+            )
+            return idx, tech, results_tech, pkg_data_tech, elapsed_tech
+
+        ordered_tech_outcomes = [None] * len(valid_techs)
+        with _parallel_scan_scope():
+            with ThreadPoolExecutor(max_workers=tech_workers) as executor:
+                futs = [
+                    executor.submit(_run_single_tech, (idx, tech))
+                    for idx, tech in enumerate(valid_techs)
+                ]
+                for fut in as_completed(futs):
+                    idx, tech, res_t, pkg_t, el_t = fut.result()
+                    ordered_tech_outcomes[idx] = (tech, res_t, pkg_t, el_t)
+
+        for item in ordered_tech_outcomes:
+            if not item:
                 continue
-
-            if len(detected_techs) > 1:
+            tech, results_tech, pkg_data_tech, _elapsed_tech = item
+            if not results_tech:
+                continue
+            for r in results_tech:
+                r["project_path"] = args.path
+                r["technology"] = tech
+            combined_results.extend(results_tech)
+            if pkg_data_tech:
+                combined_dependencies.update(pkg_data_tech.get("dependencies", {}))
+                combined_devDependencies.update(
+                    pkg_data_tech.get("devDependencies", {})
+                )
+                combined_all_direct.update(pkg_data_tech.get("all_direct", {}))
+        total_elapsed = time.time() - auto_start
+    else:
+        total_elapsed = 0.0
+        for tech in valid_techs:
+            tech_info = TECHNOLOGIES[tech]
+            if len(valid_techs) > 1:
                 print()
                 print("-" * 50)
                 print(f"Running check for: {tech}")
                 print("-" * 50)
 
-            args.tech = tech
-            results_tech, pkg_data_tech, elapsed_tech = tech_info["runner"](args)
+            task_args = _clone_args_for_task(args, tech=tech)
+            results_tech, pkg_data_tech, elapsed_tech = tech_info["runner"](task_args)
 
             if not results_tech:
                 continue
@@ -14509,8 +14980,6 @@ def run_auto_tech(args):
                     pkg_data_tech.get("devDependencies", {})
                 )
                 combined_all_direct.update(pkg_data_tech.get("all_direct", {}))
-    finally:
-        args.tech = original_tech
 
     combined_pkg_data = {
         "dependencies": combined_dependencies,
@@ -14534,7 +15003,14 @@ def process_single_project_results(results, pkg_data, elapsed, args):
     populate_remediation_recommendations(results, args.path)
     validate_configuration_drift(results)
     apply_vulnerability_suppressions(results, args.suppress, project_path=args.path)
-    results = sorted(results, key=lambda x: x["name"].lower())
+    results = sorted(
+        results,
+        key=lambda x: (
+            x["name"].lower(),
+            str(x.get("installed") or ""),
+            str(x.get("project_path") or ""),
+        ),
+    )
 
     print_results_table(
         results,

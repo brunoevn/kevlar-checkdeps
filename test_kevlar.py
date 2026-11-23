@@ -5571,6 +5571,224 @@ require (
         with self.assertRaises(ValueError):
             kevlar.parse_secure_xml(b'<!DOCTYPE foo [<!ENTITY x "y">]><foo/>')
 
+    def test_singleflight_coalesces_concurrent_fetches(self):
+        """Test Phase 4 _SingleFlight coalesces concurrent in-flight fetches into a single call and never poisons on error."""
+        import threading
+        import time
+        from concurrent.futures import ThreadPoolExecutor
+
+        call_count = {"n": 0}
+        count_lock = threading.Lock()
+        barrier = threading.Barrier(8, timeout=3.0)
+
+        def slow_fetch():
+            time.sleep(0.05)
+            with count_lock:
+                call_count["n"] += 1
+            return ("2.0.0", ("1.0.0", "2.0.0"))
+
+        def worker(_):
+            barrier.wait()
+            return kevlar._get_or_fetch_registry_metadata("npm", "shared-sf-pkg", slow_fetch)
+
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            results = list(ex.map(worker, range(8)))
+
+        self.assertEqual(call_count["n"], 1)
+        self.assertTrue(all(r == ("2.0.0", ("1.0.0", "2.0.0")) for r in results))
+
+        # Error must propagate without poisoning subsequent attempts
+        fail_calls = {"n": 0}
+
+        def failing_then_ok():
+            fail_calls["n"] += 1
+            if fail_calls["n"] == 1:
+                raise RuntimeError("transient error")
+            return ("ok",)
+
+        with self.assertRaises(RuntimeError):
+            kevlar._get_or_fetch_registry_metadata("npm", "flaky-sf-pkg", failing_then_ok)
+        self.assertEqual(
+            kevlar._get_or_fetch_registry_metadata("npm", "flaky-sf-pkg", failing_then_ok),
+            ("ok",),
+        )
+
+    def test_domain_semaphore_caps_concurrency_per_host(self):
+        """Test Phase 4 per-host domain semaphore deduplicates case-insensitively and isolates distinct hosts."""
+        sem1 = kevlar._get_domain_semaphore("Registry.NPMJS.org")
+        sem2 = kevlar._get_domain_semaphore("registry.npmjs.org")
+        sem_other = kevlar._get_domain_semaphore("pypi.org")
+        self.assertIs(sem1, sem2)
+        self.assertIsNot(sem1, sem_other)
+
+    def test_run_registry_and_osv_parallel_overlaps_io(self):
+        """Test Phase 4 _run_registry_and_osv_parallel truly overlaps registry, OSV, and extra network tasks."""
+        import threading
+
+        barrier = threading.Barrier(3, timeout=2.0)
+
+        def fake_registry():
+            barrier.wait()
+            return [{"name": "pkg-a", "installed": "1.0.0"}]
+
+        def fake_osv(targets, eco, mw):
+            barrier.wait()
+            return {("pkg-a", "1.0.0"): [{"id": "GHSA-overlap"}]}
+
+        def fake_extra():
+            barrier.wait()
+            return ("up-to-date", None, None, "22.x")
+
+        with patch("kevlar.check_osv_vulnerabilities", side_effect=fake_osv):
+            res, osv, extra = kevlar._run_registry_and_osv_parallel(
+                fake_registry,
+                [{"name": "pkg-a", "declared": "1.0.0", "installed": ["1.0.0"]}],
+                "npm",
+                4,
+                True,
+                extra_tasks={"node": fake_extra},
+            )
+
+        self.assertEqual(res[0]["name"], "pkg-a")
+        self.assertIn(("pkg-a", "1.0.0"), osv)
+        self.assertEqual(extra["node"][0], "up-to-date")
+
+    def test_check_osv_vulnerabilities_parallel_chunks_preserve_order(self):
+        """Test Phase 4 parallel OSV chunking preserves exact result index alignment despite out-of-order completion."""
+        import json
+        import time
+        from unittest.mock import MagicMock
+
+        targets = [
+            {"name": f"pkg-{i:04d}", "declared": "1.0.0", "installed": ["1.0.0"]}
+            for i in range(2200)
+        ]
+
+        def fake_osv_urlopen(req, timeout=15):
+            qs = json.loads(req.data.decode("utf-8"))["queries"]
+            first_name = qs[0]["package"]["name"]
+            # Delay first chunk so chunk 2 completes before chunk 0
+            if first_name == "pkg-0000":
+                time.sleep(0.05)
+            out = []
+            for q in qs:
+                pname = q["package"]["name"]
+                out.append({
+                    "vulns": [{
+                        "id": f"GHSA-{pname}",
+                        "summary": f"Advisory for {pname}",
+                        "severity": [{"type": "CVSS_V3", "score": "7.5"}],
+                    }]
+                })
+            m = MagicMock()
+            m.read.return_value = json.dumps({"results": out}).encode("utf-8")
+            m.__enter__.return_value = m
+            return m
+
+        with patch("kevlar.safe_urlopen", side_effect=fake_osv_urlopen):
+            vulns_map = kevlar.check_osv_vulnerabilities(targets, "npm", max_workers=4)
+
+        self.assertEqual(len(vulns_map), 2200)
+        for idx in (0, 500, 999, 1000, 1500, 2199):
+            pname = f"pkg-{idx:04d}"
+            self.assertEqual(vulns_map[(pname, "1.0.0")][0]["id"], f"GHSA-{pname}")
+
+    def test_run_scan_all_and_auto_tech_parallel_deterministic_order(self):
+        """Test Phase 4 parallel run_scan_all & run_auto_tech preserve deterministic order and never mutate args."""
+        import argparse
+        import json
+        import shutil
+        import tempfile
+        import time
+
+        tmpdir = tempfile.mkdtemp()
+        work_cwd = tempfile.mkdtemp()
+        orig_cwd = os.getcwd()
+        orig_runners = {k: v["runner"] for k, v in kevlar.TECHNOLOGIES.items()}
+        try:
+            proj_a = os.path.join(tmpdir, "01_alpha")
+            proj_b = os.path.join(tmpdir, "02_beta")
+            proj_c = os.path.join(tmpdir, "03_gamma")
+            os.makedirs(proj_a)
+            os.makedirs(proj_b)
+            os.makedirs(proj_c)
+            with open(os.path.join(proj_a, "package.json"), "w", encoding="utf-8") as f:
+                f.write('{"name": "alpha", "dependencies": {"pkg-alpha": "1.0.0"}}')
+            with open(os.path.join(proj_b, "requirements.txt"), "w", encoding="utf-8") as f:
+                f.write("pkg-beta==1.0.0\n")
+            with open(os.path.join(proj_c, "Cargo.toml"), "w", encoding="utf-8") as f:
+                f.write('[package]\nname = "gamma"\n[dependencies]\npkg-gamma = "1.0.0"\n')
+
+            def make_runner(pkg_name, delay):
+                def _runner(task_args):
+                    time.sleep(delay)
+                    return (
+                        [{
+                            "name": pkg_name,
+                            "declared": "1.0.0",
+                            "installed": "1.0.0",
+                            "latest": "2.0.0",
+                            "latest_same_major": "1.0.0",
+                            "latest_absolute": "2.0.0",
+                            "status": "major",
+                            "deprecated": None,
+                            "error": None,
+                            "dep_type": "Direct",
+                            "required_by": [],
+                            "vulnerabilities": [],
+                        }],
+                        {"dependencies": {pkg_name: "1.0.0"}, "devDependencies": {}, "all_direct": {pkg_name: "1.0.0"}},
+                        delay,
+                    )
+                return _runner
+
+            # Alpha is slowest, gamma finishes fastest — final SARIF order must still be alpha -> beta -> gamma
+            kevlar.TECHNOLOGIES["npm"]["runner"] = make_runner("pkg-alpha", 0.06)
+            kevlar.TECHNOLOGIES["pip"]["runner"] = make_runner("pkg-beta", 0.03)
+            kevlar.TECHNOLOGIES["rust"]["runner"] = make_runner("pkg-gamma", 0.005)
+
+            os.chdir(work_cwd)
+            parser = kevlar.setup_argparse()
+            args = parser.parse_args(["--scan-all", "--path", tmpdir, "--format", "sarif", "--no-show-console", "--concurrent", "6"])
+            with self.assertRaises(SystemExit) as cm:
+                kevlar.run_scan_all(args, parser)
+            self.assertEqual(cm.exception.code, 0)
+
+            # Shared args were never mutated
+            self.assertEqual(args.path, tmpdir)
+            self.assertIsNone(args.tech)
+
+            sarif_path = os.path.join(work_cwd, "report-consolidated.sarif")
+            self.assertTrue(os.path.exists(sarif_path))
+            with open(sarif_path, "r", encoding="utf-8") as f:
+                sarif = json.load(f)
+            self.assertEqual(len(sarif["runs"]), 3)
+            run_pkgs = [
+                run["results"][0]["message"]["text"] for run in sarif["runs"]
+            ]
+            self.assertIn("pkg-alpha", run_pkgs[0])
+            self.assertIn("pkg-beta", run_pkgs[1])
+            self.assertIn("pkg-gamma", run_pkgs[2])
+
+            # Test parallel run_auto_tech on hybrid directory (npm + pip)
+            hybrid_dir = os.path.join(tmpdir, "hybrid")
+            os.makedirs(hybrid_dir)
+            with open(os.path.join(hybrid_dir, "package.json"), "w", encoding="utf-8") as f:
+                f.write('{"name": "hybrid"}')
+            with open(os.path.join(hybrid_dir, "requirements.txt"), "w", encoding="utf-8") as f:
+                f.write("pkg-beta==1.0.0\n")
+
+            auto_args = argparse.Namespace(path=hybrid_dir, tech="auto", concurrent=4, all=False, vuls=False)
+            auto_res, _auto_pkg, _auto_el = kevlar.run_auto_tech(auto_args)
+            self.assertEqual(auto_args.tech, "auto")
+            self.assertEqual([r["name"] for r in auto_res], ["pkg-alpha", "pkg-beta"])
+        finally:
+            os.chdir(orig_cwd)
+            for k, r in orig_runners.items():
+                kevlar.TECHNOLOGIES[k]["runner"] = r
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            shutil.rmtree(work_cwd, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()
