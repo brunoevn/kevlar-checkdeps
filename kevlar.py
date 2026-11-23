@@ -11793,6 +11793,7 @@ def find_manifest_files(project_path, technology):
     while stack:
         curr_dir = stack.pop()
         subdirs = []
+        local_manifests = []
         try:
             with os.scandir(curr_dir) as it:
                 for entry in it:
@@ -11805,12 +11806,16 @@ def find_manifest_files(project_path, technology):
                             if name in exact_names or (
                                 suffixes and name.lower().endswith(suffixes)
                             ):
-                                manifest_files.append(entry.path)
+                                local_manifests.append(entry.path)
                     except OSError:
                         continue
         except OSError:
             continue
+        if local_manifests:
+            local_manifests.sort()
+            manifest_files.extend(local_manifests)
         if subdirs:
+            subdirs.sort()
             stack.extend(reversed(subdirs))
 
     if technology == "nuget":
@@ -14747,6 +14752,7 @@ def find_projects_recursively(base_path):
             projects.append((curr_dir, detected))
 
         if subdirs:
+            subdirs.sort()
             stack.extend(reversed(subdirs))
 
     return projects
